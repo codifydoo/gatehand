@@ -41,7 +41,7 @@
 #
 # Usage: agent-merge.sh run [<pr>]   every open agent PR, or the one named
 # Env:   GH_TOKEN, GH_REPO, AGENTS_ENABLED, AGENT_AUTO_MERGE, AGENT_BOT_EMAIL;
-#        AGENT_MERGE_NO_MAIN=1 loads the functions only (tests/workflows/agents-merge.test.sh).
+#        AGENT_MERGE_NO_MAIN=1 loads the functions only (repo-agents' tests/workflows/agents-merge.test.sh).
 #
 # Every check reads the live state, so a run that starts late, or twice, decides the same, and a PR
 # checked after another merged in the same run sees the new main. Runs share one concurrency group,

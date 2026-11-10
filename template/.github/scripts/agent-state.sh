@@ -17,7 +17,7 @@
 #                                      RUN_URL, FINAL_DIR (summary.md, blocked.md), METRICS_FILE
 #
 # Env: AGENTS_ENABLED (the repo variable), AGENT_BOT_ID (the App's bot user id), AGENT_STATE_NO_MAIN=1
-#      to load the functions only (tests/workflows/agents-state.test.sh).
+#      to load the functions only (repo-agents' tests/workflows/agents-state.test.sh).
 #
 # Backticks and `$` in the single-quoted printf formats and jq programs below are literal markdown
 # and jq, never meant to expand, so SC2016 is silenced file-wide.

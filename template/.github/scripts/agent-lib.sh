@@ -4,7 +4,7 @@
 #
 # The agents' design (.github/agents/README.md, "Security model") rests on one rule: the model
 # only writes files, and plain shell like this decides what reaches GitHub. So everything here is
-# deterministic and testable without a model or the network: tests/workflows/agents-*.test.sh
+# deterministic and testable without a model or the network: repo-agents' tests/workflows/agents-*.test.sh
 # source this file and drive it against a stub `gh` and throwaway git repos.
 #
 # Requires bash 4+, git, jq, and `gh` for the functions that talk to GitHub. The runner image has
@@ -586,7 +586,7 @@ inbox_tick_line() {
 # a forged one must not be able to carry markup (a marker) into it.
 # NEVER here: `drop sudo` (a security failure must step the breaker), `prepare the work branch`,
 # and for the fixer `project dependencies`, which runs the PR head's code (install scripts).
-# tests/workflows/agents-workflows.test.sh keeps these equal to the workflows' own steps.
+# repo-agents' tests/workflows/agents-workflows.test.sh keeps these equal to the workflows' own steps.
 # shellcheck disable=SC2034 # read by agent-state.sh and agent-fixup.sh, which source this file
 CODER_PRE_AGENT_STEPS=(
   'Set up job' 'Run actions/checkout@[A-Za-z0-9._-]+' 'agent directory' 'project system packages' 'project toolchain'

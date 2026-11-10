@@ -34,7 +34,7 @@
 #
 # Usage: agent-sweep.sh run | locks | fixes | prs | breaker
 # Env:   GH_TOKEN, GH_REPO, AGENT_BOT_EMAIL, AGENT_INBOX_ISSUE, AGENT_OWNER_LOGIN;
-#        AGENT_SWEEP_NO_MAIN=1 loads the functions only (tests/workflows/agents-sweep.test.sh).
+#        AGENT_SWEEP_NO_MAIN=1 loads the functions only (repo-agents' tests/workflows/agents-sweep.test.sh).
 #
 # Backticks in the single-quoted printf formats are literal markdown.
 # shellcheck disable=SC2016
