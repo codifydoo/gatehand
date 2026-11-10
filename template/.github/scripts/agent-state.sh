@@ -17,7 +17,7 @@
 #                                      RUN_URL, FINAL_DIR (summary.md, blocked.md), METRICS_FILE
 #
 # Env: AGENTS_ENABLED (the repo variable), AGENT_BOT_ID (the App's bot user id), AGENT_STATE_NO_MAIN=1
-#      to load the functions only (tests/workflows/agents-state.test.sh).
+#      to load the functions only (repo-agents' tests/workflows/agents-state.test.sh).
 #
 # Backticks and `$` in the single-quoted printf formats and jq programs below are literal markdown
 # and jq, never meant to expand, so SC2016 is silenced file-wide.
@@ -252,13 +252,24 @@ named_anchor() {
 #
 # Or the issue was fast-tracked by triage (triage_fast_tracked): then the bot applied the label, and
 # what vouches for the text is that a writer wrote it and only writers changed it since.
+#
+# Or the repo's own rule vouches for it: agent_hook_labeler_trusted <issue>, when
+# .github/agents/hooks/lib.sh defines it, for issues the repo's own workflows file and queue as the
+# bot. It is asked only when NO person ever applied agent:ready (a label by someone without write
+# access never reaches it), after a first readable timeline; a later read inside triage's check can
+# still fail before it is asked, so the hook checks the content itself. It must exit 0 only when it can vouch for
+# the issue's CURRENT title and body (content_untouched_since is here for that), since its text
+# becomes an agent PR. The coder's follow-ups (`<!-- agent-followup:` marker) are bot-filed too,
+# with model-written text: a hook must never vouch for those.
 labeler_trusted() {
   local issue="$1" anchor
   anchor="$(person_label_at "${issue}")" || return 1
   if [[ -n "${anchor}" ]] && actor_trusted "${anchor%%|*}" && content_untouched_since "${issue}" "${anchor#*|}"; then
     return 0
   fi
-  triage_fast_tracked "${issue}"
+  triage_fast_tracked "${issue}" && return 0
+  [[ -z "${anchor}" ]] && declare -F agent_hook_labeler_trusted >/dev/null \
+    && agent_hook_labeler_trusted "${issue}" </dev/null
 }
 
 # triage_fast_tracked <issue>: exit 0 when the bot's triage put its `<!-- agent-triage:fast-track -->`
@@ -567,9 +578,10 @@ review_attribution() {
 # first non-empty line under the LAST Verdict heading (a finding may quote an earlier one), with
 # fenced code blocks and HTML comments skipped: a review that quotes the template AFTER its verdict
 # would otherwise have the quote win, and a comment could hide a second heading. The
-# heading is `### Verdict` or `<h3>Verdict</h3>`, alone on its line: on 2026-11-07 one review in
-# eight wrote its headings as HTML, an Approve read as unknown, and the gate stranded the PR (one
-# review per head). Only plain wrapper tags (p, b, i, em, strong) are dropped from the verdict line,
+# heading is `### Verdict`, `<h3>Verdict</h3>`, `**Verdict**` or `__Verdict__`, alone on its line:
+# on 2026-11-07 one review in eight wrote its headings as HTML, an Approve read as unknown, and the
+# gate stranded the PR (one review per head); on 2026-11-09 a review wrote them in bold, with the
+# same result. Only plain wrapper tags (p, b, i, em, strong) are dropped from the verdict line,
 # and a line of them alone is skipped: any other tag can change what a reader sees (<s>Approve</s>,
 # <del>, a comment or <details> that hides the line), so it stays literal and the verdict unknown.
 # The line must be the verdict alone, give or take emphasis and punctuation: /verify-pr's template
@@ -588,8 +600,35 @@ review_verdict() {
   # A line that reads as a Verdict heading only once a comment is stripped makes the whole verdict
   # unknown: `<!-- x -->### Verdict` is raw HTML that renders as text, while `### Verdict <!-- x -->`
   # is a real heading, and telling them apart is not worth a wrong approve.
-  line="$(awk '
-    { l = $0
+  # A bold `**Verdict**` is no heading but paragraph text, so unlike ### or <h3> it cannot break out
+  # of what the line above opened (an inline comment, a code span, ~~strikethrough~~, a quote or list
+  # item by lazy continuation), and its Approve could render hidden or quoted. So it counts only at
+  # the start of a paragraph: the first line, or right after a raw blank line (wb).
+  # A lone CR (one not followed by LF) ends a line for CommonMark but not for awk, so every
+  # line-start rule here (headings, fences, the blocks below) could read lines differently from
+  # GitHub: any lone CR, anywhere, makes the verdict unknown. Reviews never contain one.
+  # A processing instruction (`<?`), a declaration (`<!X`) or CDATA (`<![CDATA[`) at the start of a
+  # line (after indentation, `>` or a list marker) opens a raw HTML block that runs across blank
+  # lines too. Mid-line they are inline HTML, which a blank line ends, so a review that mentions
+  # `<?php` or `<?xml` in its text still has a verdict; one on a line of its own (fenced or not)
+  # does not.
+  # A <details>, <pre>, <script>, <style> or <textarea> tag can put what follows it out of a
+  # reader's sight (collapsed, hidden or quoted) across blank lines, and where it ends depends on
+  # HTML parsing no regex reproduces. So it fails closed: any of them in the raw text
+  # before the verdict line (above the heading or between it and the line) makes the whole verdict
+  # unknown, whatever surrounds the tag (a fence, a comment, even backticks) and whether or not it
+  # is closed. A NUL would end an awk record early, so it becomes ? first, as CommonMark replaces
+  # it too, byte-wise (macOS tr in a UTF-8 locale drops all input after an invalid byte). Every
+  # attempt to let a tag through where it looked quoted (counting closers, skipping blocks,
+  # stripping code spans) was beaten in review by CommonMark the regexes did not reproduce.
+  # The cost: a review that only names one of the tags before its verdict strands its PR; 2 of 449
+  # reviews from 2026-08 to 2026-11 did, both of PRs about this parser.
+  line="$(LC_ALL=C tr '\000' '?' | awk '
+    function hides(s,  t) { t = tolower(s)
+      return t ~ /<(details|pre|script|style|textarea)([^a-z0-9-]|$)/ ||
+        t ~ /^([[:space:]>]|[-*+][[:space:]]|[0-9]+[.)][[:space:]])*<(\?|!\[cdata\[|![a-z])/ }
+    { if ($0 ~ /\r./) ambiguous = 1
+      wb = pb; pb = ($0 ~ /^[[:space:]]*$/); if (hides($0)) seen = 1; l = $0
       if (comment) { e = index(l, "-->"); if (!e) next; l = substr(l, e + 3); comment = 0 }
       else if (fence) {
         if (match(l, /^ ? ? ?(```+|~~~+)[[:space:]]*$/)) { t = l; sub(/^ */, "", t); sub(/[[:space:]]*$/, "", t)
@@ -605,8 +644,9 @@ review_verdict() {
         first = 0 }
       if (l ~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*$/) next
       stripped = (l != $0); $0 = l }
-    /^###[[:space:]]+Verdict[[:space:]]*$/ || /^<[hH]3>[[:space:]]*Verdict[[:space:]]*<\/[hH]3>[[:space:]]*$/ { if (stripped) ambiguous = 1; on = 1; v = ""; next }
-    on { l = $0; gsub(/<\/?([pP]|[bB]|[iI]|[eE][mM]|[sS][tT][rR][oO][nN][gG])>/, "", l); if (l ~ /^[[:space:]]*$/) next; v = l; on = 0 }
+    /^###[[:space:]]+Verdict[[:space:]]*$/ || /^<[hH]3>[[:space:]]*Verdict[[:space:]]*<\/[hH]3>[[:space:]]*$/ ||
+    ((NR == 1 || wb) && (/^[*][*]Verdict[*][*][[:space:]]*$/ || /^__Verdict__[[:space:]]*$/)) { if (stripped || seen) ambiguous = 1; on = 1; v = ""; next }
+    on { if (seen) ambiguous = 1; l = $0; gsub(/<\/?([pP]|[bB]|[iI]|[eE][mM]|[sS][tT][rR][oO][nN][gG])>/, "", l); if (l ~ /^[[:space:]]*$/) next; v = l; on = 0 }
     END { if (!fence && !comment && !ambiguous) print v }' | tr -d '*_`' | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+//')"
   if [[ "${line}" =~ ${approve} ]]; then
     echo approve

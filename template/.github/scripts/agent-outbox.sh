@@ -169,6 +169,60 @@ finish() {
   agent_log "outcome: $1${2:+ ($2)}"
 }
 
+# file_followups <outbox> <issue> <pr>: the things the coder noticed but left alone, from
+# followups.json ([{title, body}]), filed as issues labelled agent:candidate: a person decides
+# whether an agent takes one (agent-digest.sh lists them every week). At most
+# roles.coder.maxFollowups per run; a title of 10 to 90 characters; a body of at least 40 with an
+# acceptance section (the pick skips an issue without one, agent-state.sh `acceptance`, so an
+# approved follow-up would never run); none with the title of an open issue. Both are sanitised like
+# the PR body (no live mention, no marker), and an email-style `x@claude` is broken too, since
+# Claude's GitHub workflow (claude.yml in many repos) starts on any `@claude` in a new issue. Best effort: a bad file or a failed call files
+# nothing more and never changes the run's outcome, which is written before this runs.
+file_followups() {
+  local f="$1/followups.json" issue="$2" pr="$3" max n=0 row title len body open seen="" tmp url
+  [[ -s "${f}" ]] || return 0
+  max="$(policy '.roles.coder.maxFollowups // 0')"
+  [[ "${max}" =~ ^[0-9]+$ ]] && (( max > 0 )) || return 0
+  jq -e 'type == "array"' "${f}" >/dev/null 2>&1 || { agent_log "followups.json is not a list; no follow-up filed"; return 0; }
+  open="$(gh issue list --state open --limit 500 --json title --jq '.[].title')" \
+    || { agent_log "could not list open issues; no follow-up filed"; return 0; }
+  open="$(tr '[:upper:]' '[:lower:]' <<<"${open}")"
+  tmp="$(mktemp)"
+  while IFS= read -r row; do
+    (( n >= max )) && break
+    title="$(jq -r '.title // "" | tostring' <<<"${row}" | agent_oneline 400 | sed -E 's/^[[:space:]]+|[[:space:]]+$//g; s/@([Cc][Ll][Aa][Uu][Dd][Ee])/@-\1/g')"
+    # Characters, not bytes: 90 of them fit in 400 bytes, so the byte cut above only ever shortens a
+    # title that is refused here anyway, and never splits a character of one that is filed.
+    len="$(jq -rn --arg t "${title}" '$t | length')"
+    if (( len < 10 || len > 90 )); then agent_log "follow-up skipped: title not 10 to 90 characters"; continue; fi
+    if grep -Fxq -- "$(tr '[:upper:]' '[:lower:]' <<<"${title}")" <<<"${open}${seen}"; then
+      agent_log "follow-up skipped: an open issue has the title '${title}'"
+      continue
+    fi
+    body="$(jq -r '.body // "" | tostring' <<<"${row}" | agent_cap 3000 | agent_sanitize | sed -E 's/@([Cc][Ll][Aa][Uu][Dd][Ee])/@-\1/g')"
+    if (( ${#body} < 40 )); then agent_log "follow-up skipped: '${title}' has no body"; continue; fi
+    if ! grep -Eiq '^#{2,3} +(recommendation|done when|acceptance( criteria)?|suggested fix|expected( behaviou?r)?)([^[:alnum:]_]|$)|^\*\*(done when|acceptance)' <<<"${body}"; then
+      agent_log "follow-up skipped: '${title}' has no ### Done when section"
+      continue
+    fi
+    {
+      printf '%s\n\n---\n' "${body}"
+      printf '<sub>Noticed by the coder agent while working on #%s (PR #%s) and left alone. ' "${issue}" "${pr}"
+      printf 'A candidate: add `agent:ready` if an agent should take it, or close it.</sub>\n'
+      printf '<!-- agent-followup:issue=%s pr=%s -->\n' "${issue}" "${pr}"
+    } >"${tmp}"
+    if url="$(gh issue create --title "${title}" --body-file "${tmp}" --label agent:candidate </dev/null)"; then
+      agent_log "follow-up filed: ${url}"
+      n=$((n + 1))
+      seen+=$'\n'"$(tr '[:upper:]' '[:lower:]' <<<"${title}")"
+    else
+      agent_log "follow-up '${title}' could not be filed"
+    fi
+  done < <(jq -c '.[] | select(type == "object")' "${f}" | head -n 20)
+  rm -f "${tmp}"
+  output followups "${n}"
+}
+
 cmd_publish() {
   local outbox="${OUTBOX:?}" final="${FINAL_DIR:?}" issue="${ISSUE:?}" base head labels allow url branch
   local body title max_body labels_csv err
@@ -273,6 +327,7 @@ cmd_publish() {
   output pr_number "${url##*/}"
   output branch "${branch}"
   finish pr-opened ""
+  file_followups "${outbox}" "${issue}" "${url##*/}"
 }
 
 cmd_publish_fix() {

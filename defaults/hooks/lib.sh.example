@@ -18,3 +18,14 @@
 
 # agent_hook_digest_sections: print extra weekly digest sections (markdown, `### ` headings).
 # Exit 1 when part of it could not be read; the rest of the digest still posts.
+
+# agent_hook_digest_done_pending <issue> <title> <pr or empty> <issue-json>: one line replacing the
+# digest's default for an agent:done-pending-deploy issue, when you know whether its merge is live
+# (a deploy record, say). <issue-json> has number, title and comments. No output keeps the default.
+
+# agent_hook_labeler_trusted <issue>: vouch for an agent:ready issue no person labelled, such as one
+# your own workflow filed and queued as the bot. Exit 0 only when you can vouch for its CURRENT title
+# and body: the text becomes an agent PR. content_untouched_since <issue> <iso> (agent-state.sh)
+# checks that nobody without write access changed it since <iso>. Match your own workflow's issues
+# exactly (a marker it writes, a label it sets at creation): the coder's follow-ups are bot-filed
+# too, with model-written text, and must never pass.

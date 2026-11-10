@@ -34,9 +34,13 @@ file on update. Your settings live next to it: `policy.json`, `protected-paths.t
    commits from a git bundle, validates them (`agent-outbox.sh`: commit shape, bot authorship, no
    closing keywords, `Refs #N`, size caps, protected paths), pushes `<type>/agent-<slug>` and opens
    the PR. Then labels, an issue comment, an inbox request if needed, a ledger row, the breaker.
+   Last, what the coder noticed but left alone (`followups.json`, at most `roles.coder.maxFollowups`,
+   each with a `### Done when` section) is filed as `agent:candidate` issues for you to queue or
+   close; the digest lists them.
 
 The PR then goes through your CI and the Claude review like any other. The fixer and the merge gate
-take it from there.
+take it from there. The fixer reads the failure or the review, the PR as the coder described it, and
+the issue itself when the run can still vouch for its text (the same snapshot rules as the coder).
 
 ## Security model
 
@@ -183,7 +187,9 @@ start; the inbox still works.
 - **Setup:** `system/action.yml` (sudo, fixed packages only), `toolchain/action.yml`,
   `dependencies/action.yml`.
 - **Behaviour the package does not have:** `hooks/lib.sh` (see `hooks/lib.sh.example`): extra
-  guard rules, inbox request kinds for your own workflows, extra digest sections.
+  guard rules, inbox request kinds for your own workflows, extra digest sections, your own line for
+  a merged issue waiting to go live, and a rule that vouches for issues your own workflows file
+  and queue as the bot.
 - **Never edit the rendered package files** (the workflows, `.github/scripts/agent-*.sh`, the
   commands): an update refuses to overwrite a hand-edited file, and the change belongs in one of the
   places above.

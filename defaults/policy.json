@@ -45,6 +45,7 @@
   },
   "roles": {
     "coder": {
+      "maxFollowups": 2,
       "model": "claude-opus-5-5",
       "maxTurns": 500,
       "timeoutMinutes": 45,

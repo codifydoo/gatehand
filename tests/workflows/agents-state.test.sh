@@ -216,6 +216,28 @@ expect "fast track: a non-writer's rename since it was opened is not" \
   "$(FT_VIEW="$(ft_view owner-login)" labeler_case "$(jq -s . <(ev renamed '' outsider 2026-11-05T09:00:00Z) <(ev labeled agent:ready 'repo-agent[bot]' "${T0}"))" read)" no
 expect "fast track: a writer's later edit is fine" \
   "$(FT_VIEW="$(ft_view owner-login)" labeler_case "${BOTLABEL}" read "${T1}|owner-login")" yes
+# The repo's own rule (agent_hook_labeler_trusted, .github/agents/hooks/lib.sh): asked only when no
+# writer's label and no fast track vouches, and its answer stands.
+agent_hook_labeler_trusted() { echo "hook asked for $1" >>"${TMP}/hook-calls"; [[ "${HOOK_VOUCH:-}" == yes ]]; }
+: >"${TMP}/hook-calls"
+expect "labeler hook: no hook answer, only the bot labelled it: not trusted" "$(labeler_case "${BOTLABEL}" read)" no
+expect "labeler hook: the hook vouches for an issue only the bot labelled" "$(HOOK_VOUCH=yes labeler_case "${BOTLABEL}" read)" yes
+expect "labeler hook: it was asked about that issue" "$(sort -u "${TMP}/hook-calls")" "hook asked for 8"
+: >"${TMP}/hook-calls"
+expect "labeler hook: a writer's own label never asks it" "$(labeler_case "$(by owner-login)" read)" yes
+expect "labeler hook: not asked when a writer's label vouches" "$(cat "${TMP}/hook-calls")" ""
+# A person without write access labelled it: the hook is never the way around that, so a bot-filed
+# issue (a coder follow-up) cannot be queued by a triage collaborator through a repo's rule.
+expect "labeler hook: a non-writer's label is not trusted even if the hook would vouch" \
+  "$(HOOK_VOUCH=yes labeler_case "$(by outsider)" triage)" no
+expect "labeler hook: ...and it was not asked" "$(cat "${TMP}/hook-calls")" ""
+# An unreadable timeline: no answer from the repo's rule either.
+stub_gh_reset_rules
+AGENT_TRUST_CACHE=()
+stub_gh_on 'api --paginate repos/o/r/issues/8/timeline*' '' 1 'HTTP 502'
+if HOOK_VOUCH=yes labeler_trusted 8 2>/dev/null; then t_fail "labeler hook: an unreadable timeline was trusted"; else t_pass "labeler hook: an unreadable timeline is not trusted"; fi
+expect "labeler hook: ...and it was not asked" "$(cat "${TMP}/hook-calls")" ""
+unset -f agent_hook_labeler_trusted
 expect "fast track: a read-only collaborator's later agent:ready does not undo it" \
   "$(FT_VIEW="$(ft_view owner-login)" labeler_case "$(jq -s . <(ev labeled agent:ready 'repo-agent[bot]' "${T0}") <(ev labeled agent:ready outsider "${T1}"))" read)" yes
 # end to end: the higher-priority issue was labelled by a read-only collaborator, so the next one wins

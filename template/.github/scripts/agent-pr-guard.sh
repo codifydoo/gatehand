@@ -43,7 +43,7 @@ guard_decide() {
   fi
   if declare -F agent_hook_pr_guard >/dev/null; then
     local out rc=0
-    out="$(agent_hook_pr_guard "${labels}" "${files}")" || rc=$?
+    out="$(agent_hook_pr_guard "${labels}" "${files}" </dev/null)" || rc=$?
     grep '^FAIL: ' <<<"${out}"
     # A hook that errors (an unset variable, a failed API call) has not said the PR is fine.
     [[ "${rc}" -eq 0 ]] || printf 'FAIL: the repo'"'"'s guard hook (agent_hook_pr_guard) failed with exit %s\n' "${rc}"

@@ -126,6 +126,14 @@ agent_hook_digest_sections() {
   printf '### Releases\n\n- v1.2 shipped; ask @someone <!-- agent-digest week=2026-W47 -->\n\n'
   return "${HOOK_RC:-0}"
 }
+# Its own line for a merged issue waiting to go live (#22 only); DONE_HOOK picks the behaviour.
+agent_hook_digest_done_pending() {
+  # A careless hook that reads stdin must not swallow the rest of the list.
+  if [[ "${DONE_HOOK:-}" == eat ]]; then cat >/dev/null; return 0; fi
+  [[ "$1" == 22 && -n "${DONE_HOOK:-}" ]] || return 0
+  if [[ "${DONE_HOOK}" == fail ]]; then printf -- '- half a line\n'; return 1; fi
+  printf -- '- #%s %s: live (#%s), check it and close it.\nsecond line\n' "$1" "$2" "$3"
+}
 EOF
 export AGENT_HOOKS_DIR="${TMP}/hooks"
 
@@ -266,6 +274,18 @@ has "a repo section that fails: the core sections still render" '### Queue' "${o
 out="$(AGENT_HOOKS_DIR="${TMP}/no-hooks" render)"
 expect "no hooks file: render exits 0" "$?" 0
 hasnt "no hooks file: no repo section" '### Releases' "${out}"
+
+setup
+out="$(DONE_HOOK=live render)"
+has "done-pending hook: its line replaces the default" '- #22 Waiting fix: live (#103), check it and close it.' "${out}"
+hasnt "done-pending hook: only its first line is kept" 'second line' "${out}"
+hasnt "done-pending hook: the default line for that issue is gone" '- #22 Waiting fix: #103 is merged.' "${out}"
+has "done-pending hook: no output keeps the default for the others" '- #24 No merge note: merged, but with no merge note.' "${out}"
+out="$(DONE_HOOK=eat render)"
+has "done-pending hook that reads stdin: the later issues are still listed" '- #27 App-form login: #107 is merged.' "${out}"
+out="$(DONE_HOOK=fail render)"
+has "done-pending hook that fails: the default line stays" '- #22 Waiting fix: #103 is merged. Close it once the fix is live.' "${out}"
+hasnt "done-pending hook that fails: what it printed is dropped" 'half a line' "${out}"
 
 # --- the window across a month boundary, and the flags off --------------------------------------------------
 

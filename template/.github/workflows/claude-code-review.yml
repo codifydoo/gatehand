@@ -42,7 +42,7 @@ jobs:
       # step's jq and again in the assert step — each pinned by its own test but never compared to
       # the other, so changing one and not the other left de-dup silently never firing while every
       # test stayed green. .claude/commands/verify-pr.md must emit this exact string;
-      # tests/commands/verify-pr.test.sh reads THIS line and checks the command against it.
+      # repo-agents' tests/commands/verify-pr.test.sh reads THIS line and checks the command against it.
       REVIEW_MARKER: '<!-- verify-pr-review -->'
       REVIEW_BOT: '@@REVIEW_BOT_LOGIN@@'
     # GitHub fires `opened` for DRAFT PRs too. Until now that case was caught inside the
@@ -142,7 +142,7 @@ jobs:
         #
         # This condition is duplicated on the assert step below and the two MUST stay identical —
         # gating the review but not the assertion leaves the assertion demanding a comment that
-        # was never going to be posted. tests/workflows/review-dedup.test.sh pins them together.
+        # was never going to be posted. repo-agents' tests/workflows/review-dedup.test.sh pins them together.
         if: github.event_name == 'workflow_dispatch' || steps.baseline.outputs.already_reviewed != 'true'
         # `gh` reads this. Without it every `gh` call the review makes fails unauthenticated, which
         # looks identical to `gh` being missing: a green check and no review. The job's
@@ -170,7 +170,7 @@ jobs:
           # the action itself contributes — a tool the command needs and this line omits is not
           # granted BY THE ACTION, and that omission surfaces as a review that posts nothing. Keep
           # it in sync with the frontmatter of .claude/commands/verify-pr.md —
-          # tests/commands/verify-pr.test.sh asserts they agree, which is the check an early version
+          # repo-agents' tests/commands/verify-pr.test.sh asserts they agree, which is the check an early version
           # did not have.
           #
           # What is NOT true is that the flag bounds the grant. actions/checkout above puts the
@@ -238,7 +238,7 @@ jobs:
           # the post into a separate job there rather than narrowing the wildcard.
           # MODEL, set explicitly (policy.json roles.review.model, rendered here): without --model
           # the CLI default applies, which can be a smaller model than the one the merge gate is
-          # meant to trust. tests/commands/verify-pr.test.sh pins it. claude-code-action installs its
+          # meant to trust. repo-agents' tests/commands/verify-pr.test.sh pins it. claude-code-action installs its
           # own pinned CLI, so after changing the model, dispatch a review and check that the agent
           # step ran more than one turn before trusting it: a model the CLI does not know dies on its
           # first request with no comment.
@@ -250,7 +250,7 @@ jobs:
           # or https://code.claude.com/docs/en/cli-reference for available options
 
       # I3 ASSERTION — the other half of the baseline step near the top of this job. DO NOT DELETE
-      # THIS AS REDUNDANT WITH tests/commands/verify-pr.test.sh. That suite is static analysis: it
+      # THIS AS REDUNDANT WITH repo-agents' tests/commands/verify-pr.test.sh. That suite is static analysis: it
       # proves the command file still SAYS to post and that the allowlist still permits it. This
       # step is the only thing in the repo that observes whether a comment ACTUALLY LANDED.
       #
@@ -295,16 +295,9 @@ jobs:
       # only add a confusing second error. The gap this closes is the SUCCESSFUL-but-silent run.
       - name: assert the review actually posted a comment
         id: assert
-        # De-dup. Skip when this PR already carries a /verify-pr review, so draft -> ready ->
-        # draft -> ready does not review twice and an auto run followed by anything else does not
-        # stack. A workflow_dispatch is exempt on purpose, and this is a DELIBERATE difference from
-        # the plugin that used to do this: its guard made a repeat dispatch a no-op too, but a
-        # dispatch is a human pressing "review this again", and silently ignoring that is worse
-        # than a duplicate.
-        #
-        # This condition is duplicated on the assert step below and the two MUST stay identical —
-        # gating the review but not the assertion leaves the assertion demanding a comment that
-        # was never going to be posted. tests/workflows/review-dedup.test.sh pins them together.
+        # The review step's de-dup condition, verbatim, and it MUST stay identical: skipping the
+        # review but not this assertion would demand a comment that was never going to be posted.
+        # repo-agents' tests/workflows/review-dedup.test.sh pins the two together.
         if: github.event_name == 'workflow_dispatch' || steps.baseline.outputs.already_reviewed != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -356,7 +349,7 @@ jobs:
             fi
             exit 0
           fi
-          # THE marker, and the only copy of it in this file. tests/commands/verify-pr.test.sh
+          # THE marker, and the only copy of it in this file. repo-agents' tests/commands/verify-pr.test.sh
           # lifts this line and asserts .claude/commands/verify-pr.md still tells the review to
           # emit the same string, so the assertion here and the instruction there cannot drift
           # apart silently — which for a check that only ever runs on a real PR is the difference

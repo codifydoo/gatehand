@@ -132,7 +132,7 @@ apply_one() {
         # A breaker request has no issue to tell; a fixer or merger request's labels are on the PR,
         # not the issue (which stays agent:pr-open), so a reject only records that it was seen.
         if ! builtin_kind "${kind}" && declare -F "agent_hook_inbox_${kind}" >/dev/null; then
-          if "agent_hook_inbox_${kind}" reject "${req}" "${issue}" "$(printf '%s' "${arg2}" | agent_oneline 300)" "$2"; then
+          if "agent_hook_inbox_${kind}" reject "${req}" "${issue}" "$(printf '%s' "${arg2}" | agent_oneline 300)" "$2" </dev/null; then
             mark_answered "${req}" "rejected"
           else
             printf -- '- `%s`: rejecting failed part way; nothing recorded, send it again\n' "${req}"
@@ -196,7 +196,7 @@ apply_one() {
             printf -- '- `%s`: unknown request kind %s\n' "${req}" "${kind}"
             return
           fi
-          if "agent_hook_inbox_${kind}" approve "${req}" "${issue}" "" "$2"; then
+          if "agent_hook_inbox_${kind}" approve "${req}" "${issue}" "" "$2" </dev/null; then
             mark_answered "${req}" "approved"
           else ok=0; fi
           ;;
