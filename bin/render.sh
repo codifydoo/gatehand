@@ -6,7 +6,8 @@
 #
 # Two kinds of files:
 #   - YOURS, under <repo>/.github/agents/ (policy.json, protected-paths.txt, project.md, toolchain/,
-#     dependencies/, hooks/): copied from defaults/ only when missing, never overwritten.
+#     dependencies/, hooks/): copied from defaults/ only when missing, never overwritten. The one
+#     exception is hooks/lib.sh.example, the package's reference for the hooks, which is refreshed.
 #   - THE PACKAGE'S (workflows, scripts, commands, install-gh, the issue template, the README): rendered
 #     from template/ with values from YOUR policy.json, and recorded with their hashes in
 #     .github/agents/install.lock.json. A package file whose hash no longer matches the lock was edited
@@ -72,7 +73,21 @@ if [[ "${mode}" == write ]]; then
   while IFS= read -r rel; do
     dst="${REPO}/.github/agents/${rel}"
     guard_path ".github/agents/${rel}"
-    [[ "${rel}" == hooks/lib.sh.example && -e "${REPO}/.github/agents/hooks/lib.sh" ]] && continue
+    if [[ "${rel}" == hooks/lib.sh.example ]]; then
+      # The package's reference for the hooks, never sourced: refreshed wherever it is, so an update
+      # documents new hooks, but not created once the repo has its own hooks/lib.sh.
+      if [[ -f "${dst}" ]]; then
+        if ! cmp -s "${PKG}/defaults/${rel}" "${dst}"; then
+          cp "${PKG}/defaults/${rel}" "${dst}"
+          printf 'updated %s (the package'"'"'s reference for the hooks)\n' ".github/agents/${rel}"
+        fi
+      elif [[ ! -e "${dst}" && ! -e "${REPO}/.github/agents/hooks/lib.sh" ]]; then
+        mkdir -p "$(dirname "${dst}")"
+        cp "${PKG}/defaults/${rel}" "${dst}"
+        printf 'created %s (the package'"'"'s reference for the hooks, refreshed on update)\n' ".github/agents/${rel}"
+      fi
+      continue
+    fi
     if [[ ! -e "${dst}" ]]; then
       mkdir -p "$(dirname "${dst}")"
       cp "${PKG}/defaults/${rel}" "${dst}"

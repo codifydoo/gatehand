@@ -34,6 +34,21 @@ echo "my rules" >"${TMP}/r/.github/agents/project.md"
 check "a second render keeps the repo's own project.md" grep -qx 'my rules' "${TMP}/r/.github/agents/project.md"
 check "--check passes right after a render" "${R}" --check "${TMP}/r"
 check "a non-repo is refused" bash -c "! '${R}' '${TMP}' 2>/dev/null"
+# The one exception: hooks/lib.sh.example is the package's reference, so an update refreshes it.
+EX="${TMP}/r/.github/agents/hooks/lib.sh.example"
+check "a render created hooks/lib.sh.example" cmp -s "${PKG}/defaults/hooks/lib.sh.example" "${EX}"
+echo "# an older package's example" >"${EX}"
+"${R}" "${TMP}/r" >/dev/null
+check "a render refreshes a stale hooks/lib.sh.example" cmp -s "${PKG}/defaults/hooks/lib.sh.example" "${EX}"
+echo "# mine" >"${TMP}/r/.github/agents/hooks/lib.sh"
+"${R}" "${TMP}/r" >/dev/null
+check "...and leaves the repo's own hooks/lib.sh alone" grep -qx '# mine' "${TMP}/r/.github/agents/hooks/lib.sh"
+echo "# an older package's example" >"${EX}"
+"${R}" "${TMP}/r" >/dev/null
+check "...and refreshes an example kept next to hooks/lib.sh" cmp -s "${PKG}/defaults/hooks/lib.sh.example" "${EX}"
+rm -f "${EX}"
+"${R}" "${TMP}/r" >/dev/null
+check "...and does not bring the example back once hooks/lib.sh exists" test ! -e "${EX}"
 
 # --- 2 -----------------------------------------------------------------------------------------------
 for bad in '.botLogin = "Evil Bot[bot]"' '.botLogin = "nobot"' '.roles.coder.model = "opus; rm -rf /"' \
