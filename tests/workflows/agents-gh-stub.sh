@@ -15,6 +15,9 @@
 #   stub_gh_calls                        every call so far, one per line
 #   stub_gh_body <n>                     the --body-file content (or `--input -` stdin) of call n
 #   stub_gh_last_body <glob>             the --body-file content of the last call matching <glob>
+#   A render (`gh api --method POST markdown`) that no rule answers gets GitHub's recorded output for
+#   that text from render-fixtures.jsonl (tests/record-renders.sh records them), so review verdicts
+#   are read from real GitHub HTML; a text never recorded fails the call.
 
 stub_gh_init() {
   STUB_DIR="$(mktemp -d)"
@@ -52,11 +55,29 @@ while IFS=$'\x1f' read -r pat out rc err mode after; do
     exit "${rc:-0}"
   fi
 done <"${dir}/rules"
+# A render (POST /markdown) no rule answered: GitHub's real output for that exact text, recorded in
+# render-fixtures.jsonl. AGENTS_RENDER_RECORD=<file> asks GitHub instead and appends each answer to
+# <file> (tests/record-renders.sh); a text with no recording fails the call, loudly.
+if [[ "$*" == *" markdown --input -"* ]]; then
+  key="$(jq -c .text "${dir}/bodies/${n}")"
+  if [[ -n "${AGENTS_RENDER_RECORD:-}" ]]; then
+    html="$("${STUB_REAL_GH}" api --method POST markdown --input "${dir}/bodies/${n}")" || exit 1
+    jq -nc --argjson t "${key}" --arg h "${html}" '{text: $t, html: $h}' >>"${AGENTS_RENDER_RECORD}"
+    printf '%s\n' "${html}"
+    exit 0
+  fi
+  jq -ner --argjson t "${key}" 'first(inputs | select(.text == $t) | .html)' "${STUB_RENDER_FIXTURES}" && exit 0
+  echo "stub gh: no recorded render of ${key}; run tests/record-renders.sh" >&2
+  exit 1
+fi
 exit 0
 STUB
   chmod +x "${STUB_DIR}/bin/gh"
+  # The real gh, found before any stub is on PATH (an earlier init's would shadow it).
+  STUB_REAL_GH="${STUB_REAL_GH:-$(command -v gh || true)}"
+  STUB_RENDER_FIXTURES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/render-fixtures.jsonl"
   PATH="${STUB_DIR}/bin:${PATH}"
-  export PATH STUB_DIR
+  export PATH STUB_DIR STUB_REAL_GH STUB_RENDER_FIXTURES
 }
 
 stub_gh_on() {

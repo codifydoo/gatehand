@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.2 (2026-11-10)
+
+- The review verdict is also read from GitHub's own render of the review (`POST /markdown`), and the
+  merge gate, the fixer and the digest see Approve or Request changes only when that reading agrees
+  with the markdown one. Only top-level headings and paragraphs of the HTML count, so a verdict
+  GitHub shows inside a quote, a list, a collapsed block or a struck-through line, or comments out
+  (a raw `<!--` in a list item), no longer passes for the review's own. A render that fails reads
+  as no verdict, and so does a later top-level heading in another form (`VERDICT`, `## Verdict`,
+  `Verdict:`); a disagreement between the two readings is logged. Replayed over 449 real reviews,
+  no verdict changed.
+- The tests answer render calls with GitHub's recorded output (`tests/workflows/render-fixtures.jsonl`);
+  `tests/record-renders.sh` re-records it.
+
 ## 0.2.1 (2026-11-10)
 
 Fixes from upgrading a 0.1.0 install to 0.2.0:
