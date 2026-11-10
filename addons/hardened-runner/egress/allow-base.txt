@@ -1,0 +1,32 @@
+# A reference egress allowlist for a self-hosted agent pool: what every agent job needs, the
+# runner's own channel to GitHub, Claude, and common toolchains. One domain per line; a leading dot
+# also matches every subdomain (Squid dstdomain syntax). Add your own toolchain's registries.
+#
+# GitHub: the API, git, action downloads, and the Actions service (broker, pipelines, results,
+# artifacts and caches all live under actions.githubusercontent.com).
+.github.com
+.githubusercontent.com
+# Claude: the API, and where claude-code-action installs Claude Code from (claude.ai serves the
+# installer, downloads.claude.ai the binary it fetches).
+api.anthropic.com
+claude.ai
+downloads.claude.ai
+storage.googleapis.com
+# Toolchains, as examples: npm, Go modules and checksums, Go and Node tarballs (setup-go and
+# setup-node fetch from GitHub first and fall back to these), Prisma's engines.
+registry.npmjs.org
+proxy.golang.org
+sum.golang.org
+go.dev
+dl.google.com
+nodejs.org
+binaries.prisma.sh
+# Prisma's version check, which its CLI makes on generate. Telemetry, and a failure is not fatal,
+# but allowing it keeps a would-deny audit to real misses.
+checkpoint.prisma.io
+# apt, plain HTTP: ports.ubuntu.com is the ARM mirror, the others amd64's.
+ports.ubuntu.com
+archive.ubuntu.com
+security.ubuntu.com
+# apt over HTTPS: Launchpad PPAs among the runner image's apt sources.
+ppa.launchpadcontent.net

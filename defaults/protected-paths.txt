@@ -1,0 +1,32 @@
+# .github/agents/protected-paths.txt
+# Paths an agent PR may not touch unless a PERSON put `agent:allow-protected` on the issue, and,
+# marked with a leading `!`, paths it may never touch at all.
+#
+# This is the agents' own leash. An agent that could edit these could widen its own permissions,
+# weaken the checks that review it, or change how your software is released. Add your deploy and
+# release tooling here (a `deploy/**`, a `scripts/release.sh`). Everything else is left to CI and
+# the Claude review.
+#
+# `!` lines stay closed even with `agent:allow-protected`. All of `.github/` and `.claude/` are among
+# them: workflows run files from there while holding write tokens, and the review reads `.claude/`.
+# A person makes these changes, in a person's PR.
+#
+# Read by BOTH enforcers, which is why it is one file:
+#   - .github/scripts/agent-outbox.sh refuses to push a diff that matches;
+#   - .github/scripts/agent-pr-guard.sh fails the `agent pr guard` check on a PR that matches.
+# Both run from the DEFAULT BRANCH's copy of this file and of themselves, never from the agent's
+# branch, so an agent PR that edits this list cannot use the edit to pass.
+#
+# Syntax: one glob per line. `**` matches across directories, `*` and `?` stay inside one path
+# segment. `#` starts a comment line. Paths are repo-relative, no leading slash.
+CLAUDE.md
+!.github/**
+!.claude/**
+# Instructions Claude Code loads as the project's own, below the root: the fixer runs on an agent
+# PR's head, so a CLAUDE.md the coder added there would steer it from outside the untrusted tags.
+# The root CLAUDE.md stays protected above, so only a writer's agent:allow-protected opens it.
+!**/CLAUDE.md
+!CLAUDE.local.md
+!**/CLAUDE.local.md
+!**/.claude/**
+!.mcp.json

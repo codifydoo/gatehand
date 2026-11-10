@@ -1,0 +1,390 @@
+name: Claude Code Review
+# QUOTED, and it has to stay that way: ` #` in an unquoted plain scalar opens a YAML comment, so
+# the bare form silently parsed to "Claude review of PR" and dropped the expression entirely. That
+# was survivable while this workflow was dispatch-only and ran rarely; with the automatic trigger
+# below, an Actions list of identically-named runs has no way to say which PR each belongs to.
+run-name: 'Claude review of PR #${{ inputs.pr || github.event.pull_request.number }}'
+
+# The Claude review every PR gets, and the verdict the agents' merge gate reads
+# (.github/scripts/agent-merge.sh): /verify-pr posts one summary comment carrying the
+# review marker (REVIEW_MARKER below), whose Approve or Request changes line is that verdict.
+#
+# Runs on PR open and on a draft being marked ready. NOT on `synchronize`: it is not a required check,
+# so a run per push would spend a runner on output nothing gates on. The fixer and the merge gate
+# dispatch a fresh review themselves when a new head needs one (agent-state.sh request_review).
+#
+# DE-DUP: an automatic run skips when the PR already carries a review comment from the review bot, so
+# draft -> ready -> draft -> ready reviews once. The gate is here, not in /verify-pr: it is
+# deterministic and costs no tokens. A DISPATCH is exempt on purpose: it is a person (or the agents)
+# asking for a fresh review.
+#
+# On a FORK PR this job fails rather than posting: GITHUB_TOKEN is read-only there and secrets are
+# not exposed.
+#
+# Dispatch by hand: gh workflow run "Claude Code Review" -f pr=<number>
+on:
+  pull_request:
+    # NOT `synchronize` — see the header. `opened` and `ready_for_review` are the two moments a
+    # review is worth its cost.
+    types: [opened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'PR number to review'
+        required: true
+        type: string
+
+jobs:
+  claude-review:
+    runs-on: @@RUNS_ON_REVIEW@@
+    env:
+      # THE marker, defined once for the whole job. It was spelled twice — inline in the baseline
+      # step's jq and again in the assert step — each pinned by its own test but never compared to
+      # the other, so changing one and not the other left de-dup silently never firing while every
+      # test stayed green. .claude/commands/verify-pr.md must emit this exact string;
+      # tests/commands/verify-pr.test.sh reads THIS line and checks the command against it.
+      REVIEW_MARKER: '<!-- verify-pr-review -->'
+      REVIEW_BOT: '@@REVIEW_BOT_LOGIN@@'
+    # GitHub fires `opened` for DRAFT PRs too. Until now that case was caught inside the
+    # code-review plugin's own step 1, which this workflow no longer uses — so the guard has to be
+    # here. Better placed anyway: the skip is visible in the workflow instead of being emergent
+    # behaviour of a third-party command.
+    # A fork's PR gets no secrets, so a review of it could only fail: it is skipped instead, and a
+    # person dispatches one after reading the PR if they want it.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)
+    # A hung review holds its runner until this fires; on a small self-hosted review pool every later
+    # PR queues behind it.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # `write`, not `read`: the review posts its findings back as PR comments. With `read` the
+      # job still runs a full (billed) review and then silently discards it — no comment lands.
+      pull-requests: write
+      issues: read
+      id-token: write
+
+    steps:
+      # On a dispatch, check out the PR being reviewed. Without `ref:` a dispatch checks out the
+      # ref it was run on (main), so the agent judged the PR's diff while every file it opened for
+      # context was main's older copy ("checked against the code on the base branch"). The PR's HEAD, not its merge ref: refs/pull/N/merge is missing while
+      # the PR conflicts, and the dispatch is the button pressed to re-review exactly then.
+      # An automatic run passes '' here and keeps checkout's default, refs/pull/N/merge.
+      # This runs the PR's own .github/actions/install-gh on a dispatch too, which the automatic
+      # run has always done; .github/agents/protected-paths.txt is what keeps agent PRs out of it.
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.pr && format('refs/pull/{0}/head', inputs.pr) || '' }}
+          fetch-depth: 1
+
+      # A bare self-hosted runner image ships no `gh`. See the action for the full reasoning and the
+      # pin; every workflow that needs gh uses it, so the copies cannot drift.
+      # Must come after checkout: it is a local action, read from the workspace.
+      - uses: ./.github/actions/install-gh
+
+      # Installation is only half of what the review needs. An unauthenticated `gh` looks
+      # identical to a missing one: a green check and no review. The action prints the version;
+      # this proves the token actually works before a billed review depends on it.
+      - name: gh auth status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh auth status
+      - name: record newest PR comment before the review
+        id: baseline
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Same `inputs.pr || event` fallback as run-name and the prompt: this must work on the
+          # workflow_dispatch path too, where there is no pull_request event payload.
+          PR: ${{ inputs.pr || github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Comment ids increase monotonically per repository, so "highest id seen before" is a
+          # sufficient watermark and needs no timestamp parsing. `--paginate` matters: a PR with
+          # more than 100 comments would otherwise watermark at the end of page one and every
+          # later comment would read as "new". `${latest:-0}` covers a PR with no comments at all,
+          # where the jq filter emits nothing and `tail -1` returns the empty string.
+          # One fetch, two answers. `already_reviewed` is what stops a repeat review: the
+          # code-review plugin this workflow replaced suppressed a review when the PR already
+          # carried a Claude comment, and /verify-pr has no equivalent, so a PR toggled
+          # draft -> ready -> draft -> ready used to get two full reviews. Deriving it from the
+          # SAME response the watermark already needs keeps this at one API call.
+          #
+          # REVIEW_MARKER comes from the job-level env above — one definition, read by this step
+          # and by the assert step, so the two cannot disagree.
+          #
+          # Only a marker in a comment by the review bot (REVIEW_BOT, policy.json reviewBotLogin)
+          # counts as "already reviewed": anyone can comment on a PR, and a pasted marker would
+          # otherwise suppress the automatic review. A review posted under another login just means
+          # a second review, which fails safe. The watermark still counts every comment.
+          rows="$(gh api "repos/${{ github.repository }}/issues/${PR}/comments" \
+            --paginate -X GET -f per_page=100 \
+            --jq ".[] | [.id, (.user.login == \"${REVIEW_BOT}\" and ((.body // \"\") | contains(\"${REVIEW_MARKER}\")))] | @tsv")"
+          latest="$(printf '%s\n' "${rows}" | cut -f1 | sort -n | tail -1)"
+          # `if`, not `&&`: under `set -e` a bare `cmd && var=true` exits the step when cmd finds
+          # nothing, which is the common no-prior-review case.
+          reviewed=false
+          if printf '%s\n' "${rows}" | cut -f2 | grep -qx true; then reviewed=true; fi
+          echo "id=${latest:-0}" >> "$GITHUB_OUTPUT"
+          echo "already_reviewed=${reviewed}" >> "$GITHUB_OUTPUT"
+          echo "newest comment id on PR #${PR} before the review: ${latest:-none}"
+          echo "a /verify-pr review already exists on PR #${PR}: ${reviewed}"
+
+      - name: Run Claude Code Review
+        id: claude-review
+        # De-dup. Skip when this PR already carries a /verify-pr review, so draft -> ready ->
+        # draft -> ready does not review twice and an auto run followed by anything else does not
+        # stack. A workflow_dispatch is exempt on purpose, and this is a DELIBERATE difference from
+        # the plugin that used to do this: its guard made a repeat dispatch a no-op too, but a
+        # dispatch is a human pressing "review this again", and silently ignoring that is worse
+        # than a duplicate.
+        #
+        # This condition is duplicated on the assert step below and the two MUST stay identical —
+        # gating the review but not the assertion leaves the assertion demanding a comment that
+        # was never going to be posted. tests/workflows/review-dedup.test.sh pins them together.
+        if: github.event_name == 'workflow_dispatch' || steps.baseline.outputs.already_reviewed != 'true'
+        # `gh` reads this. Without it every `gh` call the review makes fails unauthenticated, which
+        # looks identical to `gh` being missing: a green check and no review. The job's
+        # `pull-requests: write` above grants the token what it needs; this is what hands it over.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: anthropics/claude-code-action@61a9c274fa7110a66dfafc1bbbced03833eb25fe # v1.0.269
+        with:
+          @@CLAUDE_AUTH@@
+          # LOAD-BEARING for the autonomous agents. The action refuses any non-User actor not named
+          # here (src/github/validation/actor.ts, checkHumanActor), and a PR the coder agent opens has
+          # the actor `@@BOT_SLUG@@[bot]`. Without this line every agent PR would get NO review: the
+          # step throws before Claude starts, and the review is the only qualitative gate before an
+          # agent PR merges. One name, not `*`: allowed bots skip the write-permission check.
+          allowed_bots: @@BOT_SLUG@@
+          prompt: '/verify-pr ${{ inputs.pr || github.event.pull_request.number }}'
+          # --allowedTools ALLOWS; it does not RESTRICT. An earlier version of this comment called
+          # it "a strict allowlist here" and that was simply false, in a place where being wrong
+          # about it matters: the next person reasoning about what this job can do would have read
+          # the flag as the whole grant.
+          #
+          # What is true is the narrow part: in agent mode the action appends claude_args to the
+          # CLI verbatim and never injects a list of its own (src/modes/agent/index.ts:121;
+          # contrast tag mode at src/modes/tag/index.ts:175), so this flag is the only ALLOW list
+          # the action itself contributes — a tool the command needs and this line omits is not
+          # granted BY THE ACTION, and that omission surfaces as a review that posts nothing. Keep
+          # it in sync with the frontmatter of .claude/commands/verify-pr.md —
+          # tests/commands/verify-pr.test.sh asserts they agree, which is the check an early version
+          # did not have.
+          #
+          # What is NOT true is that the flag bounds the grant. actions/checkout above puts the
+          # tracked `.claude/settings.json` into the workspace and Claude Code loads project
+          # settings normally, so the EFFECTIVE grant is the union of three sources: this flag,
+          # `permissions.allow` in .claude/settings.json, and the command's own frontmatter. A repo's
+          # settings commonly allow package installs, builds and `git *`: arbitrary dependency
+          # installation and build execution against PR-HEAD code, in a job holding GH_TOKEN and
+          # the Claude credential.
+          #
+          # --disallowedTools below is what actually bounds it. It maps onto the `deny` array, and
+          # deny beats allow from every scope — "If a tool is denied at any level, no other level
+          # can allow it" (code.claude.com/docs/en/permissions, Settings precedence) — so it
+          # overrides the settings.json allows above rather than merely failing to add to them.
+          # Verified against `claude --help` and those docs before this was relied on; the flag is
+          # spelled `--disallowedTools` / `--disallowed-tools`.
+          #
+          # Every rule is SCOPED (`Bash(pnpm:*)`, which the docs define as equivalent to
+          # `Bash(pnpm *)`), never a bare tool name: a bare `Bash` deny removes the tool from the
+          # model's context outright and would take the `gh` calls this review is built on with it.
+          # The review needs `gh` and nothing that builds or runs code: git, the common package
+          # managers, build tools and interpreters are denied so that a repo's settings.json cannot
+          # quietly widen this job, and the network tools so that it cannot send anything out.
+          #
+          # Scope is the argument for denying them: this job reads a diff and writes one comment.
+          # It has no reason to install dependencies or compile anything, so nothing legitimate is
+          # lost. If a future reviewer genuinely needs to build, that is a decision to make here
+          # explicitly, not to inherit from a settings file written for interactive sessions.
+          #
+          # The inline-comment MCP tool is listed because a `pull_request` event carries PR context
+          # and claude-code-action installs that server only when it does (context.isPR in
+          # src/mcp/install-mcp-server.ts). Listing a tool that does not exist is harmless; the
+          # allowlist permits, it does not conjure.
+          #
+          # That is NOT on its own why --append-system-prompt could be deleted. `workflow_dispatch`
+          # is still a valid trigger and still carries no PR context, so on that path the server is
+          # absent and the tool really is missing — the condition the override existed to paper
+          # over has not gone away. What makes the override unnecessary is that the behaviour moved
+          # into the command: steps 4-5 of .claude/commands/verify-pr.md make inline anchoring
+          # explicitly best-effort and the `gh pr comment` summary mandatory, so BOTH paths post.
+          # Keeping a workflow-side override too would just be a second, divergent copy of that
+          # rule. If verify-pr.md ever loses that guarantee, this is the comment that says why the
+          # workflow stopped carrying its own.
+          #
+          # No Task: /verify-pr is a single-pass review. The code-review plugin this replaced was
+          # built out of subagents, which is the only reason Task was ever listed.
+          #
+          # DELIBERATE DEVIATION from the house rule, recorded so it is a decision and not an
+          # oversight: `Bash(gh pr comment:*)` is a WILDCARD, so the agent picks its own target PR
+          # number, from a prompt derived from PR text an author controls. The structural answer
+          # (the agent writes a file and a LATER STEP posts it, so it cannot choose a target at all)
+          # is what the agents' own outbox does.
+          #
+          # This workflow does not copy that, because the summary comment is the deliverable and
+          # routing it through a file would put a second, divergent copy of "always post" outside
+          # verify-pr.md — the exact duplication the --append-system-prompt note above explains why
+          # we removed. The residual risk is bounded rather than absent:
+          #   - a fork PR gets no secrets and fails before the review runs, so an attacker needs push
+          #     access to the repo (a branch PR) before any of this is reachable;
+          #   - the worst outcome inside that blast radius is a comment on the wrong PR of the same
+          #     repo — GITHUB_TOKEN is repo-scoped, so it cannot reach another repository;
+          #   - a comment posted by GITHUB_TOKEN does not trigger workflows, so a misdirected
+          #     comment cannot start another review (GitHub's recursion guard).
+          # A repo that runs this on fork PRs through pull_request_target loses the first; split
+          # the post into a separate job there rather than narrowing the wildcard.
+          # MODEL, set explicitly (policy.json roles.review.model, rendered here): without --model
+          # the CLI default applies, which can be a smaller model than the one the merge gate is
+          # meant to trust. tests/commands/verify-pr.test.sh pins it. claude-code-action installs its
+          # own pinned CLI, so after changing the model, dispatch a review and check that the agent
+          # step ran more than one turn before trusting it: a model the CLI does not know dies on its
+          # first request with no comment.
+          claude_args: |
+            --model @@REVIEW_MODEL@@
+            --allowedTools "Read,Grep,Glob,TodoWrite,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh search:*),mcp__github_inline_comment__create_inline_comment"
+            --disallowedTools "Bash(pnpm:*),Bash(npm:*),Bash(npx:*),Bash(yarn:*),Bash(bun:*),Bash(go:*),Bash(gofmt:*),Bash(cargo:*),Bash(pip:*),Bash(uv:*),Bash(python:*),Bash(python3:*),Bash(node:*),Bash(make:*),Bash(git:*),Bash(docker:*),Bash(curl:*),Bash(wget:*),WebFetch,WebSearch"
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://code.claude.com/docs/en/cli-reference for available options
+
+      # I3 ASSERTION — the other half of the baseline step near the top of this job. DO NOT DELETE
+      # THIS AS REDUNDANT WITH tests/commands/verify-pr.test.sh. That suite is static analysis: it
+      # proves the command file still SAYS to post and that the allowlist still permits it. This
+      # step is the only thing in the repo that observes whether a comment ACTUALLY LANDED.
+      #
+      # Nothing above can see that. `claude -p` exits 0 whether or not it posted, and
+      # claude-code-action redacts its own log, so a review that fetched nothing, was denied
+      # `gh pr comment`, hit a rate limit the agent treated as a finding, or never resolved
+      # `/verify-pr` as a slash command at all ends as a green check with an empty PR — the
+      # silent no-post signature, which shipped past a fully green CI once already. This step converts
+      # that entire class into a red job.
+      #
+      # MARKER-BASED, NOT IDENTITY-BASED, and it must stay that way. This step shipped once as
+      # `select(.user.login == "github-actions[bot]")` and that filter was inverted on both sides —
+      # red on every success, green on a failure — for two INDEPENDENT reasons. Do not "simplify"
+      # it back to a login comparison; both reasons would come straight back.
+      #
+      #   1. The review does NOT post as `github-actions[bot]`. claude-code-action's `github_token`
+      #      input is `required: false` with no default, so with none supplied it takes the OIDC
+      #      path to Anthropic's app-token-exchange and mints its own GitHub App token; its
+      #      src/entrypoints/run.ts then sets `process.env.GH_TOKEN = githubToken`
+      #      UNCONDITIONALLY before spawning the CLI, overwriting the GH_TOKEN set on the step
+      #      above. The agent's `gh pr comment` therefore authenticates as the Claude App and the
+      #      comment's author is that app's bot login, not this workflow's. A login filter would
+      #      have failed every successful review.
+      #   2. `github-actions[bot]` is not unique to this job: any other workflow that comments on the
+      #      same `pull_request` event with the default GITHUB_TOKEN posts as exactly that login, and
+      #      whether its comment lands before or after the baseline step is a race. So a login filter
+      #      could also go green on a run where this review posted nothing at all.
+      #
+      # Matching the body instead sidesteps both: the marker is minted by verify-pr.md (step 4) and
+      # by nothing else in this repo, so it identifies the artifact rather than the account that
+      # happened to create it — and it keeps working if the token path ever changes again. Same
+      # idea as every other marker in these workflows.
+      #
+      # The id watermark is still needed alongside it: a re-run on a PR that was already reviewed
+      # would otherwise be satisfied by the PREVIOUS run's marker comment. New AND marked, both.
+      #
+      # Inline anchors are NOT counted — those land on /pulls/comments, a different endpoint —
+      # which is correct: verify-pr.md makes anchors best-effort and the summary comment mandatory,
+      # so the summary is what must be asserted.
+      #
+      # Not `if: always()`: a review step that failed outright already reddens the job and would
+      # only add a confusing second error. The gap this closes is the SUCCESSFUL-but-silent run.
+      - name: assert the review actually posted a comment
+        id: assert
+        # De-dup. Skip when this PR already carries a /verify-pr review, so draft -> ready ->
+        # draft -> ready does not review twice and an auto run followed by anything else does not
+        # stack. A workflow_dispatch is exempt on purpose, and this is a DELIBERATE difference from
+        # the plugin that used to do this: its guard made a repeat dispatch a no-op too, but a
+        # dispatch is a human pressing "review this again", and silently ignoring that is worse
+        # than a duplicate.
+        #
+        # This condition is duplicated on the assert step below and the two MUST stay identical —
+        # gating the review but not the assertion leaves the assertion demanding a comment that
+        # was never going to be posted. tests/workflows/review-dedup.test.sh pins them together.
+        if: github.event_name == 'workflow_dispatch' || steps.baseline.outputs.already_reviewed != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ inputs.pr || github.event.pull_request.number }}
+          BASELINE: ${{ steps.baseline.outputs.id }}
+          # Empty when the action never actually ran Claude. The action exits `success` on such a
+          # skip, so without this the assertion below cannot tell "the agent ran and posted nothing"
+          # (the failure this step exists to catch) from "the agent never ran at all".
+          EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
+          EVENT: ${{ github.event_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # The action refuses to run when the PR's copy of this workflow differs from the one on
+          # the default branch — an anti-abuse guard, since a PR could otherwise edit this file to
+          # exfiltrate the secrets it holds. Any PR that touches this workflow therefore gets a
+          # skipped review, and asserting a comment landed would be a guaranteed false red. Verified
+          # live on the PR that introduced this step:
+          #   "Workflow validation failed. The workflow file must exist and have identical content
+          #    to the version on the repository's default branch. ... your workflow will begin
+          #    working once you merge your PR."
+          # This is deliberately keyed on the action producing no execution file rather than on the
+          # PR's changed-file list: it covers every reason the agent might not run, not just this one.
+          if [[ -z "${EXECUTION_FILE:-}" ]]; then
+            echo "::notice title=Review skipped::claude-code-action produced no execution file, so Claude never ran and there is nothing to assert. On a PR that edits .github/workflows/claude-code-review.yml this is expected — the action requires this file to match the default branch. Nothing re-runs it on its own: dispatch the review by hand once this merges."
+            # The notice alone was not enough: the check is green either way, and a green check
+            # reads as "reviewed". A large PR once merged that way with no review at all. So an
+            # automatic run also says it on the PR, once -- the skip marker keeps a draft -> ready
+            # toggle from posting it twice. It must NOT carry the review marker: the baseline step
+            # and the agents' merge gate would then count this note as a review.
+            # A dispatch posts nothing: whoever dispatched it is watching the run already.
+            if [[ "${EVENT}" == "pull_request" ]]; then
+              skip_marker='<!-- verify-pr-skipped -->'
+              noted="$(gh api "repos/${{ github.repository }}/issues/${PR}/comments" \
+                --paginate -X GET -f per_page=100 \
+                --jq ".[] | select((.body // \"\") | contains(\"${skip_marker}\")) | .id" \
+                | wc -l | tr -d ' ')"
+              if [[ "${noted}" -eq 0 ]]; then
+                # The backticks below are markdown for the comment, not command substitution.
+                # shellcheck disable=SC2016
+                printf '%s\n\n%s\n\n%s\n\n```bash\ngh workflow run "Claude Code Review" -f pr=%s\n```\n\n%s\n' \
+                  "${skip_marker}" \
+                  '**Claude did not review this PR.** The review action skipped it without running Claude. The usual reason: this PR edits `.github/workflows/claude-code-review.yml`, and the action only runs when that file matches `main`.' \
+                  'Nothing runs the review later on its own. Once this merges, ask for it by hand:' \
+                  "${PR}" \
+                  "Run log: ${RUN_URL}" \
+                  | gh pr comment "${PR}" --repo "${{ github.repository }}" --body-file -
+              fi
+            fi
+            exit 0
+          fi
+          # THE marker, and the only copy of it in this file. tests/commands/verify-pr.test.sh
+          # lifts this line and asserts .claude/commands/verify-pr.md still tells the review to
+          # emit the same string, so the assertion here and the instruction there cannot drift
+          # apart silently — which for a check that only ever runs on a real PR is the difference
+          # between a guard and a decoration.
+          marker="${REVIEW_MARKER}"
+          # Default to 0 rather than interpolating an empty string into the jq filter: an empty
+          # BASELINE would make this `select(.id > )`, a jq syntax error that reads as a broken
+          # assertion instead of the review failure it is meant to report on.
+          baseline="${BASELINE:-0}"
+          # `.body // ""` because `null | contains("…")` is a jq ERROR, not false: a comment whose
+          # body came back null would abort the filter and red-flag the wrong thing.
+          posted="$(gh api "repos/${{ github.repository }}/issues/${PR}/comments" \
+            --paginate -X GET -f per_page=100 \
+            --jq ".[] | select(.id > ${baseline}) | select((.body // \"\") | contains(\"${marker}\")) | .id" \
+            | wc -l | tr -d ' ')"
+          if [[ "${posted}" -gt 0 ]]; then
+            echo "OK: ${posted} new comment(s) carrying ${marker} on PR #${PR} (baseline id ${baseline})."
+            exit 0
+          fi
+          echo "::error title=Review posted nothing::The agent step succeeded but no new comment carrying the ${marker} marker appeared on PR #${PR} (nothing newer than comment id ${baseline})."
+          echo "This is the silent no-post failure mode: a full, BILLED review that exits green and leaves no review behind."
+          echo "The job log is redacted by claude-code-action, so the review output is gone — it was not saved anywhere."
+          echo "Likely causes, in the order worth checking:"
+          echo "  1. /verify-pr did not resolve as a slash command, so the prompt ran as literal text."
+          echo "  2. 'gh pr comment' was denied — check --allowedTools against .claude/commands/verify-pr.md frontmatter."
+          echo "  3. GH_TOKEN was insufficient — check the job's 'permissions:' block still has pull-requests: write."
+          echo "  4. A rate limit or API error was surfaced to the agent, which reported it as a finding instead of failing."
+          echo "  5. The review DID post, but without the marker — open the PR and look. If a summary comment is"
+          echo "     sitting there, this is a prompt-adherence failure, not a plumbing one: step 4 of"
+          echo "     .claude/commands/verify-pr.md is what mints the marker, and only a comment body carrying it counts."
+          exit 1

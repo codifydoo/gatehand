@@ -1,0 +1,25 @@
+name: test
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: install actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+      - name: hosted runners (the default policy)
+        run: bash tests/run.sh
+      - name: a self-hosted agent runner
+        env:
+          AGENTS_TEST_POLICY_JQ: '.runners.agent = ["self-hosted", "x-agent"] | .runners.ci = ["self-hosted", "x-ci"]'
+        run: bash tests/run.sh

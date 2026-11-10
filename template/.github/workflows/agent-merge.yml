@@ -1,0 +1,95 @@
+name: Agent merge
+run-name: "Agent merge: ${{ github.event_name == 'workflow_dispatch' && inputs.pr != '' && format('PR {0}', inputs.pr) || github.event_name }}"
+
+# The merge gate: merges an agent PR once every condition in .github/scripts/agent-merge.sh holds on
+# its current head (the five required checks and `agent pr guard` green, an Approve from a review
+# that saw this head, no protected or human-only path, no breaker tripped, and main's current tip
+# in the head), with `gh pr merge --merge --match-head-commit`: a plain merge commit, never the
+# admin bypass and never GitHub's auto-merge. A PR whose only blocker is being behind main gets its
+# branch updated, and the new head a fresh review once its checks pass (agent-merge.sh says how).
+# Design: .github/agents/README.md. Runbook: .github/agents/README.md.
+#
+# DRY RUN UNTIL THE OWNER SAYS OTHERWISE: unless the repo variable AGENT_AUTO_MERGE is exactly
+# `true`, every run checks and reports ("would merge …", "would update the branch …") and merges,
+# updates, labels and dispatches nothing.
+#
+# Triggers: a finished CI, Claude review or guard run (the moments a condition can turn true), an
+# hourly catch-up for anything those missed, and dispatch. Every run looks at EVERY open agent PR,
+# so a run that GitHub drops from the concurrency queue costs nothing: the next one sees the same.
+# No model runs here, and nothing here runs code from a PR: the checkout is main.
+on:
+  workflow_run:
+    workflows: [@@CI_WORKFLOW_NAME@@, Claude Code Review, Agent PR guard]
+    types: [completed]
+  schedule:
+    - cron: "@@CRON_MERGE@@"
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: One agent PR to check (empty checks every open agent PR)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: merge gate
+    # A workflow_run of an agent branch or of any review (a dispatched review names no branch);
+    # main's own CI runs and every other PR's are skipped without a runner.
+    # The review is matched by its file: `workflow_run.name` is the run's run-name ("Claude review
+    # of PR #N"), never "Claude Code Review", so a name match skipped every dispatched review's run.
+    if: >-
+      vars.AGENTS_ENABLED == 'true' && (
+        github.event_name != 'workflow_run' ||
+        contains(github.event.workflow_run.head_branch, '/agent-') ||
+        github.event.workflow_run.path == '.github/workflows/claude-code-review.yml'
+      )
+    runs-on: @@RUNS_ON_AGENT@@
+    timeout-minutes: 10
+    # One gate at a time: two runs deciding at once could both merge on the same evidence. On the job,
+    # not the workflow: every CI run in the repo starts this workflow, and a run whose job is skipped
+    # must not take the one pending slot from a gate run that matters.
+    concurrency:
+      group: agent-merge
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: ./.github/actions/install-gh
+      # contents + pull-requests: the merge, the branch delete and the branch update (update-branch).
+      # issues: labels and comments on the issue, the PR and the inbox. contents also writes the
+      # ledger row. checks: the head's check runs. actions: reading the review runs, and dispatching
+      # a fresh review of a head the gate's own branch update made.
+      - name: agent App token
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.AGENT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          permission-actions: write
+          permission-checks: read
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+      - name: gh auth status
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: gh auth status
+      - name: gate
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
+          AGENT_AUTO_MERGE: ${{ vars.AGENT_AUTO_MERGE }}
+          AGENT_BOT_EMAIL: ${{ vars.AGENT_BOT_ID }}+@@BOT_SLUG@@[bot]@users.noreply.github.com
+          WANT: ${{ inputs.pr }}
+          TRIGGER: ${{ github.event_name }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .github/scripts/agent-merge.sh run "$WANT"

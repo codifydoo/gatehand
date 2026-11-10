@@ -1,0 +1,72 @@
+name: Agent inbox
+
+# Applies the owner's answers in the agent inbox (the open issue carrying `<!-- agent-inbox -->`).
+# Commands and what they do: .github/scripts/agent-inbox.sh and .github/agents/README.md.
+#
+# WHO: the comment author must equal the AGENT_OWNER_LOGIN repo variable. Unset means nobody, so this
+# fails closed. A login and not author_association, because on this org-owned repo the owner's
+# comments carry MEMBER like any other member's, so an OWNER check would never match.
+#
+# NOT behind the AGENTS_ENABLED kill switch, deliberately: this is the control surface, and
+# `/resume coder` has to work while the agents are stopped. It holds no Claude credential. Anything
+# it starts (a coder dispatch) still passes the coder's own gate.
+#
+# Only an inbox issue opened by the agent bot or the owner counts, so pasting the marker into
+# another issue does not make it an inbox.
+#
+# Every issue comment in the repo starts a run of this workflow that the job-level `if` skips; a
+# skipped job takes no runner.
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    name: apply an inbox command
+    if: >-
+      !github.event.issue.pull_request &&
+      vars.AGENT_OWNER_LOGIN != '' &&
+      github.event.comment.user.login == vars.AGENT_OWNER_LOGIN &&
+      startsWith(github.event.comment.body, '/') &&
+      contains(github.event.issue.body, '<!-- agent-inbox -->') &&
+      (github.event.issue.user.login == '@@BOT_SLUG@@[bot]' || github.event.issue.user.login == vars.AGENT_OWNER_LOGIN)
+    # The agent runner: this job mints the App token (see agent-coder.yml).
+    runs-on: @@RUNS_ON_AGENT@@
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/install-gh
+      # issues: labels and replies. actions: dispatching the coder. contents: the breaker lives on
+      # the agent-ledger branch.
+      - name: agent App token
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.AGENT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          permission-actions: write
+          permission-contents: write
+          permission-issues: write
+      - name: gh auth status
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: gh auth status
+      - name: apply
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          AGENT_BOT_EMAIL: ${{ vars.AGENT_BOT_ID }}+@@BOT_SLUG@@[bot]@users.noreply.github.com
+          AGENT_OWNER_LOGIN: ${{ vars.AGENT_OWNER_LOGIN }}
+          AGENT_INBOX_ISSUE: ${{ vars.AGENT_INBOX_ISSUE }}
+          INBOX: ${{ github.event.issue.number }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: bash .github/scripts/agent-inbox.sh apply

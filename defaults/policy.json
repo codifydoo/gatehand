@@ -1,0 +1,70 @@
+{
+  "$comment": "The agents' configuration (.github/agents/README.md). The scripts read it at run time; bin/render.sh reads it to render the workflows and commands, so after changing runners, schedules, models, turns, timeouts, tools or ci, re-render (the update skill, or bin/render.sh) and commit the result. Everything else takes effect on the next run.",
+  "botLogin": "repo-agent[bot]",
+  "baseBranch": "main",
+  "ledgerBranch": "agent-ledger",
+  "inboxMarker": "<!-- agent-inbox -->",
+  "runnerRef": "agent-runner",
+  "branchTypes": ["feat", "fix", "docs", "ci", "refactor", "test", "chore"],
+  "maxPrBodyBytes": 60000,
+  "maxCommentBytes": 20000,
+  "maxChangedFiles": 60,
+  "reviewBotLogin": "claude[bot]",
+  "reviewMarker": "<!-- verify-pr-review -->",
+  "requiredChecks": [],
+  "humanPaths": [],
+  "extraLabels": [],
+  "ci": {
+    "workflowName": "CI",
+    "workflowFile": "ci.yml"
+  },
+  "runners": {
+    "agent": "ubuntu-latest",
+    "ci": "ubuntu-latest",
+    "review": "ubuntu-latest"
+  },
+  "claude": {
+    "auth": "oauth"
+  },
+  "workflows": {
+    "triage": false
+  },
+  "schedules": {
+    "coder": "17 6-20/2 * * *",
+    "sweep": "41 * * * *",
+    "merge": "11 * * * *",
+    "triage": "17 5 * * *",
+    "digest": "30 6 * * 1"
+  },
+  "tools": {
+    "allow": [],
+    "deny": []
+  },
+  "review": {
+    "model": "claude-opus-5-5"
+  },
+  "roles": {
+    "coder": {
+      "model": "claude-opus-5-5",
+      "maxTurns": 500,
+      "timeoutMinutes": 45,
+      "runsPerDay": 8,
+      "maxOpenPrs": 2,
+      "maxAttemptsPerIssue": 2,
+      "lockTtlMinutes": 120,
+      "breakerThreshold": 3,
+      "infraGracePerDay": 1
+    },
+    "fixer": {
+      "model": "claude-opus-5-5",
+      "maxTurns": 40,
+      "timeoutMinutes": 30,
+      "runsPerDay": 6,
+      "maxCiFixes": 2,
+      "maxReviewFixes": 1,
+      "lockTtlMinutes": 90,
+      "breakerThreshold": 3,
+      "infraGracePerDay": 1
+    }
+  }
+}

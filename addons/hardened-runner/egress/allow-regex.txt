@@ -1,0 +1,4 @@
+# Hosts no fixed list can name: one anchored, case-insensitive regex per line.
+#
+# Actions' results storage (logs, artifacts, caches), an Azure storage account per shard.
+^productionresultssa[0-9]+\.blob\.core\.windows\.net$

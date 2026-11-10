@@ -1,0 +1,22 @@
+# .github/agents/toolchain: the repo's toolchain for the agent's code job (language runtimes, system
+# packages, linters). Yours: the package never overwrites it.
+#
+# Runs from the DEFAULT BRANCH's copy, before the model, WITHOUT sudo in the fixer (put system
+# packages in .github/agents/system). In the fixer the workspace is the agent PR's head: setup-*
+# actions may read a version file from it, but never run workspace code here. Installing
+# dependencies is .github/agents/dependencies. NO CACHES (cache: false on setup-*
+# actions): the agent runs code it wrote in the same job, so it could poison anything it saves.
+#
+# Build-time variables the project needs (dummy DATABASE_URL and the like) go to $GITHUB_ENV here.
+name: project toolchain
+description: Install the toolchain the coder and fixer need
+runs:
+  using: composite
+  steps:
+    - name: toolchain
+      shell: bash
+      run: echo "No toolchain configured; edit .github/agents/toolchain/action.yml"
+    # Example for a Node project:
+    # - uses: actions/setup-node@v4
+    #   with:
+    #     node-version: 22

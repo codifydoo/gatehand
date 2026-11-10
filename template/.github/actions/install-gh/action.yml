@@ -1,0 +1,89 @@
+name: Install gh
+description: Install a pinned, checksum-verified GitHub CLI onto the self-hosted runner's PATH.
+
+# WHY THIS EXISTS AT ALL: ghcr.io/actions/actions-runner — the image every job on the runner box
+# runs in — is a bare Ubuntu container, NOT the ubuntu-latest VM image. git, curl, jq, python3 and
+# sudo are present; `gh` and node are NOT. Verified inside the pinned image on 2026-08-27.
+#
+# Its consumers fail SILENTLY without it, which is the whole reason this is centralised rather
+# than left to each workflow to remember: claude-code-review.yml shells out to
+# `gh pr view/diff/comment`, and no gh there means a full, billed review that posts nothing and
+# exits green.
+#
+# WHY A COMPOSITE ACTION: copies of this step drift. This is the
+# one place to bump the pin instead.
+#
+# WHY PINNED AND CHECKSUM-VERIFIED, not `apt-get install gh`: same discipline as ci.yml's shellcheck
+# step. An unpinned tool moves on its own and reddens PRs that touched nothing, and this is a
+# tarball fetched over the network into a CI context. Bump by changing GH_VERSION and BOTH
+# checksums together — take them from the release's own gh_<version>_checksums.txt, never by hand.
+#
+# ONE CHECKSUM PER ARCHITECTURE: runners may be x86_64 or ARM. The build is picked by `uname -m`, and an architecture with no pinned checksum
+# fails here, loudly, rather than downloading something unverified.
+#
+# A FALLBACK, NOT A SECOND SOURCE: when the release link fails, the same asset comes through the
+# REST API (api.github.com, same release, same file), and the same checksum check follows.
+#
+# .tar.gz, deliberately: shellcheck's .tar.xz forced ci.yml to apt-get install xz-utils first.
+# This needs no apt step at all.
+#
+# Local action, so the caller MUST have run actions/checkout first. On `pull_request_target` a bare
+# checkout resolves the base branch, which means a PR cannot swap this action for its own — that is
+# the safe direction and worth keeping if anyone adds a `ref:` there.
+
+runs:
+  using: composite
+  steps:
+    - name: install gh
+      shell: bash
+      env:
+        GH_VERSION: "2.98.0"
+        GH_SHA256_AMD64: "3b8ac6b30336802fc1a858d7c084e11cdf24ac1a761ca90b68022d7d729208de"
+        GH_SHA256_ARM64: "cf689084f3a3618f7eae4a2420d335d74626d65f5e594b9828d125d69f800d86"
+        # Only for the API fallback below, never for the release link.
+        GH_TOKEN_FOR_DOWNLOAD: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        case "$(uname -m)" in
+          x86_64) arch=amd64 sha="${GH_SHA256_AMD64}" ;;
+          aarch64 | arm64) arch=arm64 sha="${GH_SHA256_ARM64}" ;;
+          *) echo "::error::install-gh: no pinned gh build for $(uname -m)"; exit 1 ;;
+        esac
+        name="gh_${GH_VERSION}_linux_${arch}.tar.gz"
+        out="$RUNNER_TEMP/gh.tar.gz"
+        # The release's download link can fail for one build while the file itself is fine: on
+        # 2026-11-08 the arm64 link answered 504 for hours and stopped every job on the agent box,
+        # while the REST API served the same bytes. So the link (with retries) first, then the same
+        # asset through the API. The API calls carry the job's own token: later that day GitHub's
+        # timeouts hit unauthenticated callers only, which took the anonymous API route down too. It
+        # goes to curl as config on stdin, never in argv, and curl drops it on the redirect to storage.
+        # The pinned checksum below decides either way, so the route a file came by never matters.
+        api() {
+          if [[ -n "${GH_TOKEN_FOR_DOWNLOAD:-}" ]]; then
+            printf 'header = "Authorization: Bearer %s"\n' "${GH_TOKEN_FOR_DOWNLOAD}" | curl -K - "$@"
+          else
+            curl "$@"
+          fi
+        }
+        # Each try on the link is capped (60 s): uncapped tries hung for minutes on 2026-11-08.
+        if ! curl -fsSL --connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors --retry-delay 5 -o "$out" \
+          "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${name}"; then
+          echo "::warning::install-gh: the release download link failed; fetching ${name} through the GitHub API"
+          id="$(api -fsSL --retry 3 --retry-all-errors --retry-delay 5 \
+            "https://api.github.com/repos/cli/cli/releases/tags/v${GH_VERSION}" \
+            | jq -r --arg n "${name}" '.assets[] | select(.name == $n) | .id')"
+          [[ "${id}" =~ ^[0-9]+$ ]] || { echo "::error::install-gh: the v${GH_VERSION} release has no asset ${name}"; exit 1; }
+          api -fsSL --retry 3 --retry-all-errors --retry-delay 5 -H 'Accept: application/octet-stream' -o "$out" \
+            "https://api.github.com/repos/cli/cli/releases/assets/${id}"
+        fi
+        echo "${sha}  $RUNNER_TEMP/gh.tar.gz" | sha256sum -c -
+        tar -xzf "$RUNNER_TEMP/gh.tar.gz" -C "$RUNNER_TEMP"
+        install -m 0755 "$RUNNER_TEMP/gh_${GH_VERSION}_linux_${arch}/bin/gh" "$RUNNER_TEMP/gh"
+        echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+    # Printed so a changed pin shows up in the log instead of as a mystery failure downstream.
+    # Deliberately NOT `continue-on-error` anywhere: `continue-on-error` is set per-step at the call
+    # site. An unusable gh must read as a broken job, not as a quiet skip.
+    - name: gh version
+      shell: bash
+      run: gh --version

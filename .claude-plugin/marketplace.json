@@ -1,0 +1,12 @@
+{
+  "name": "repo-agents",
+  "owner": { "name": "codifydoo" },
+  "metadata": { "description": "repo-agents: unattended Claude coding agents for a GitHub repository." },
+  "plugins": [
+    {
+      "name": "repo-agents",
+      "source": "./",
+      "description": "Unattended Claude coding agents for a GitHub repository: coder, fixer, review and merge gate, with a read-only model job."
+    }
+  ]
+}

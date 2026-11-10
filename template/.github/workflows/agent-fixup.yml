@@ -1,0 +1,398 @@
+name: Agent fixup
+# Quoted on purpose: an unquoted ` #` would start a YAML comment and drop the expression.
+run-name: "Agent fixup: ${{ github.event_name == 'workflow_dispatch' && format('PR {0} ({1})', inputs.pr, inputs.kind) || format('route {0}', github.event_name) }}"
+
+# The fixer: when CI fails on an agent PR, or a review asks for changes, the agent fixes its own PR.
+# At most roles.fixer.maxCiFixes CI fixes and maxReviewFixes review fixes per PR, then the PR is
+# agent:blocked and a person is asked (.github/scripts/agent-fixup.sh has the rules).
+# Design and runbook: .github/agents/README.md.
+#
+# TWO ENTRY POINTS, AND THE SPLIT IS THE CACHE BOUNDARY:
+#   route      on workflow_run (CI, Claude Code Review) and pull_request_review. API only: decides,
+#              then dispatches THIS workflow on the agent-runner ref for the fix, or dispatches a
+#              fresh Claude review once CI is green on a head the fixer pushed. A workflow_run run
+#              is in main's ref scope and a review run in the PR's, and the fix job runs code the
+#              agent wrote, which could write caches there; so it never runs in those runs.
+#   preflight, fix, publish
+#              in the dispatched run, on agent-runner, like the coder (agent-coder.yml has the
+#              reasons): preflight gates, checks the reason is still about the PR's head, writes the
+#              task and locks the PR; fix runs the model with a read-only token on the PR's head; a
+#              fresh checkout of main validates its commits (agent-outbox.sh publish-fix) and pushes
+#              them to the PR's branch as a fast-forward, then finalizes.
+#
+# The model never shares a job with a write-capable token. Every job that mints the App token runs
+# on the agent pool. Dispatch by hand like the coder:
+#   gh workflow run agent-fixup.yml --ref agent-runner -f pr=<n> -f kind=ci -f source=<failed CI run id>
+on:
+  workflow_run:
+    # policy.json ci.workflowName: the `name:` of the repo's CI workflow.
+    workflows: [@@CI_WORKFLOW_NAME@@, Claude Code Review]
+    types: [completed]
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: The agent PR to fix.
+        type: string
+        required: true
+      kind:
+        description: "ci (a failed CI run) or review (a review that asked for changes)"
+        type: choice
+        options: [ci, review]
+        required: true
+      source:
+        description: "The reason: a failed CI run id, comment-<id> of a Claude review, or review-<id> of a person's review"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+# A dispatched fix holds its PR: a second dispatch for the same PR waits, then finds the PR moved on
+# (its preflight checks the reason against the new head). Route runs never wait on each other.
+concurrency:
+  group: ${{ github.event_name == 'workflow_dispatch' && format('agent-fixup-pr-{0}', inputs.pr) || format('agent-fixup-route-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  route:
+    name: route
+    # Agent PRs only, by their branch shape, and any review run (a dispatched one names no PR).
+    # Runs are told apart by workflow file, not `workflow_run.name`: that is the run-name ("Claude
+    # review of PR #N"), so matching it on "Claude Code Review" routed no review at all.
+    if: >-
+      vars.AGENTS_ENABLED == 'true' && (
+        (github.event_name == 'workflow_run' && (contains(github.event.workflow_run.head_branch, '/agent-') || github.event.workflow_run.path == '.github/workflows/claude-code-review.yml')) ||
+        (github.event_name == 'pull_request_review' && github.event.pull_request.user.login == '@@BOT_SLUG@@[bot]' && github.event.review.state == 'changes_requested')
+      )
+    runs-on: @@RUNS_ON_AGENT@@
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: ./.github/actions/install-gh
+      # actions: dispatching the fix or the review. issues + pull-requests: the review-request
+      # marker comment. checks: when a head reached GitHub (its first check suite).
+      - name: agent App token
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.AGENT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          permission-actions: write
+          permission-checks: read
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: write
+      - name: gh auth status
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: gh auth status
+      - name: route
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          WR_PATH: ${{ github.event.workflow_run.path }}
+          WR_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WR_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WR_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WR_ID: ${{ github.event.workflow_run.id }}
+          REVIEW_PR: ${{ github.event.pull_request.number }}
+          REVIEW_STATE: ${{ github.event.review.state }}
+          REVIEW_USER: ${{ github.event.review.user.login }}
+          REVIEW_ID: ${{ github.event.review.id }}
+          REVIEW_COMMIT: ${{ github.event.review.commit_id }}
+        run: bash .github/scripts/agent-fixup.sh route
+
+  preflight:
+    name: preflight (gate, reason, caps, lock)
+    if: github.event_name == 'workflow_dispatch' && vars.AGENTS_ENABLED == 'true'
+    runs-on: @@RUNS_ON_AGENT@@
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      go: ${{ steps.pre.outputs.go }}
+      issue: ${{ steps.pre.outputs.issue }}
+      branch: ${{ steps.pre.outputs.branch }}
+      head: ${{ steps.pre.outputs.head }}
+      n: ${{ steps.pre.outputs.n }}
+      started_at: ${{ steps.clock.outputs.now }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: ./.github/actions/install-gh
+      - name: agent App token (issues and PR labels write, everything else read)
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.AGENT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          permission-actions: read
+          permission-checks: read
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: write
+      - name: gh auth status
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: gh auth status
+      - name: clock
+        id: clock
+        run: echo "now=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - name: preflight
+        id: pre
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+          KIND: ${{ inputs.kind }}
+          SOURCE: ${{ inputs.source }}
+          AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
+          AGENT_BOT_ID: ${{ vars.AGENT_BOT_ID }}
+          AGENT_BOT_EMAIL: ${{ vars.AGENT_BOT_ID }}+@@BOT_SLUG@@[bot]@users.noreply.github.com
+          AGENT_INBOX_ISSUE: ${{ vars.AGENT_INBOX_ISSUE }}
+          AGENT_OWNER_LOGIN: ${{ vars.AGENT_OWNER_LOGIN }}
+          RUN_REF: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/task"
+          TASK_FILE="$RUNNER_TEMP/task/task.md" bash .github/scripts/agent-fixup.sh preflight
+      - uses: actions/upload-artifact@v4
+        if: steps.pre.outputs.go == 'true'
+        with:
+          name: agent-fix-task
+          path: ${{ runner.temp }}/task/task.md
+          if-no-files-found: error
+          retention-days: 14
+
+  fix:
+    name: fix (agent)
+    needs: preflight
+    if: needs.preflight.outputs.go == 'true'
+    runs-on: @@RUNS_ON_AGENT@@
+    # Rendered from .github/agents/policy.json roles.fixer.timeoutMinutes; tests/commands/agent-fix.test.sh pins it.
+    timeout-minutes: @@FIXER_TIMEOUT@@
+    # READ ONLY, for the reasons on agent-coder.yml's code job: the action exports this token to the
+    # model, and code the model writes can use it.
+    permissions:
+      contents: read
+    steps:
+      # SUDO FIRST, BEFORE ANY OF THE PR'S CODE IS ON DISK. The repo's system-packages action is the
+      # only one that may use sudo; it runs from a sparse checkout of the DEFAULT branch's
+      # .github/agents into an otherwise empty workspace, then sudo goes. The PR checkout below
+      # replaces the workspace (actions/checkout empties a directory that is not its repository).
+      - name: main's system setup
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: .agents-main
+          sparse-checkout: .github/agents
+          persist-credentials: false
+      - name: project system packages
+        uses: ./.agents-main/.github/agents/system
+      # One root shell for both removals; see the same step in agent-coder.yml.
+      - name: drop sudo
+        run: |
+          set -u
+          sudo sh -c 'sed -i -E "/^[^#].*NOPASSWD/d" /etc/sudoers && find /etc/sudoers.d -mindepth 1 -delete'
+          if sudo -n -l >/dev/null 2>&1 || sudo -n true 2>/dev/null; then
+            echo "::error::passwordless sudo still works after removal; refusing to run the agent with it"
+            exit 1
+          fi
+          echo "sudo is gone for the rest of this job"
+      # The PR's head, not main: the fix goes on top of it. Its .claude/ is main's copy from when the
+      # branch was cut, because no agent PR can change .claude/ (outbox, guard).
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.preflight.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: agent directory
+        run: echo "AGENT_DIR=$RUNNER_TEMP/agent" >> "$GITHUB_ENV"
+      # The toolchain and dependency actions come from MAIN too, never from the PR's head: a sparse
+      # checkout of .github/agents only, excluded from git so the agent cannot commit it, and removed
+      # before the model starts. Both run without sudo.
+      - name: main's agent setup
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: .agents-main
+          sparse-checkout: .github/agents
+          persist-credentials: false
+      - name: exclude main's agent setup from git
+        run: echo ".agents-main/" >> .git/info/exclude
+      - name: project toolchain
+        uses: ./.agents-main/.github/agents/toolchain
+      # NO CACHES, as in the coder's code job. From here on the PR's code runs (dependency install
+      # scripts, generators), which the agent wrote.
+      - name: project dependencies
+        uses: ./.agents-main/.github/agents/dependencies
+      - name: remove main's agent setup
+        run: rm -rf .agents-main
+      - uses: actions/download-artifact@v4
+        with:
+          name: agent-fix-task
+          path: ${{ runner.temp }}/agent
+      - name: prepare the work branch
+        env:
+          BOT_ID: ${{ vars.AGENT_BOT_ID }}
+          HEAD_SHA: ${{ needs.preflight.outputs.head }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$AGENT_DIR/outbox"
+          test -s "$AGENT_DIR/task.md"
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          git checkout -b agent-work
+          git config user.name "@@BOT_SLUG@@[bot]"
+          git config user.email "${BOT_ID}+@@BOT_SLUG@@[bot]@users.noreply.github.com"
+      - name: fix
+        id: agent
+        uses: anthropics/claude-code-action@61a9c274fa7110a66dfafc1bbbced03833eb25fe # v1.0.269
+        env:
+          # Build-time dummies a project needs belong in GITHUB_ENV from .github/agents/toolchain.
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+        with:
+          @@CLAUDE_AUTH@@
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          bot_name: @@BOT_SLUG@@[bot]
+          bot_id: ${{ vars.AGENT_BOT_ID }}
+          # Dispatched by the router with the App token, so the actor is the agent bot.
+          allowed_bots: @@BOT_SLUG@@
+          prompt: "/agent-fix ${{ inputs.pr }} ${{ runner.temp }}/agent"
+          # --allowedTools must equal the allowed-tools frontmatter of .claude/commands/agent-fix.md
+          # (tests/commands/agent-fix.test.sh), and --disallowedTools the coder's deny list.
+          claude_args: |
+            --model @@FIXER_MODEL@@
+            --max-turns @@FIXER_MAX_TURNS@@
+            --add-dir ${{ runner.temp }}/agent
+            --allowedTools "@@AGENT_ALLOWED_TOOLS@@"
+            --disallowedTools "@@AGENT_DISALLOWED_TOOLS@@"
+      - name: package the work
+        if: always() && steps.agent.outcome != 'skipped'
+        env:
+          EXECUTION_FILE: ${{ steps.agent.outputs.execution_file }}
+          AGENT_OUTCOME: ${{ steps.agent.outcome }}
+          HEAD_SHA: ${{ needs.preflight.outputs.head }}
+        run: |
+          set -uo pipefail
+          out="$AGENT_DIR/outbox"
+          mkdir -p "$out"
+          rm -f "$out/agent.bundle" "$out/metrics.json"
+          if [ "$(git rev-list --count "$HEAD_SHA..agent-work" 2>/dev/null || echo 0)" -gt 0 ]; then
+            git bundle create "$out/agent.bundle" "$HEAD_SHA..agent-work"
+          fi
+          if [ -s "${EXECUTION_FILE:-}" ]; then
+            jq -c --arg o "$AGENT_OUTCOME" '[.[] | select(.type == "result")] | last // {}
+              | {turns: .num_turns, duration_ms: .duration_ms, cost_usd: .total_cost_usd,
+                 is_error: .is_error, subtype: .subtype, step_outcome: $o}' "$EXECUTION_FILE" \
+              > "$out/metrics.json" || echo '{}' > "$out/metrics.json"
+          fi
+          ls -la "$out"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.agent.outcome != 'skipped'
+        with:
+          name: agent-fix-outbox
+          path: ${{ runner.temp }}/agent/outbox/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  publish:
+    name: publish and finalize
+    needs: [preflight, fix]
+    if: always() && needs.preflight.outputs.go == 'true'
+    runs-on: @@RUNS_ON_AGENT@@
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        if: always()
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/install-gh
+        if: always()
+      # contents: the push and the ledger. pull-requests + issues: the PR comment, labels and inbox.
+      # actions: re-dispatching a failed attempt, and the run's jobs. checks: their annotations, which
+      # say whether a cancelled job hit its time limit.
+      - name: agent App token
+        id: app
+        if: always()
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.AGENT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          permission-actions: write
+          permission-checks: read
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+      - name: gh auth status
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: gh auth status
+      - uses: actions/download-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: agent-fix-outbox
+          path: ${{ runner.temp }}/outbox
+      - name: publish the fix
+        id: outbox
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          OUTBOX: ${{ runner.temp }}/outbox
+          FINAL_DIR: ${{ runner.temp }}/final
+          PR: ${{ inputs.pr }}
+          ISSUE: ${{ needs.preflight.outputs.issue }}
+          BRANCH: ${{ needs.preflight.outputs.branch }}
+          HEAD_SHA: ${{ needs.preflight.outputs.head }}
+          KIND: ${{ inputs.kind }}
+          N: ${{ needs.preflight.outputs.n }}
+          CODE_RESULT: ${{ needs.fix.result }}
+          AGENT_BOT_EMAIL: ${{ vars.AGENT_BOT_ID }}+@@BOT_SLUG@@[bot]@users.noreply.github.com
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .github/scripts/agent-outbox.sh publish-fix
+      - name: finalize (labels, comment, retry or block, ledger, breaker)
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          AGENT_BOT_EMAIL: ${{ vars.AGENT_BOT_ID }}+@@BOT_SLUG@@[bot]@users.noreply.github.com
+          AGENT_INBOX_ISSUE: ${{ vars.AGENT_INBOX_ISSUE }}
+          AGENT_OWNER_LOGIN: ${{ vars.AGENT_OWNER_LOGIN }}
+          OUTCOME: ${{ steps.outbox.outputs.outcome || 'failed' }}
+          REASON: ${{ steps.outbox.outputs.reason || (steps.outbox.outputs.outcome == '' && 'the publish step crashed' || '') }}
+          NEW_HEAD: ${{ steps.outbox.outputs.new_head }}
+          PR: ${{ inputs.pr }}
+          ISSUE: ${{ needs.preflight.outputs.issue }}
+          KIND: ${{ inputs.kind }}
+          SOURCE: ${{ inputs.source }}
+          N: ${{ needs.preflight.outputs.n }}
+          # `cancelled` or `skipped`: finalize reads the run's jobs and their annotations to tell a
+          # person's cancel from a timeout. Not cancelled(): it is allowed only in an `if:`, and this
+          # always() job is never cancelled, so in a step it would only ever see publish's own timeout.
+          FIX_RESULT: ${{ needs.fix.result }}
+          FINAL_DIR: ${{ runner.temp }}/final
+          METRICS_FILE: ${{ runner.temp }}/outbox/metrics.json
+          STARTED_AT: ${{ needs.preflight.outputs.started_at }}
+          TRIGGER: ${{ github.event_name }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .github/scripts/agent-fixup.sh finalize

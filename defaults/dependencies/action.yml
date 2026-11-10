@@ -1,0 +1,17 @@
+# .github/agents/dependencies: install the repo's dependencies for the agent's code job. Yours: the
+# package never overwrites it.
+#
+# Runs WITHOUT sudo in the fixer, after the PR's head is checked out: dependency install scripts are
+# code the agent may have written. Lockfile-exact installs only (npm ci, pnpm install
+# --frozen-lockfile, go mod download, pip install -r with hashes).
+name: project dependencies
+description: Install the repo's dependencies
+runs:
+  using: composite
+  steps:
+    - name: dependencies
+      shell: bash
+      run: echo "No dependencies configured; edit .github/agents/dependencies/action.yml"
+    # Example for a Node project:
+    # - shell: bash
+    #   run: npm ci

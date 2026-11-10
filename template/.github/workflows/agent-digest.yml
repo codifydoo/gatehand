@@ -1,0 +1,57 @@
+name: Agent digest
+
+# The weekly digest: one comment on the agent inbox issue with what the agents did in the last seven
+# days and what waits for the owner (open requests, stopped roles, blocked issues, fixes to check
+# in production), the agent PRs with CI on the first push and the first review's verdict, runs and
+# cost per role, the queue, and any sections the repo adds (agent_hook_digest_sections).
+# .github/scripts/agent-digest.sh has the rules; tests/workflows/agents-digest.test.sh covers them.
+# Design and runbook: .github/agents/README.md.
+#
+# No model runs here, and nothing from an issue or PR is executed: the script reads the ledger branch
+# and the API, and writes one comment, which a second run in the same ISO week edits instead of
+# duplicating. So it holds only this job's GITHUB_TOKEN, no App token, and runs on the CI runner for
+# seconds. It does not stop with
+# AGENTS_ENABLED: a paused week is worth a digest too, and it says the agents are off.
+on:
+  schedule:
+    # policy.json schedules.digest. On a self-hosted agent box the kick timers dispatch it on time
+    # (addons/hardened-runner/agent-kick.sh) and this cron is the backup.
+    - cron: "@@CRON_DIGEST@@"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    name: weekly digest
+    runs-on: @@RUNS_ON_CI@@
+    timeout-minutes: 10
+    permissions:
+      contents: read # the ledger branch
+      issues: write # the digest comment on the inbox issue
+      pull-requests: read # the agent PRs
+      actions: read # the CI runs of the agent PRs
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: ./.github/actions/install-gh
+      - name: gh auth status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh auth status
+      - name: digest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          AGENT_INBOX_ISSUE: ${{ vars.AGENT_INBOX_ISSUE }}
+          AGENT_OWNER_LOGIN: ${{ vars.AGENT_OWNER_LOGIN }}
+          AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
+          AGENT_AUTO_MERGE: ${{ vars.AGENT_AUTO_MERGE }}
+        run: bash .github/scripts/agent-digest.sh run

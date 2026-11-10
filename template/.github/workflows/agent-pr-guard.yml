@@ -1,0 +1,58 @@
+name: Agent PR guard
+
+# `agent pr guard`: the rules an agent PR must meet, checked by CI instead of trusted to the outbox
+# that opened it (.github/scripts/agent-pr-guard.sh has the rules). Meant to be a REQUIRED check on
+# main once the agents run (.github/agents/README.md, setup step 8).
+#
+# Human PRs: the job is skipped, and a skipped job reports success to a required check, so it costs
+# a human PR no runner slot and no wait. Only `@@BOT_SLUG@@[bot]` PRs run it.
+#
+# The script and the protected-path list are read from the PR's BASE commit, never its head, so an
+# agent PR that edits them is still judged by main's copy. This workflow file itself is out of the
+# agent's reach: its App has no Workflows permission, so GitHub refuses any push that touches it.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: agent-pr-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: agent pr guard
+    if: github.event.pull_request.user.login == '@@BOT_SLUG@@[bot]'
+    runs-on: @@RUNS_ON_CI@@
+    timeout-minutes: 5
+    # The guard reads the PR's timeline (issues/{n}/timeline) to see who applied
+    # agent:allow-protected. GitHub lists that endpoint under both Issues and Pull requests, and
+    # which one a PR's timeline needs is unverified, so it gets both reads; a token that cannot read
+    # it fails closed (the label is ignored and the check goes red).
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/install-gh
+      - name: gh auth status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh auth status
+      - name: check the agent rules
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: bash .github/scripts/agent-pr-guard.sh

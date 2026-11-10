@@ -1,0 +1,7 @@
+# actionlint config for linting RENDERED workflows (tests/run.sh). create-github-app-token@v3 takes
+# `client-id` in place of `app-id`; actionlint's bundled metadata predates that.
+paths:
+  .github/workflows/**/*.{yml,yaml}:
+    ignore:
+      - '^input "client-id" is not defined in action "actions/create-github-app-token@v3"\. '
+      - '^missing input "app-id" which is required by action "actions/create-github-app-token@v3"\. '

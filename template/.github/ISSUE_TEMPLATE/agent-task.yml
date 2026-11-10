@@ -1,0 +1,48 @@
+name: Agent task
+description: A small, well-scoped change for the coder agent. Filing this queues it (label agent:ready).
+title: "type(scope): what should change"
+labels: ["agent:ready"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The coder agent picks up `agent:ready` issues (.github/agents/README.md). It opens a PR
+        that says `Refs` this issue, never closes it. Keep it to one change a reviewer can read in one
+        sitting. Remove the `agent:ready` label if you only want to write the task down. The agent
+        takes the issue only if the person who applied `agent:ready` has write access to the repo.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens, or what is missing
+      description: The current behaviour, with file paths, commands or error text where you have them.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it matters
+    validations:
+      required: false
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: The checks that prove it is done. The agent will not pick up an issue without this section.
+    validations:
+      required: true
+  - type: textarea
+    id: where
+    attributes:
+      label: Where
+      description: Files or areas to look at first, if you know them.
+    validations:
+      required: false
+  - type: dropdown
+    id: size
+    attributes:
+      label: Size
+      options:
+        - S (one function or file)
+        - M (a few files in one area)
+    validations:
+      required: true

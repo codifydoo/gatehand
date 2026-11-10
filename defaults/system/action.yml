@@ -1,0 +1,22 @@
+# .github/agents/system: system packages for the agent's code job, the ONE setup step that may use
+# sudo (apt-get install make, say). Yours: the package never overwrites it.
+#
+# Runs from the DEFAULT BRANCH's copy, before any agent-written code is on disk (in the fixer the
+# workspace holds nothing else yet), and sudo is dropped right after it. Never read workspace files
+# here and never run project code: install fixed packages only.
+#
+# Behind an egress proxy (addons/hardened-runner) sudo resets the environment; keep the proxy with
+# `sudo --preserve-env=http_proxy,https_proxy,HTTP_PROXY,HTTPS_PROXY,no_proxy,NO_PROXY`.
+name: project system packages
+description: Install system packages the agents' toolchain needs (runs with sudo)
+runs:
+  using: composite
+  steps:
+    - name: system packages
+      shell: bash
+      run: echo "No system packages configured; edit .github/agents/system/action.yml"
+    # Example:
+    # - shell: bash
+    #   run: |
+    #     sudo apt-get -o Acquire::Retries=5 update -qq
+    #     sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq make xz-utils

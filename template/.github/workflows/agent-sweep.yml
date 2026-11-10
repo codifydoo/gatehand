@@ -1,0 +1,75 @@
+name: Agent sweep
+
+# Hourly state hygiene for the autonomous agents (.github/scripts/agent-sweep.sh has the rules):
+#   - an expired lock whose run has ended is put where that run would have put it: agent:pr-open if
+#     it opened its PR, its ledger row's outcome if its finalize ran, else back to the queue (or
+#     agent:blocked on its last attempt) with the ledger row its publish job never wrote. Locks are
+#     left alone while any coder run is in progress;
+#   - an expired agent:fixing lock whose fixer run has ended is finalized as a failed fix;
+#   - an agent:pr-open issue whose agent PR merged goes to agent:done-pending-deploy, and one whose
+#     agent PR was closed unmerged to agent:blocked;
+#   - a breaker whose failures reached the threshold without tripping is tripped (a lowered
+#     threshold, or a hand edit of the ledger).
+# Design: .github/agents/README.md. Runbook: .github/agents/README.md.
+#
+# No model runs here, and nothing from an issue or PR is executed: the script reads labels, the
+# bot's own comments and the Actions API, and writes labels, comments, the ledger and inbox requests.
+#
+# Behind the AGENTS_ENABLED kill switch like every agent workflow except the inbox. On the agent
+# runner: this job mints the App token (see agent-coder.yml).
+on:
+  schedule:
+    # :41, clear of the coder's :17 and of the top of the hour, when GitHub's scheduler is busiest.
+    - cron: "@@CRON_SWEEP@@"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One sweep at a time. A sweep still queued when the next hour's starts is replaced by it, which is
+# fine: each one reads the whole state afresh.
+concurrency:
+  group: agent-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: sweep (locks, merged PRs, breaker)
+    if: vars.AGENTS_ENABLED == 'true'
+    runs-on: @@RUNS_ON_AGENT@@
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: ./.github/actions/install-gh
+      # issues: labels, comments and inbox requests. contents: the ledger branch. actions: whether a
+      # lock's run is still going, and re-dispatching a fix whose run died. checks: a cancelled job's
+      # annotations, which say whether it hit its time limit. pull-requests: the merge commit of a
+      # merged agent PR, and a dead fix's PR labels and comment.
+      - name: agent App token
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.AGENT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          permission-actions: write
+          permission-checks: read
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+      - name: gh auth status
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: gh auth status
+      - name: sweep
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          AGENT_BOT_EMAIL: ${{ vars.AGENT_BOT_ID }}+@@BOT_SLUG@@[bot]@users.noreply.github.com
+          AGENT_INBOX_ISSUE: ${{ vars.AGENT_INBOX_ISSUE }}
+          AGENT_OWNER_LOGIN: ${{ vars.AGENT_OWNER_LOGIN }}
+        run: bash .github/scripts/agent-sweep.sh run

@@ -1,0 +1,16 @@
+{
+  "name": "repo-agent",
+  "url": "https://github.com/codifydoo/repo-agents",
+  "hook_attributes": { "url": "https://github.com/codifydoo/repo-agents", "active": false },
+  "public": false,
+  "default_permissions": {
+    "contents": "write",
+    "issues": "write",
+    "pull_requests": "write",
+    "actions": "write",
+    "checks": "read",
+    "statuses": "read",
+    "metadata": "read"
+  },
+  "default_events": []
+}

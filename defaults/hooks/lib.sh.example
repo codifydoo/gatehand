@@ -1,0 +1,20 @@
+# .github/agents/hooks/lib.sh (rename from lib.sh.example to enable). Optional, yours.
+# Sourced last by .github/scripts/agent-lib.sh, from the default branch, in every agent script.
+# Define only the hooks you need; an undefined hook is skipped.
+
+# agent_hook_pr_guard <labels> <files-file>: extra rules for the `agent pr guard` check. Print one
+# "FAIL: <reason>" line per broken rule. <labels> is newline-separated; <files-file> holds the PR's
+# changed paths, one per line. Example: PRs labelled docs-only may change docs/ only.
+# agent_hook_pr_guard() {
+#   if grep -Fxq 'docs-only' <<<"$1"; then
+#     hits="$(grep -v '^docs/' "$2" | grep -v '^$' | head -5)"
+#     [[ -z "${hits}" ]] || printf 'FAIL: a docs-only PR changes paths outside docs/: %s\n' "$(tr '\n' ' ' <<<"${hits}")"
+#   fi
+# }
+
+# agent_hook_inbox_<kind> approve|reject <REQ-id> <issue> <reason> <bot-comments>: handle answers to
+# inbox requests your own workflows post with `inbox_request <kind> ...`. Print the reply line
+# ("- `REQ-…` approved: …"); exit 0 to record the request as answered.
+
+# agent_hook_digest_sections: print extra weekly digest sections (markdown, `### ` headings).
+# Exit 1 when part of it could not be read; the rest of the digest still posts.

@@ -1,0 +1,403 @@
+name: Agent coder
+# Quoted on purpose: an unquoted ` #` would start a YAML comment and drop the expression
+# (see the same note at the top of claude-code-review.yml).
+run-name: "Agent coder: ${{ github.event_name == 'schedule' && 'schedule kick' || (inputs.issue != '' && format('issue {0}', inputs.issue) || 'auto pick') }}"
+
+# The autonomous coder: takes ONE issue labelled `agent:ready` (or the one named), implements it on
+# a branch, and opens a PR that says `Refs #N`. Design and runbook (setup, kill switch, inbox,
+# ledger): .github/agents/README.md.
+#
+# THREE JOBS, AND THE SPLIT IS THE SECURITY MODEL:
+#   preflight  gate (kill switch, breaker, caps, run ref), pick, lock, then a one-time snapshot of
+#              the issue as the task file (only writers' comments; re-checked after the fetch)
+#   code       the model works here, holding ONLY a read-only GITHUB_TOKEN and the Claude
+#              credential; it can edit and commit locally, nothing else
+#   publish    a FRESH checkout of main validates the agent's commits (shipped as a git bundle) and
+#              files, then pushes and opens the PR with the App token; then labels, issue comment,
+#              inbox request, ledger, breaker
+# The model never shares a job with a write-capable token, and nothing it wrote is executed by one:
+# publish runs main's scripts in a new container, and its composite actions and git hooks are not
+# the agent's either.
+#
+# ALL ON the agent runner (policy.json runners.agent). On self-hosted runners keep it apart from the
+# pool CI uses: CI runs PR code (an agent PR's too), so a job there that minted the App token would
+# sit one escape away from whatever ran beside it. GitHub-hosted runners are a fresh VM per job.
+#
+# DISPATCH ON THE `agent-runner` REF, never the default branch: the gate refuses otherwise, and
+# agent-state.sh ref_state says why (the code job could write caches in its run's ref scope).
+#   gh workflow run agent-coder.yml --ref agent-runner -f issue=<n>
+#
+# THE SCHEDULE ONLY KICKS. A scheduled run is on the default branch, where the gate refuses to run,
+# so its one job (kick) dispatches an auto-pick run on agent-runner, unless a coder run is already
+# queued or running; every other job is dispatch-only. policy.json roles.coder.runsPerDay caps
+# the day whatever the schedule, in the gate.
+on:
+  schedule:
+    # policy.json schedules.coder. Off the hour: GitHub's scheduler is busiest on it.
+    - cron: "@@CRON_CODER@@"
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to implement. Empty = the oldest highest-priority agent:ready issue.
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# One coder at a time. NOTE GitHub's rule: a group holds one running and ONE pending run; a third
+# queued dispatch cancels the pending one. So the scheduled run has its own group, and its kick
+# dispatches only when no coder run is queued or running (agent-state.sh kick).
+concurrency:
+  group: ${{ github.event_name == 'schedule' && 'agent-coder-kick' || 'agent-coder' }}
+  cancel-in-progress: false
+
+jobs:
+  kick:
+    name: kick (schedule -> dispatch on agent-runner)
+    if: github.event_name == 'schedule' && vars.AGENTS_ENABLED == 'true'
+    runs-on: @@RUNS_ON_AGENT@@
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: ./.github/actions/install-gh
+      - name: agent App token (actions, to dispatch)
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.AGENT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          permission-actions: write
+      - name: gh auth status
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: gh auth status
+      - name: kick
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash .github/scripts/agent-state.sh kick
+
+  preflight:
+    name: preflight (gate, pick, lock)
+    # The kill switch. Unset or anything but 'true' skips the whole run; agent-state.sh gate checks
+    # it again with the breaker and the caps. Dispatched runs only: a scheduled run only kicks.
+    if: github.event_name == 'workflow_dispatch' && vars.AGENTS_ENABLED == 'true'
+    runs-on: @@RUNS_ON_AGENT@@
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      go: ${{ steps.pick.outputs.issue != '' && steps.gate.outputs.go == 'true' }}
+      issue: ${{ steps.pick.outputs.issue }}
+      attempt: ${{ steps.pick.outputs.attempt }}
+      started_at: ${{ steps.clock.outputs.now }}
+      # failure when a non-writer changed the issue after the label the run trusts, or the trust
+      # check failed; publish turns that into an `untrusted-change` refusal, and finalize blocks it.
+      snapshot: ${{ steps.snapshot.outcome }}
+    steps:
+      # Every job checks out the DEFAULT branch: the run's ref is agent-runner only to scope it.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: ./.github/actions/install-gh
+      - name: agent App token (issues write, everything else read)
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.AGENT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: read
+      - name: gh auth status
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: gh auth status
+      - name: clock
+        id: clock
+        run: echo "now=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - name: gate
+        id: gate
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          AGENTS_ENABLED: ${{ vars.AGENTS_ENABLED }}
+          AGENT_BOT_ID: ${{ vars.AGENT_BOT_ID }}
+          RUN_REF: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: bash .github/scripts/agent-state.sh gate coder
+      - name: pick an issue
+        id: pick
+        if: steps.gate.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          WANT: ${{ inputs.issue }}
+        run: bash .github/scripts/agent-state.sh pick "$WANT"
+      - name: lock it
+        if: steps.gate.outputs.go == 'true' && steps.pick.outputs.issue != ''
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ steps.pick.outputs.issue }}
+          ATTEMPT: ${{ steps.pick.outputs.attempt }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .github/scripts/agent-state.sh lock "$ISSUE" "$ATTEMPT"
+      # The task file is built HERE, once, from one fetch, and re-checked after it: the code job
+      # reads this artifact rather than fetching the issue again minutes later, so an edit made while
+      # it installs toolchains never reaches the model. A named dispatch is checked from the latest
+      # label applied by someone with write access (else the oldest label any person applied, else
+      # the issue's creation) or the run's start, whichever is earlier; an auto-pick from the
+      # trusted label.
+      - name: snapshot the task
+        id: snapshot
+        if: steps.gate.outputs.go == 'true' && steps.pick.outputs.issue != ''
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ steps.pick.outputs.issue }}
+          SINCE: ${{ inputs.issue != '' && steps.clock.outputs.now || 'label' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/task"
+          bash .github/scripts/agent-state.sh snapshot "$ISSUE" "$RUNNER_TEMP/task/task.md" "$SINCE"
+      - uses: actions/upload-artifact@v4
+        if: steps.gate.outputs.go == 'true' && steps.pick.outputs.issue != ''
+        with:
+          name: agent-task
+          path: ${{ runner.temp }}/task/task.md
+          if-no-files-found: error
+          retention-days: 14
+
+  code:
+    name: implement (agent)
+    needs: preflight
+    if: needs.preflight.outputs.go == 'true'
+    # The agent runner (see the header). Never a self-hosted pool that CI also uses.
+    runs-on: @@RUNS_ON_AGENT@@
+    # Rendered from .github/agents/policy.json roles.coder.timeoutMinutes; tests/commands/agent-implement.test.sh pins it.
+    timeout-minutes: @@CODER_TIMEOUT@@
+    # READ ONLY, no id-token, and no issues or pull-requests: claude-code-action exports the token
+    # below as GH_TOKEN to the model's process whatever this job sets, and code the model writes can
+    # use it. With contents only, it cannot read issues or PRs through their APIs; the snapshot from
+    # preflight is what it gets. The repository events feed is a Metadata endpoint every token can
+    # read, and whether it carries issue text to this token is a first-run check (runbook).
+    permissions:
+      contents: read
+    steps:
+      # persist-credentials: false, so the read-only token is not even in .git/config.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      # Through GITHUB_ENV because a job-level `env:` cannot read the `runner` context.
+      - name: agent directory
+        run: echo "AGENT_DIR=$RUNNER_TEMP/agent" >> "$GITHUB_ENV"
+      # NO CACHES in this job. The agent runs code it wrote, so it controls the rest of this job,
+      # including the post steps that would save or restore caches. The run is on the agent-runner
+      # ref, so nothing it could write is visible to main or to PRs; restoring none means
+      # agent-runner's own caches are never read back either. A cold install costs minutes.
+      #
+      # The repo's own setup, in three composite actions it owns (.github/agents/system, toolchain
+      # and dependencies; the installer writes starting points). All three run from MAIN here, with
+      # sudo still available. Their step names are listed in agent-lib.sh CODER_PRE_AGENT_STEPS, so
+      # a failure in them (a mirror outage) costs no attempt.
+      - name: project system packages
+        uses: ./.github/agents/system
+      - name: project toolchain
+        uses: ./.github/agents/toolchain
+      - name: project dependencies
+        uses: ./.github/agents/dependencies
+      - uses: actions/download-artifact@v4
+        with:
+          name: agent-task
+          path: ${{ runner.temp }}/agent
+      - name: prepare the work branch
+        env:
+          BOT_ID: ${{ vars.AGENT_BOT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$AGENT_DIR/outbox"
+          test -s "$AGENT_DIR/task.md"
+          git checkout -b agent-work
+          git config user.name "@@BOT_SLUG@@[bot]"
+          git config user.email "${BOT_ID}+@@BOT_SLUG@@[bot]@users.noreply.github.com"
+      # Last privileged act: give up passwordless sudo before the model starts. On a self-hosted
+      # agent pool each runner should be a single-use, unprivileged container with no host mounts
+      # (addons/hardened-runner); without sudo, a container escape needs more than a kernel bug
+      # reachable from an unprivileged user. It does NOT keep the agent from the Actions runtime
+      # token: as the same user it can still change what later steps run (GITHUB_ENV, GITHUB_PATH,
+      # the downloaded actions). The agent-runner ref is what keeps that token's reach away from
+      # main. Fails the run if sudo still works afterwards. Both removals run in ONE root shell: on
+      # GitHub-hosted images the runner's grant is a file in the 0750 /etc/sudoers.d, so a glob there
+      # expanded by the runner user stays literal and deletes nothing, and once the file is gone no
+      # later `sudo` line would run. The check is `sudo -n -l`, not `sudo -n true`: it succeeds while ANY
+      # passwordless grant is left, including one limited to a few commands in another included file.
+      - name: drop sudo
+        run: |
+          set -u
+          sudo sh -c 'sed -i -E "/^[^#].*NOPASSWD/d" /etc/sudoers && find /etc/sudoers.d -mindepth 1 -delete'
+          if sudo -n -l >/dev/null 2>&1 || sudo -n true 2>/dev/null; then
+            echo "::error::passwordless sudo still works after removal; refusing to run the agent with it"
+            exit 1
+          fi
+          echo "sudo is gone for the rest of this job"
+      - name: implement
+        id: agent
+        uses: anthropics/claude-code-action@61a9c274fa7110a66dfafc1bbbced03833eb25fe # v1.0.269
+        env:
+          # Build-time dummies a project needs belong in GITHUB_ENV from .github/agents/toolchain.
+          # Claude Code's telemetry, error reports and update checks: under an egress allowlist
+          # (addons/hardened-runner) they are would-deny noise, then refused.
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+        with:
+          @@CLAUDE_AUTH@@
+          # Supplying a token skips the action's OIDC exchange for the Claude App's token, which
+          # would carry contents/issues/pull-requests WRITE into this job. This one is read-only.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          bot_name: @@BOT_SLUG@@[bot]
+          bot_id: ${{ vars.AGENT_BOT_ID }}
+          # A dispatch from the inbox (/approve, /rerun) is sent with the App token, so its actor is
+          # the agent bot, which the action refuses unless named here.
+          allowed_bots: @@BOT_SLUG@@
+          prompt: "/agent-implement ${{ needs.preflight.outputs.issue }} ${{ runner.temp }}/agent"
+          # --allowedTools must equal the allowed-tools frontmatter of .claude/commands/agent-implement.md;
+          # tests/commands/agent-implement.test.sh pins them together, plus --model and --max-turns
+          # against policy.json. Both lists are rendered from policy.json tools.*. --disallowedTools
+          # is what BOUNDS the grant: a checked-out .claude/settings.json may allow more, and deny
+          # beats allow from every scope. Defence in depth only: the read-only token is the real
+          # boundary.
+          claude_args: |
+            --model @@CODER_MODEL@@
+            --max-turns @@CODER_MAX_TURNS@@
+            --add-dir ${{ runner.temp }}/agent
+            --allowedTools "@@AGENT_ALLOWED_TOOLS@@"
+            --disallowedTools "@@AGENT_DISALLOWED_TOOLS@@"
+      # Everything below runs whatever the agent did, so a failed or timed-out run still leaves the
+      # evidence. The agent controls this job, so nothing here is trusted: publish treats the bundle,
+      # the files and metrics.json as data from the agent and validates all of it.
+      - name: package the work
+        if: always() && steps.agent.outcome != 'skipped'
+        env:
+          EXECUTION_FILE: ${{ steps.agent.outputs.execution_file }}
+          AGENT_OUTCOME: ${{ steps.agent.outcome }}
+        run: |
+          set -uo pipefail
+          out="$AGENT_DIR/outbox"
+          mkdir -p "$out"
+          rm -f "$out/agent.bundle" "$out/metrics.json"
+          base="origin/${{ github.event.repository.default_branch }}"
+          if [ "$(git rev-list --count "$base"..agent-work 2>/dev/null || echo 0)" -gt 0 ]; then
+            git bundle create "$out/agent.bundle" "$base"..agent-work
+          fi
+          if [ -s "${EXECUTION_FILE:-}" ]; then
+            jq -c --arg o "$AGENT_OUTCOME" '[.[] | select(.type == "result")] | last // {}
+              | {turns: .num_turns, duration_ms: .duration_ms, cost_usd: .total_cost_usd,
+                 is_error: .is_error, subtype: .subtype, step_outcome: $o}' "$EXECUTION_FILE" \
+              > "$out/metrics.json" || echo '{}' > "$out/metrics.json"
+          fi
+          ls -la "$out"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.agent.outcome != 'skipped'
+        with:
+          name: agent-outbox
+          path: ${{ runner.temp }}/agent/outbox/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  publish:
+    name: publish and finalize
+    needs: [preflight, code]
+    # Runs whenever preflight locked an issue, so a crashed or timed-out code job still releases
+    # the lock and records the attempt.
+    if: always() && needs.preflight.outputs.go == 'true'
+    runs-on: @@RUNS_ON_AGENT@@
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      # MAIN, not the agent's branch, and no persisted token: the scripts that act are main's.
+      # `if: always()` on every setup step: on a CANCELLED run GitHub re-evaluates step conditions,
+      # and steps with the default success() are skipped, which would leave the lock in place.
+      - uses: actions/checkout@v7
+        if: always()
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/install-gh
+        if: always()
+      - name: agent App token (push, PR, issues; the ledger branch is contents too)
+        id: app
+        if: always()
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.AGENT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          # actions: read is for finalize alone: the run's jobs API says whether the code job failed
+          # before the model step (agent-lib.sh infra_failure), which then costs no attempt.
+          permission-actions: read
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+      - name: gh auth status
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: gh auth status
+      - uses: actions/download-artifact@v4
+        if: always()
+        continue-on-error: true # a code job that never started leaves no artifact; publish says so
+        with:
+          name: agent-outbox
+          path: ${{ runner.temp }}/outbox
+      - name: publish
+        id: outbox
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          OUTBOX: ${{ runner.temp }}/outbox
+          FINAL_DIR: ${{ runner.temp }}/final
+          ISSUE: ${{ needs.preflight.outputs.issue }}
+          ATTEMPT: ${{ needs.preflight.outputs.attempt }}
+          CODE_RESULT: ${{ needs.code.result }}
+          SNAPSHOT_RESULT: ${{ needs.preflight.outputs.snapshot }}
+          AGENT_BOT_EMAIL: ${{ vars.AGENT_BOT_ID }}+@@BOT_SLUG@@[bot]@users.noreply.github.com
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .github/scripts/agent-outbox.sh publish
+      - name: finalize (labels, comment, inbox, ledger, breaker)
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          AGENT_BOT_EMAIL: ${{ vars.AGENT_BOT_ID }}+@@BOT_SLUG@@[bot]@users.noreply.github.com
+          AGENT_INBOX_ISSUE: ${{ vars.AGENT_INBOX_ISSUE }}
+          AGENT_OWNER_LOGIN: ${{ vars.AGENT_OWNER_LOGIN }}
+          OUTCOME: ${{ steps.outbox.outputs.outcome || 'failed' }}
+          REASON: ${{ steps.outbox.outputs.reason || (steps.outbox.outputs.outcome == '' && 'the publish step crashed' || '') }}
+          # With RUN_ID, how finalize tells a run that never reached the model from a counted one.
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          CODE_RESULT: ${{ needs.code.result }}
+          SNAPSHOT_RESULT: ${{ needs.preflight.outputs.snapshot }}
+          ISSUE: ${{ needs.preflight.outputs.issue }}
+          ATTEMPT: ${{ needs.preflight.outputs.attempt }}
+          PR_NUMBER: ${{ steps.outbox.outputs.pr_number }}
+          PR_URL: ${{ steps.outbox.outputs.pr_url }}
+          FINAL_DIR: ${{ runner.temp }}/final
+          METRICS_FILE: ${{ runner.temp }}/outbox/metrics.json
+          STARTED_AT: ${{ needs.preflight.outputs.started_at }}
+          TRIGGER: ${{ github.event_name }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .github/scripts/agent-state.sh finalize
