@@ -254,6 +254,32 @@ sudo_line="$(grep -n '^      - name: drop sudo$' <<<"${fix_nc}" | cut -d: -f1)"
 head_line="$(grep -n 'ref: \${{ needs.preflight.outputs.head }}' <<<"${fix_nc}" | cut -d: -f1)"
 [[ -n "${sudo_line}" && -n "${head_line}" && "${sudo_line}" -lt "${head_line}" ]] && t_pass "fix job drops sudo before it checks out the PR's head" \
   || t_fail "fix job: sudo is still there when the PR's head is checked out (drop sudo at ${sudo_line:-?}, head at ${head_line:-?})"
+# Post steps re-read their composite action's action.yml at the end of the job, so main's copy comes
+# back after the model and the outbox upload, from the default branch, as the job's last steps. Only
+# when it was removed: before that the first copy is still there, and an extra checkout failing in an
+# outage would make an uncounted pre-agent failure a counted attempt.
+fend="$(grep -oE '^      - .*' <<<"${fix_nc}" | sed -E 's/^      - (name: )?//; s/@.*$//' | tail -n 3 | tr '\n' '|')"
+expect_eq "fix job ends: outbox upload, clear the path, restore main's setup for the post steps" \
+  "${fend}" "uses: actions/upload-artifact|clear the path for main's agent setup|restore main's agent setup for the post steps|"
+step_block_named() { awk -v n="      - name: $1" '$0 == n {on = 1; print; next} on && /^      - / {exit} on' <<<"${fix_nc}"; }
+only_if_removed="^        if: always\(\) && steps\.drop_main\.outcome == 'success'$"
+drop="$(step_block_named "remove main's agent setup")"
+has "main's copy is removed by the step the restore keys on" '^        id: drop_main$' "${drop}"
+hasnt "...which runs only when everything before it succeeded" '^        if:' "${drop}"
+# Exactly these lines: an extra key (repository:, token:) would load the post steps from elsewhere.
+expect_eq "the restore is a checkout of main's .github/agents into .agents-main, and nothing else" \
+  "$(step_block_named "restore main's agent setup for the post steps" | grep -v '^[[:space:]]*$')" \
+  "      - name: restore main's agent setup for the post steps
+        if: always() && steps.drop_main.outcome == 'success'
+        uses: actions/checkout@v7
+        with:
+          ref: \${{ github.event.repository.default_branch }}
+          path: .agents-main
+          sparse-checkout: .github/agents
+          persist-credentials: false"
+clear="$(step_block_named "clear the path for main's agent setup")"
+has "the path is cleared first, under the same condition" "${only_if_removed}" "${clear}"
+has "...by removing it" '^        run: rm -rf \.agents-main$' "${clear}"
 has "fix job's system packages come from main's copy" '^        uses: \./\.agents-main/\.github/agents/system$' "${fix_nc}"
 has "main's copy is kept out of the agent's commits" '^        run: echo "\.agents-main/" >> \.git/info/exclude$' "${fix_nc}"
 forder="$(grep -nE 'name: drop sudo|uses: anthropics/claude-code-action' <<<"${fix_nc}" | cut -d: -f2- | sed -E 's/@.*$//' | tr -d ' ' | tr '\n' ' ')"
