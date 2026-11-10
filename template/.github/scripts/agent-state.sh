@@ -604,9 +604,11 @@ review_verdict() {
   # of what the line above opened (an inline comment, a code span, ~~strikethrough~~, a quote or list
   # item by lazy continuation), and its Approve could render hidden or quoted. So it counts only at
   # the start of a paragraph: the first line, or right after a raw blank line (wb).
+  # A lone CR (one not followed by LF) ends a line for CommonMark but not for awk, so every
+  # line-start rule here (headings, fences, the blocks below) could read lines differently from
+  # GitHub: any lone CR, anywhere, makes the verdict unknown. Reviews never contain one.
   # A processing instruction (`<?`), a declaration (`<!X`) or CDATA (`<![CDATA[`) at the start of a
-  # line (after indentation, `>` or a list marker; a lone CR ends a line for CommonMark, not for awk,
-  # so it counts as a line start too) opens a raw HTML block that runs across blank
+  # line (after indentation, `>` or a list marker) opens a raw HTML block that runs across blank
   # lines too. Mid-line they are inline HTML, which a blank line ends, so a review that mentions
   # `<?php` or `<?xml` in its text still has a verdict; one on a line of its own (fenced or not)
   # does not.
@@ -624,8 +626,9 @@ review_verdict() {
   line="$(LC_ALL=C tr '\000' '?' | awk '
     function hides(s,  t) { t = tolower(s)
       return t ~ /<(details|pre|script|style|textarea)([^a-z0-9-]|$)/ ||
-        t ~ /(^|\r)([[:space:]>]|[-*+][[:space:]]|[0-9]+[.)][[:space:]])*<(\?|!\[cdata\[|![a-z])/ }
-    { wb = pb; pb = ($0 ~ /^[[:space:]]*$/); if (hides($0)) seen = 1; l = $0
+        t ~ /^([[:space:]>]|[-*+][[:space:]]|[0-9]+[.)][[:space:]])*<(\?|!\[cdata\[|![a-z])/ }
+    { if ($0 ~ /\r./) ambiguous = 1
+      wb = pb; pb = ($0 ~ /^[[:space:]]*$/); if (hides($0)) seen = 1; l = $0
       if (comment) { e = index(l, "-->"); if (!e) next; l = substr(l, e + 3); comment = 0 }
       else if (fence) {
         if (match(l, /^ ? ? ?(```+|~~~+)[[:space:]]*$/)) { t = l; sub(/^ */, "", t); sub(/[[:space:]]*$/, "", t)

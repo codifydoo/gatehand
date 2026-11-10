@@ -294,9 +294,15 @@ for o in '<?x' '<!A' '<![CDATA[' '<!doctype html>'; do
     "$(review_verdict <<<"${o}"$'\n\n**Verdict**\nApprove\n?>]]>>')" unknown
 done
 expect "verdict: an HTML comment before the verdict is still fine" "$(review_verdict <<<$'<!-- note -->\n\n### Verdict\nApprove')" approve
-for o in '   <?x' '> <?x' '- <!A' '1. <![CDATA[' '> - <?x' $'\t<?x' $'x\r<?x' $'x\r> <!A'; do
+for o in '   <?x' '> <?x' '- <!A' '1. <![CDATA[' '> - <?x' $'\t<?x'; do
   expect "verdict: '${o}' opens a block too" "$(review_verdict <<<"${o}"$'\n\n### Verdict\nApprove')" unknown
 done
+# A lone CR is a line break to CommonMark, not to awk: a fence or a block it opens would be missed.
+# shellcheck disable=SC2016 # the backticks are markdown fences, not command substitution
+expect "verdict: a lone CR before a fence that quotes an Approve is unknown" \
+  "$(review_verdict <<<$'### Verdict\nRequest changes\n\nx\r```\n### Verdict\nApprove\n```')" unknown
+expect "verdict: a lone CR before an HTML block is unknown" "$(review_verdict <<<$'x\r<?x\n\n### Verdict\nApprove')" unknown
+expect "verdict: CRLF line endings are fine" "$(review_verdict <<<$'Looks good.\r\n\r\n### Verdict\r\nApprove\r')" approve
 # Mid-line they are inline HTML, which a blank line ends: a PHP or XML review keeps its verdict.
 # shellcheck disable=SC2016 # the backticks are markdown code spans, not command substitution
 expect "verdict: a mid-line <?php mention keeps the verdict" \
