@@ -41,6 +41,8 @@ file on update. Your settings live next to it: `policy.json`, `protected-paths.t
 The PR then goes through your CI and the Claude review like any other. The fixer and the merge gate
 take it from there. The fixer reads the failure or the review, the PR as the coder described it, and
 the issue itself when the run can still vouch for its text (the same snapshot rules as the coder).
+When its fix makes the PR's description untrue, it rewrites the description too (the coder's footer
+stays); a description a person edited is left alone.
 
 ## Security model
 

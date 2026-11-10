@@ -350,6 +350,8 @@ publish_fix() {
   stub_gh_on 'api -X POST markdown --input -' ''
   local pr_view='{"state":"OPEN","isDraft":false,"labels":[{"name":"agent:pr"},{"name":"agent:fixing"}]}'
   stub_gh_json 'pr view 44 --json state,isDraft,labels *' "${PR_VIEW:-${pr_view}}"
+  stub_gh_json 'pr view 44 --json body *' "$(jq -n --arg b "${CURRENT_BODY:-${CODER_BODY}}" '{body: $b}')"
+  stub_gh_json 'api graphql *' "{\"data\":{\"repository\":{\"pullRequest\":{\"editor\":${EDITOR_JSON:-null}}}}}"
   : >"${TMP}/gh_out"
   LAST_FINAL="${TMP}/final-$RANDOM"
   (cd "${PUB}" && GITHUB_OUTPUT="${TMP}/gh_out" OUTBOX="${OUT}" FINAL_DIR="${LAST_FINAL}" PR=44 ISSUE=7 \
@@ -357,6 +359,8 @@ publish_fix() {
     CODE_RESULT="${CODE_RESULT:-success}" GH_REPO=o/r PUSH_URL="${ORIGIN}" bash "${OUTBOX_SH}" publish-fix >/dev/null 2>&1)
 }
 remote_head() { git --git-dir="${ORIGIN}" rev-parse fix/agent-x; }
+CODER_FOOTER=$'---\n<sub>Opened by the coder agent for #7 (attempt 1, [run](https://example/coder)). It merges only through CI and the Claude review. Deploys and closing the issue stay with a person.</sub>\n<!-- agent-run:coder run=900 issue=7 -->'
+CODER_BODY=$'Handles a nil table by printing nothing.\n\nRefs #7\n\n'"${CODER_FOOTER}"
 
 fix_case fixhappy
 agent_commit cli/table.go $'fix(cli): make the nil-table test deterministic\n\nRefs #7'
@@ -369,6 +373,66 @@ body="$(stub_gh_last_body 'pr comment 44 *')"
 expect "fix: the PR comment carries the fix marker with the new head" "$(head -1 <<<"${body}")" \
   "<!-- agent-run:fix kind=ci n=1 run=970 sha=$(git -C "${AGENT}" rev-parse agent-work) -->"
 expect "fix: the summary is sanitised" "$(grep -c '@-owner-login' <<<"${body}")" 1
+expect "fix: without a pr-body.md the description is not touched" "$(stub_gh_calls | grep -c '^pr edit ')" 0
+expect "...and the comment says nothing about it" "$(grep -c 'description' <<<"${body}")" 0
+
+# A fix that changes behaviour rewrites the description (pr-body.md), keeping the coder's footer.
+fix_case fixbody
+agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
+fix_bundle
+printf 'Prints an empty table for nil, as the review asked. @owner-login\n\nRefs #7\n' >"${OUT}/pr-body.md"
+publish_fix
+expect "fix+body: outcome" "$(outv outcome)" "fix-pushed"
+new="$(stub_gh_last_body 'pr edit 44 *')"
+expect "fix+body: the description is replaced with the fixer's text" "$(head -1 <<<"${new}")" "Prints an empty table for nil, as the review asked. @-owner-login"
+expect "...sanitised like the coder's" "$(grep -c '@owner-login' <<<"${new}")" 0
+expect "...and ends with the coder's footer, verbatim" "$(tail -n 3 <<<"${new}")" "${CODER_FOOTER}"
+expect "...whose marker (pr_issue reads it) is the only one, naming the issue" \
+  "$(grep -oE '<!-- agent-run:coder run=[0-9a-z]+ issue=[0-9]+ -->' <<<"${new}" | grep -oE 'issue=[0-9]+' | tr '\n' ' ')" "issue=7 "
+expect "...before the fix comment, whose marker asks for the review" \
+  "$(stub_gh_calls | grep -nE '^pr (edit|comment) 44 ' | cut -d: -f2 | cut -d' ' -f2 | tr '\n' ' ')" "edit comment "
+expect "...and the comment says so" "$(grep -c '^The PR description was updated to match the change\.$' <<<"$(stub_gh_last_body 'pr comment 44 *')")" 1
+
+fix_case fixbodypasted
+agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
+fix_bundle
+printf 'Prints an empty table for nil.\n\nRefs #7\n\n%s\n' "${CODER_FOOTER}" >"${OUT}/pr-body.md"
+publish_fix
+new="$(stub_gh_last_body 'pr edit 44 *')"
+expect "fix+body: a footer the fixer pasted in is dropped, so there is one" "$(grep -c 'Opened by the coder agent' <<<"${new}")" 1
+expect "...the live one" "$(grep -c '<!-- agent-run:coder run=900 issue=7 -->' <<<"${new}")" 1
+
+fix_case fixbodyperson
+agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
+fix_bundle
+printf 'Prints an empty table for nil.\n\nRefs #7\n' >"${OUT}/pr-body.md"
+EDITOR_JSON='{"login":"owner-login"}' publish_fix
+expect "fix+body: a description a person edited is left alone" "$(stub_gh_calls | grep -c '^pr edit ')" 0
+expect "...the fix still goes out" "$(outv outcome)" "fix-pushed"
+expect "...and the comment says why" "$(grep -c 'owner-login edited it' <<<"$(stub_gh_last_body 'pr comment 44 *')")" 1
+
+fix_case fixbodybot
+agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
+fix_bundle
+printf 'Prints an empty table for nil.\n\nRefs #7\n' >"${OUT}/pr-body.md"
+EDITOR_JSON='{"login":"repo-agent"}' publish_fix
+expect "fix+body: the bot's own earlier edit does not count as a person's" "$(stub_gh_calls | grep -c '^pr edit 44 ')" 1
+
+fix_case fixbodyrefs
+agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
+fix_bundle
+printf 'Prints an empty table for nil. Closes #7\n' >"${OUT}/pr-body.md"
+publish_fix
+expect "fix+body: a body without Refs #7 is not applied" "$(stub_gh_calls | grep -c '^pr edit ')" 0
+expect "...the comment gives the rule" "$(grep -c 'not updated: PR body does not say Refs #7' <<<"$(stub_gh_last_body 'pr comment 44 *')")" 1
+
+fix_case fixbodynofooter
+agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
+fix_bundle
+printf 'Prints an empty table for nil.\n\nRefs #7\n' >"${OUT}/pr-body.md"
+CURRENT_BODY=$'A description with no coder footer.\n\nRefs #7' publish_fix
+expect "fix+body: without the coder's footer (and its marker) nothing is replaced" "$(stub_gh_calls | grep -c '^pr edit ')" 0
+expect "...and the comment says so" "$(grep -c 'coder footer is missing' <<<"$(stub_gh_last_body 'pr comment 44 *')")" 1
 
 fix_case fixmoved
 agent_commit cli/table.go $'fix(cli): make the nil-table test deterministic\n\nRefs #7'

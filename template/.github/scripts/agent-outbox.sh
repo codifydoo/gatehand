@@ -29,9 +29,10 @@
 # same commit rules apply to them, the range must sit on the PR's head as preflight saw it, and the
 # push is a fast-forward or nothing (a person who pushed meanwhile wins). Paths are checked over the
 # fix's own range AND the whole PR after it: protected paths only with the bot-applied
-# agent:allow-protected on the PR, `!` paths never. Then one `<!-- agent-run:fix … sha=… -->` comment
-# with the fixer's summary goes on the PR; that marker is what makes the router ask for a fresh
-# review once CI is green on the new head.
+# agent:allow-protected on the PR, `!` paths never. A pr-body.md from the fixer replaces the PR's
+# description (update_pr_body). Then one `<!-- agent-run:fix … sha=… -->` comment with the fixer's
+# summary goes on the PR; that marker is what makes the router ask for a fresh review once CI is
+# green on the new head.
 #
 # Usage: agent-outbox.sh publish | publish-fix
 # Env:   OUTBOX (the downloaded artifact), FINAL_DIR (sanitised summary.md/blocked.md for finalize),
@@ -330,9 +331,52 @@ cmd_publish() {
   file_followups "${outbox}" "${issue}" "${url##*/}"
 }
 
+# update_pr_body <pr> <issue> <outbox>: when the fixer wrote pr-body.md (its fix made the PR's
+# description untrue), it replaces the description, so the next review does not find the PR
+# contradicting itself. It passes the coder's body rules (check_body). The coder's footer, from the
+# `---` above "Opened by the coder agent" to the end, is kept verbatim from the PR as it is now: it
+# carries the agent-run:coder marker that pr_issue reads. Left alone when a person edited the
+# description (their words win), or when the footer is gone. Prints one line for the fix comment;
+# never fails the fix, which is already pushed.
+coder_footer() { awk '{l[NR] = $0} END {s = 0; for (i = 1; i < NR; i++) if (l[i] == "---" && index(l[i + 1], "<sub>Opened by the coder agent") == 1) s = i; if (s) for (i = s; i <= NR; i++) print l[i]}'; }
+before_footer() { awk '{l[NR] = $0} END {s = NR + 1; for (i = 1; i < NR; i++) if (l[i] == "---" && index(l[i + 1], "<sub>Opened by the coder agent") == 1) { s = i; break }; for (i = 1; i < s; i++) print l[i]}'; }
+update_pr_body() {
+  local pr="$1" issue="$2" f="$3/pr-body.md" cur editor footer bot text new
+  [[ -s "${f}" ]] || return 0
+  bot="$(policy '.botLogin')"
+  text="$(mktemp)"
+  # The footer is the outbox's to keep: drop a copy the fixer pasted in despite its instructions.
+  before_footer <"${f}" >"${text}"
+  if ! check_body "${text}" "${issue}"; then
+    rm -f "${text}"; printf 'The description was not updated: %s.\n' "${REFUSAL}"; return 0
+  fi
+  if ! cur="$(gh pr view "${pr}" --json body --jq '.body // ""')"; then
+    rm -f "${text}"; printf 'The description was not updated: the current one could not be read.\n'; return 0
+  fi
+  if ! editor="$(gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){editor{login}}}}' \
+    -f o="${GH_REPO%%/*}" -f r="${GH_REPO#*/}" -F n="${pr}" --jq '.data.repository.pullRequest.editor.login // ""')"; then
+    rm -f "${text}"; printf 'The description was not updated: who last edited it could not be read.\n'; return 0
+  fi
+  if [[ -n "${editor}" && "${editor}" != "${bot}" && "${editor}" != "${bot%\[bot\]}" ]]; then
+    rm -f "${text}"; printf 'The description was not updated: %s edited it, so it stays as they left it.\n' "$(printf '%s' "${editor}" | agent_oneline 60)"; return 0
+  fi
+  footer="$(printf '%s\n' "${cur}" | coder_footer)"
+  if ! grep -Eq "<!-- agent-run:coder run=[0-9a-z]+ issue=${issue} -->" <<<"${footer}"; then
+    rm -f "${text}"; printf 'The description was not updated: its coder footer is missing.\n'; return 0
+  fi
+  new="$(mktemp)"
+  { agent_sanitize <"${text}"; printf '\n%s\n' "${footer}"; } >"${new}"
+  if gh pr edit "${pr}" --body-file "${new}" >/dev/null; then
+    printf 'The PR description was updated to match the change.\n'
+  else
+    printf 'The description was not updated: the edit failed.\n'
+  fi
+  rm -f "${text}" "${new}"
+}
+
 cmd_publish_fix() {
   local outbox="${OUTBOX:?}" final="${FINAL_DIR:?}" pr="${PR:?}" branch="${BRANCH:?}" head="${HEAD_SHA:?}" issue="${ISSUE:?}"
-  local url remote_head allow=0 max_body body err base pr_state st draft labels l a
+  local url remote_head allow=0 max_body body err base pr_state st draft labels l a described
   mkdir -p "${final}"
   if [[ "${CODE_RESULT:-}" != "success" ]]; then finish failed "the fix job ended as ${CODE_RESULT:-unknown}"; return 0; fi
   if [[ ! -d "${outbox}" ]]; then finish failed "no outbox artifact"; return 0; fi
@@ -400,10 +444,13 @@ cmd_publish_fix() {
   fi
   rm -f "${err}"
   output new_head "$(git rev-parse refs/agent/work)"
+  # Before the comment: its marker is what asks for the fresh review, which reads the description.
+  described="$(update_pr_body "${pr}" "${issue}" "${outbox}")"
   body="$(mktemp)"
   {
     printf '<!-- agent-run:fix kind=%s n=%s run=%s sha=%s -->\n' "${KIND:-ci}" "${N:-1}" "${RUN_ID:-local}" "$(git rev-parse refs/agent/work)"
     printf 'The fixer agent pushed a %s fix (attempt %s, [run](%s)) for #%s.\n\n' "${KIND:-ci}" "${N:-1}" "${RUN_URL:-}" "${issue}"
+    if [[ -n "${described}" ]]; then printf '%s\n\n' "${described}"; fi
     if [[ -s "${final}/summary.md" ]]; then cat "${final}/summary.md"; fi
   } >"${body}"
   gh pr comment "${pr}" --body-file "${body}" >/dev/null || agent_log "publish-fix: the PR comment failed; the fix is pushed"
