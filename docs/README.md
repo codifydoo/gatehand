@@ -181,8 +181,9 @@ start; the inbox still works.
   drop it, and reports nothing when it does not fire. In one private repository on a Free personal
   account, no scheduled run fired at all in the first seven hours; we have not confirmed why.
   `bin/doctor.sh` warns when the hourly sweep has never run on its schedule. Until it does,
-  dispatch the workflows by hand (`gh workflow run agent-coder.yml --ref agent-runner`, and the
-  sweep and merge gate on the default branch), or have a machine of yours dispatch them on time
+  dispatch the workflows by hand (the coder on your runner ref, `gh workflow run agent-coder.yml
+  --ref agent-runner` by default, and the sweep and merge gate on the default branch), or have a
+  machine of yours dispatch them on time
   (`addons/hardened-runner`).
 
 ## Changing the rules

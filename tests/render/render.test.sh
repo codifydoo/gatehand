@@ -42,6 +42,9 @@ check "a render refreshes a stale hooks/lib.sh.example" cmp -s "${PKG}/defaults/
 echo "# mine" >"${TMP}/r/.github/agents/hooks/lib.sh"
 "${R}" "${TMP}/r" >/dev/null
 check "...and leaves the repo's own hooks/lib.sh alone" grep -qx '# mine' "${TMP}/r/.github/agents/hooks/lib.sh"
+echo "# an older package's example" >"${EX}"
+"${R}" "${TMP}/r" >/dev/null
+check "...and refreshes an example kept next to hooks/lib.sh" cmp -s "${PKG}/defaults/hooks/lib.sh.example" "${EX}"
 rm -f "${EX}"
 "${R}" "${TMP}/r" >/dev/null
 check "...and does not bring the example back once hooks/lib.sh exists" test ! -e "${EX}"

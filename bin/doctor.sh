@@ -89,12 +89,26 @@ else
 fi
 
 # GitHub fires a cron only from the default branch and says nothing when it does not (one private repo
-# on a Free personal account saw none at all, cause unconfirmed). The sweep is hourly, so two hours
-# after agent-sweep.yml reached the default branch it should have a scheduled run, even a skipped one.
-added="$(gh api --paginate "repos/${NWO}/commits?sha=${DEFAULT}&path=.github/workflows/agent-sweep.yml&per_page=100" \
-  --jq '.[].commit.committer.date' 2>/dev/null | tail -n 1)" || added=""
-fired="$(gh api "repos/${NWO}/actions/workflows/agent-sweep.yml/runs?event=schedule&per_page=1" --jq .total_count 2>/dev/null)" || fired=""
-if [[ -z "${added}" || ! "${fired}" =~ ^[0-9]+$ ]]; then
+# on a Free personal account saw none at all, cause unconfirmed). An hourly sweep should have a
+# scheduled run, even a skipped one, two hours after agent-sweep.yml reached the default branch: when
+# its oldest commit came in through a PR, that is the PR's merge time, not the commit's own date.
+sweep_cron="$(jq -r -s '(.[0] * .[1]).schedules.sweep // ""' "${PKG}/defaults/policy.json" "${POLICY}")"
+read -r _ c_hour c_dom c_mon c_dow _ <<<"${sweep_cron}"
+oldest="" added="" fired=""
+if [[ "${c_hour:-}|${c_dom:-}|${c_mon:-}|${c_dow:-}" == '*|*|*|*' ]]; then
+  oldest="$(gh api --paginate "repos/${NWO}/commits?sha=${DEFAULT}&path=.github/workflows/agent-sweep.yml&per_page=100" \
+    --jq '.[] | "\(.sha) \(.commit.committer.date)"' 2>/dev/null | tail -n 1)" || oldest=""
+  if [[ "${oldest}" == *" "* ]]; then
+    added="${oldest#* }"
+    merged="$(gh api "repos/${NWO}/commits/${oldest%% *}/pulls" 2>/dev/null \
+      | jq -r --arg d "${DEFAULT}" '[.[] | select(.merged_at != null and .base.ref == $d) | .merged_at] | min // empty' 2>/dev/null)" || merged=""
+    [[ -n "${merged}" ]] && added="${merged}"
+  fi
+  fired="$(gh api "repos/${NWO}/actions/workflows/agent-sweep.yml/runs?event=schedule&per_page=1" --jq .total_count 2>/dev/null)" || fired=""
+fi
+if [[ "${c_hour:-}|${c_dom:-}|${c_mon:-}|${c_dow:-}" != '*|*|*|*' ]]; then
+  ok "the sweep's schedule (${sweep_cron:-none}) is not hourly; not checking whether it fires"
+elif [[ -z "${added}" || ! "${fired}" =~ ^[0-9]+$ ]]; then
   warn "cannot tell whether the sweep runs on its schedule (no agent-sweep.yml on ${DEFAULT}, or the API refused)"
 elif [[ "${fired}" -gt 0 ]]; then
   ok "the sweep has run on its schedule"

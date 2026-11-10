@@ -73,13 +73,22 @@ if [[ "${mode}" == write ]]; then
   while IFS= read -r rel; do
     dst="${REPO}/.github/agents/${rel}"
     guard_path ".github/agents/${rel}"
-    [[ "${rel}" == hooks/lib.sh.example && -e "${REPO}/.github/agents/hooks/lib.sh" ]] && continue
-    # The example is the package's reference for the hooks, never sourced: keep it current, or an
-    # update would leave new hooks undocumented in the repo.
-    if [[ "${rel}" == hooks/lib.sh.example && -f "${dst}" ]] && ! cmp -s "${PKG}/defaults/${rel}" "${dst}"; then
-      cp "${PKG}/defaults/${rel}" "${dst}"
-      printf 'updated %s (the package'"'"'s reference; copy it to hooks/lib.sh to use it)\n' ".github/agents/${rel}"
-    elif [[ ! -e "${dst}" ]]; then
+    if [[ "${rel}" == hooks/lib.sh.example ]]; then
+      # The package's reference for the hooks, never sourced: refreshed wherever it is, so an update
+      # documents new hooks, but not created once the repo has its own hooks/lib.sh.
+      if [[ -f "${dst}" ]]; then
+        if ! cmp -s "${PKG}/defaults/${rel}" "${dst}"; then
+          cp "${PKG}/defaults/${rel}" "${dst}"
+          printf 'updated %s (the package'"'"'s reference for the hooks)\n' ".github/agents/${rel}"
+        fi
+      elif [[ ! -e "${dst}" && ! -e "${REPO}/.github/agents/hooks/lib.sh" ]]; then
+        mkdir -p "$(dirname "${dst}")"
+        cp "${PKG}/defaults/${rel}" "${dst}"
+        printf 'created %s (the package'"'"'s reference for the hooks, refreshed on update)\n' ".github/agents/${rel}"
+      fi
+      continue
+    fi
+    if [[ ! -e "${dst}" ]]; then
       mkdir -p "$(dirname "${dst}")"
       cp "${PKG}/defaults/${rel}" "${dst}"
       printf 'created %s (yours to edit)\n' ".github/agents/${rel}"

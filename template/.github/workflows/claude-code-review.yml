@@ -322,7 +322,7 @@ jobs:
           # This is deliberately keyed on the action producing no execution file rather than on the
           # PR's changed-file list: it covers every reason the agent might not run, not just this one.
           if [[ -z "${EXECUTION_FILE:-}" ]]; then
-            echo "::notice title=Review skipped::claude-code-action produced no execution file, so Claude never ran and there is nothing to assert. On a PR that edits .github/workflows/claude-code-review.yml this is expected — the action requires this file to match the default branch. Nothing re-runs it on its own: dispatch the review by hand once this merges."
+            echo "::notice title=Review skipped::claude-code-action produced no execution file, so Claude never ran and there is nothing to assert. On a PR that edits .github/workflows/claude-code-review.yml this is expected — the action requires this file to match the default branch. Nothing re-runs it on its own: dispatch the review by hand, which works before merging because a dispatch runs the default branch's copy of this workflow."
             # The notice alone was not enough: the check is green either way, and a green check
             # reads as "reviewed". A large PR once merged that way with no review at all. So an
             # automatic run also says it on the PR, once -- the skip marker keeps a draft -> ready
