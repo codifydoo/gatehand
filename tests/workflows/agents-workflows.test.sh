@@ -273,10 +273,11 @@ expect_eq "the restore is a checkout of main's .github/agents into .agents-main,
         if: always() && steps.drop_main.outcome == 'success'
         uses: actions/checkout@v7
         with:
-          ref: \${{ github.event.repository.default_branch }}
+          ref: \${{ steps.main_setup.outputs.commit || github.event.repository.default_branch }}
           path: .agents-main
           sparse-checkout: .github/agents
           persist-credentials: false"
+has "...from the commit main's agent setup checked out" '^        id: main_setup$' "$(step_block_named "main's agent setup")"
 clear="$(step_block_named "clear the path for main's agent setup")"
 has "the path is cleared first, under the same condition" "${only_if_removed}" "${clear}"
 has "...by removing it" '^        run: rm -rf \.agents-main$' "${clear}"
@@ -332,7 +333,8 @@ falways="$(awk '/^      - / {s++} /^        if: always\(\)/ {a[s] = 1} END {n = 
 [[ "${fsteps}" -ge 5 && "${fsteps}" == "${falways}" ]] && t_pass "every fixer publish step (${fsteps}) runs even on a cancelled run" \
   || t_fail "fixer publish: ${falways} of ${fsteps} steps have if: always()"
 fx_total="$(grep -c 'uses: actions/checkout@' "${FX}")"
-fx_default="$(grep -A3 'uses: actions/checkout@' "${FX}" | grep -c 'ref: \${{ github.event.repository.default_branch }}')"
+# The restore for the post steps pins the commit main's agent setup took, falling back to the branch.
+fx_default="$(grep -A3 'uses: actions/checkout@' "${FX}" | grep -cE 'ref: \$\{\{ (steps\.main_setup\.outputs\.commit \|\| )?github\.event\.repository\.default_branch \}\}$')"
 [[ "${fx_total}" -ge 4 && "${fx_default}" == "$((fx_total - 1))" ]] && t_pass "every fixer checkout but the fix job's (${fx_default} of ${fx_total}) is of the default branch" \
   || t_fail "${fx_default} of ${fx_total} fixer checkouts pin the default branch (want all but the fix job's)"
 has "one dispatched fix per PR at a time" "format\('agent-fixup-pr-\{0\}', inputs.pr\)" "$(cat "${FX}")"

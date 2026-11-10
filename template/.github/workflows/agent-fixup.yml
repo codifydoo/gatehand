@@ -224,6 +224,7 @@ jobs:
       # checkout of .github/agents only, excluded from git so the agent cannot commit it, and removed
       # before the model starts. Both run without sudo.
       - name: main's agent setup
+        id: main_setup
         uses: actions/checkout@v7
         with:
           ref: ${{ github.event.repository.default_branch }}
@@ -310,9 +311,10 @@ jobs:
       # Post steps read their composite action's action.yml again at the end of the job, and a
       # toolchain's setup-node or setup-go registers one: with main's copy removed above, the job
       # failed there ("Can't find 'action.yml'") after the fix was packaged, and the fix was dropped.
-      # So main's copy comes back once the model and the packaging are done: rebuilt from the default
-      # branch into a cleared path rather than left as the agent's workspace (the agent still controls
-      # this job, as agent-coder.yml's code job explains). Only when it was removed: a job that failed
+      # So main's copy comes back once the model and the packaging are done: rebuilt into a cleared
+      # path from the same commit the setup steps ran from (the default branch may have moved since),
+      # rather than left as the agent's workspace (the agent still controls this job, as
+      # agent-coder.yml's code job explains). Only when it was removed: a job that failed
       # before that still has the copy its toolchain and dependency steps ran from, and one more
       # checkout failing in a GitHub outage would turn an uncounted pre-agent failure (agent-lib.sh
       # pre_agent_failure) into a counted attempt.
@@ -323,7 +325,7 @@ jobs:
         if: always() && steps.drop_main.outcome == 'success'
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ steps.main_setup.outputs.commit || github.event.repository.default_branch }}
           path: .agents-main
           sparse-checkout: .github/agents
           persist-credentials: false
