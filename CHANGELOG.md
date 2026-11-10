@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.2 (2026-11-10)
+
+- The fixer's job no longer fails at its end when the repository's toolchain action uses an action
+  with a post step (`actions/setup-node`, `actions/setup-go` and the like). The job removes main's
+  copy of the setup actions before the model starts, and a post step reads its composite action's
+  `action.yml` again at the end of the job, so the job failed after the fix was packaged and the fix
+  was dropped. Main's copy is now checked out again, from the default branch, once the model and the
+  packaging are done. Found by the fixer's first live run.
+
 ## 0.2.1 (2026-11-10)
 
 Fixes from upgrading a 0.1.0 install to 0.2.0:

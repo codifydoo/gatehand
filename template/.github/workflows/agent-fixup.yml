@@ -306,6 +306,22 @@ jobs:
           path: ${{ runner.temp }}/agent/outbox/
           if-no-files-found: ignore
           retention-days: 14
+      # Post steps read their composite action's action.yml again at the end of the job, and a
+      # toolchain's setup-node or setup-go registers one: with main's copy removed above, the job
+      # failed there ("Can't find 'action.yml'") after the fix was packaged, and the fix was dropped.
+      # So main's copy comes back once the model and the packaging are done: checked out again from
+      # the default branch into a cleared path, never taken from what the agent left in the workspace.
+      - name: clear the path for main's agent setup
+        if: always()
+        run: rm -rf .agents-main
+      - name: restore main's agent setup for the post steps
+        if: always()
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: .agents-main
+          sparse-checkout: .github/agents
+          persist-credentials: false
 
   publish:
     name: publish and finalize
