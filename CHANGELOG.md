@@ -5,10 +5,11 @@
 - The fixer can rewrite the PR's description. When its fix makes the description untrue (what the
   PR does, how it was verified), it writes `pr-body.md` and the publish step replaces the
   description with it, under the coder's body rules (`Refs #N`, no closing keyword, the size cap)
-  and keeping the coder's footer and its `agent-run:coder` marker verbatim. A description a person
-  edited is left as they left it, as is one whose footer is gone; the fix comment says which. Found
-  live: a fix changed behaviour, the next review saw the PR contradict its own description, and
-  asked for changes the fixer could not make.
+  and keeping the coder's footer and its `agent-run:coder` marker verbatim. A description that
+  anyone but the agent bot last edited is left as it is, as is one whose footer is gone; the fix
+  comment says which. Only a fix with commits does this: a description-only answer to a review is
+  not supported. Found live: a fix changed behaviour, the next review saw the PR contradict its own
+  description, and asked for changes the fixer could not make.
 
 ## 0.2.3 (2026-11-10)
 
