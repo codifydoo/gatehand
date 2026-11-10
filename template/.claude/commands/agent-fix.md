@@ -60,7 +60,13 @@ Below, `PR` is the first word and `AGENT_DIR` the second.
    body with the `Refs #N` line the PR's description ends with. Never write `Closes`, `Fixes` or
    `Resolves` followed by an issue. The validator refuses them.
 
-7. Write `AGENT_DIR/outbox/summary.md` and stop: at most 30 lines for the PR thread, saying what was
+7. If your change makes anything in the PR's description untrue (what the PR does, what it leaves
+   out, how it was verified, test counts), write `AGENT_DIR/outbox/pr-body.md`: the whole
+   description rewritten to match the PR as it now stands, in the coder's structure, ending with its
+   `Refs #N` line. Leave out the footer (the `---` and the "Opened by the coder agent" line under
+   it); it is kept. When the description is still true, write no `pr-body.md`.
+
+8. Write `AGENT_DIR/outbox/summary.md` and stop: at most 30 lines for the PR thread, saying what was
    wrong, what you changed, and the exact commands you ran with their results. If you made no
    commit, say why there.
 
