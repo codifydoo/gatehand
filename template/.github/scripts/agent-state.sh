@@ -488,24 +488,125 @@ pr_bot_comments() {
     --jq ".[] | select(.user.login == \"$(policy '.botLogin')\") | .body"
 }
 
-# request_review <pr> <sha> <why>: dispatch "Claude Code Review" for the PR, once per head; <why>
-# opens the PR comment that records it. The fixer asks for the heads it pushes, the merge gate for
-# the heads its branch updates made, and the shared marker keeps them to one between them. The
-# review's own dedup skips a PR that already has a review on its automatic trigger; a dispatch is
-# exempt on purpose (claude-code-review.yml), which is what makes this the way to get a second one.
+# pr_bot_marker_times <pr> <marker>: when the agent bot posted each of its comments on a PR that
+# carries <marker>, one created_at a line. Only the bot's count, as in pr_bot_comments.
+pr_bot_marker_times() {
+  gh api --paginate "repos/${GH_REPO}/issues/$1/comments?per_page=100" \
+    --jq ".[] | select(.user.login == \"$(policy '.botLogin')\") | select((.body // \"\") | contains(\"$2\")) | .created_at"
+}
+
+# A requested review that has not posted after this long is requested again: claude-code-review.yml's
+# job timeout (30 minutes) and slack for the dispatch and the queue. A review run of the PR that is
+# still queued or running is never asked for twice, whatever its age.
+REVIEW_RETRY_AFTER_SECONDS=$((45 * 60))
+# How often one head's review is requested again after the first request, before a person is asked.
+REVIEW_MAX_RETRIES=2
+
+# request_review <pr> <sha> <why> [again]: dispatch "Claude Code Review" for the PR's head <sha>;
+# <why> opens the PR comment that records the request. The fixer asks for the heads it pushes, the
+# merge gate for the heads its branch updates made, and the shared marker keeps them to one between
+# them. The review's own dedup skips a PR that already has a review on its automatic trigger; a
+# dispatch is exempt on purpose (claude-code-review.yml), which is what makes this the way to get a
+# second one. A dispatched run can end green without posting anything (a failed OIDC exchange in
+# claude-code-action leaves no execution file, which the review's own check reads as a skip), and
+# then nothing else would ask again. So with [again] (the merge gate only: its runs never overlap,
+# so two of them cannot both spend the same retry), a request older than REVIEW_RETRY_AFTER_SECONDS
+# that no review answered, with no review run of the PR queued or running, is made again, at most
+# REVIEW_MAX_RETRIES times per head; then the agent inbox gets one `review` request for the head,
+# and the PR waits for a person. Without [again], a head is requested once.
 request_review() {
-  local pr="$1" sha="$2" why="$3" bodies body
-  bodies="$(pr_bot_comments "${pr}")" || return 1
-  if grep -Fq "<!-- agent-review-dispatched sha=${sha} -->" <<<"${bodies}"; then
-    echo "#${pr}: a review of ${sha:0:9} was already requested"
-    return 0
+  local pr="$1" sha="$2" why="$3" again="${4:-}" marker times n last age review at who upd seen runs body
+  marker="<!-- agent-review-dispatched sha=${sha} -->"
+  times="$(pr_bot_marker_times "${pr}" "${marker}")" || return 1
+  n="$(grep -c . <<<"${times}")"
+  if [[ "${n}" -gt 0 ]]; then
+    last="$(sort <<<"${times}" | tail -1)"
+    age=$(($(agent_now_epoch) - $(jq -rn --arg t "${last}" '$t | fromdateiso8601')))
+    if [[ "${again}" != again || "${age}" -lt "${REVIEW_RETRY_AFTER_SECONDS}" ]]; then
+      echo "#${pr}: a review of ${sha:0:9} was already requested"
+      return 0
+    fi
+    # Answered: a trusted review posted after the request and, for the review bot's, never edited
+    # and written by a job that started after the request. A review whose job started earlier (one
+    # queued ahead of it on the review pool, of an older head) is no answer, and the gate reads it
+    # as stale too.
+    review="$(newest_review "${pr}")" || { echo "#${pr}: a review of ${sha:0:9} was requested at ${last}, and the reviews are unreadable"; return 1; }
+    read -r _ at who upd <<<"${review}"
+    if [[ -n "${review}" && "${at}" > "${last}" ]]; then
+      if [[ "${who}" == "$(policy '.reviewBotLogin')" ]]; then
+        seen=none
+        if [[ "${upd:-${at}}" == "${at}" ]]; then
+          seen="$(review_attribution "${pr}" "${at}" "${last}")" || { echo "#${pr}: a review of ${sha:0:9} was requested at ${last}, and the review runs are unreadable"; return 1; }
+        fi
+      else
+        seen=after
+      fi
+      if [[ "${seen}" == after ]]; then
+        echo "#${pr}: a review of ${sha:0:9} was already requested, and a review was posted after it"
+        return 0
+      fi
+    fi
+    runs="$(review_runs "${pr}" "${last}")" || { echo "#${pr}: a review of ${sha:0:9} was requested at ${last}, and the review runs are unreadable"; return 1; }
+    if grep -Eq ' (queued|in_progress|waiting|requested|pending)$' <<<"${runs}"; then
+      echo "#${pr}: a review of ${sha:0:9} was already requested, and a review is still running"
+      return 0
+    fi
+    if [[ "${n}" -gt "${REVIEW_MAX_RETRIES}" ]]; then
+      ask_review_by_hand "${pr}" "${sha}" "${n}" "${last}"
+      return
+    fi
   fi
   gh workflow run "Claude Code Review" -f pr="${pr}" >/dev/null || { agent_log "review: dispatching the review of #${pr} failed"; return 1; }
   body="$(mktemp)"
-  printf '<!-- agent-review-dispatched sha=%s -->\n%s, so a fresh Claude review was requested.\n' "${sha}" "${why}" >"${body}"
+  if [[ "${n}" -eq 0 ]]; then
+    printf '%s\n%s, so a fresh Claude review was requested.\n' "${marker}" "${why}" >"${body}"
+  else
+    printf '%s\nThe Claude review of %s requested at %s posted nothing, and no review of this PR is running, so it was requested again (request %s of %s).\n' \
+      "${marker}" "${sha:0:9}" "${last}" "$((n + 1))" "$((REVIEW_MAX_RETRIES + 1))" >"${body}"
+  fi
   gh issue comment "${pr}" --body-file "${body}" >/dev/null || agent_log "review: could not record the review request on #${pr}"
   rm -f "${body}"
-  echo "#${pr}: review requested for ${sha:0:9}"
+  if [[ "${n}" -eq 0 ]]; then
+    echo "#${pr}: review requested for ${sha:0:9}"
+  else
+    echo "#${pr}: the review of ${sha:0:9} requested at ${last} posted nothing: requested again ($((n + 1)) of $((REVIEW_MAX_RETRIES + 1)))"
+  fi
+}
+
+# ask_review_by_hand <pr> <sha> <n> <last>: <n> requests for a review of the head <sha> went nowhere,
+# the last at <last>, so a person is asked, once per head: the inbox request's own marker keeps a
+# retry from filing a second. Nothing is labelled: a review a person gets posted is all the PR needs.
+ask_review_by_hand() {
+  local pr="$1" sha="$2" n="$3" last="$4" ask_marker inbox asked issue body req
+  ask_marker="<!-- agent-review-ask pr=${pr} sha=${sha} -->"
+  inbox="$(inbox_issue)" || { echo "#${pr}: the review of ${sha:0:9} was requested ${n} times and never posted, and the agent inbox cannot be found"; return 1; }
+  asked="$(pr_bot_comments "${inbox}")" || { echo "#${pr}: the review of ${sha:0:9} was requested ${n} times and never posted, and the agent inbox is unreadable"; return 1; }
+  if grep -Fq "${ask_marker}" <<<"${asked}"; then
+    echo "#${pr}: the review of ${sha:0:9} was requested ${n} times and never posted; a person was already asked"
+    return 0
+  fi
+  issue="$(pr_issue "$(gh pr view "${pr}" --json body)")"
+  body="$(mktemp)"
+  {
+    printf '%s\n' "${ask_marker}"
+    printf '**What:** the Claude review of #%s (head `%s`) was requested %s times, the last at %s, and none of them posted a review. #%s cannot merge without one.\n\n' \
+      "${pr}" "${sha:0:12}" "${n}" "${last}" "${pr}"
+    printf '**What you can do:**\n'
+    printf -- '- read the latest "Claude review of PR #%s" run, and once the review can run, ask for it: `gh workflow run "Claude Code Review" -f pr=%s`\n' "${pr}" "${pr}"
+    printf -- '- or close #%s\n' "${pr}"
+    printf -- '- `/approve REQ-ID` or `/reject REQ-ID` only record that you saw this; neither changes #%s\n\n' "${pr}"
+    printf '**If nobody answers:** #%s waits. A new head is requested afresh.\n' "${pr}"
+  } >"${body}.req"
+  req="$(new_req_id)"
+  sed "s/REQ-ID/${req}/g" "${body}.req" >"${body}"
+  rm -f "${body}.req"
+  if ! AGENT_REQ_ID="${req}" AGENT_INBOX_ISSUE="${inbox}" inbox_request review merger "${issue:-0}" "#${pr}: its Claude review never posted" "${body}" >/dev/null; then
+    rm -f "${body}"
+    echo "#${pr}: the review of ${sha:0:9} was requested ${n} times and never posted, and the inbox request failed; the next run asks again"
+    return 1
+  fi
+  rm -f "${body}"
+  echo "#${pr}: the review of ${sha:0:9} was requested ${n} times and never posted: asked in the agent inbox"
 }
 
 # --- reviews (shared by the fixer and the merge gate) -----------------------------------------------

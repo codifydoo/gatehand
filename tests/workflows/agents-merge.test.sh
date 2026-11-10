@@ -70,7 +70,7 @@ checks() { # every required check and the guard, success; CHECK_OVERRIDE="<name>
 }
 REVIEW_OK=$'<!-- verify-pr-review -->\n\n### Blocking problems\nNone.\n\n### Verdict\nApprove'
 # stub_pr <pr> <head>: everything about one PR: the PR, its comments (the review, then BOT_COMMENTS:
-# a JSON array of the agent bot's bodies), its files, how far its head is behind main (BEHIND), the
+# a JSON array of the agent bot's bodies, all posted at BOT_AT), its files, how far its head is behind main (BEHIND), the
 # head's first parent (PARENT), and the branch update (UPDATE_RC/UPDATE_ERR).
 stub_pr() {
   local pr="$1" head="$2" cid=$(($1 * 10))
@@ -80,7 +80,7 @@ stub_pr() {
     "$(jq -cn --argjson id "${cid}" --arg b "${REVIEW_BODY:-${REVIEW_OK}}" --arg u "${REVIEWER:-claude[bot]}" --arg t "${REVIEW_AT:-2026-11-05T10:30:00Z}" --arg e "${REVIEW_EDITED:-}" \
       --argjson bot "${BOT_COMMENTS:-[]}" '
       [{id: $id, user: {login: $u}, created_at: $t, updated_at: (if $e == "" then $t else $e end), body: $b}]
-      + ($bot | map({id: 1, user: {login: "repo-agent[bot]"}, created_at: "2026-11-05T09:10:00Z", updated_at: "2026-11-05T09:10:00Z", body: .}))')"
+      + ($bot | map({id: 1, user: {login: "repo-agent[bot]"}, created_at: ($ENV.BOT_AT // "2026-11-05T09:10:00Z"), updated_at: ($ENV.BOT_AT // "2026-11-05T09:10:00Z"), body: .}))')"
   stub_gh_json "api repos/o/r/issues/comments/${cid} *" "$(jq -cn --arg b "${REVIEW_BODY:-${REVIEW_OK}}" '{body: $b}')"
   stub_gh_json "api --paginate repos/o/r/pulls/${pr}/files*" "$(jq -cn --arg f "${FILES:-cli/table.go}" --arg p "${RENAMED_FROM:-}" \
     '$f | split(",") | map({filename: .}) | if $p == "" then . else .[0].previous_filename = $p end')"
@@ -344,8 +344,46 @@ label="after an update, the old Approve does not merge it"; check_not merged
 label="green checks on the gate's update: a fresh review is requested"; check called "${REVIEW_CALL}"
 label="and recorded for that head"; check stub_gh_any_body "<!-- agent-review-dispatched sha=${HEAD} -->"
 expect "once" "$(stub_gh_calls | grep -c "^${REVIEW_CALL}")" 1
-( export BOT_COMMENTS="[\"<!-- agent-merge-updated from=${OLD} -->\", \"<!-- agent-review-dispatched sha=${HEAD} -->\"]"; after_update )
-label="a head whose review was requested already: not again"; check_not called "${REVIEW_CALL}"
+REQUESTED="[\"<!-- agent-merge-updated from=${OLD} -->\", \"<!-- agent-review-dispatched sha=${HEAD} -->\"]"
+( export BOT_COMMENTS="${REQUESTED}" BOT_AT=2026-11-05T11:30:00Z; after_update )
+label="a head whose review was requested half an hour ago: not again"; check_not called "${REVIEW_CALL}"
+# The review it requested ended without posting (PR #1187 on 2026-11-10, a failed OIDC exchange in a
+# run that went green): the hourly run after the request is stale asks again, and says so.
+( export BOT_COMMENTS="${REQUESTED}" BOT_AT=2026-11-05T10:30:00Z; after_update )
+label="a request over 45 minutes old, no review since and none running: requested again"; check called "${REVIEW_CALL}"
+label="recorded as the second request for that head"; check grep -Fq "(request 2 of 3)" <<<"$(stub_gh_last_body 'issue comment 44 *')"
+label="and the report says why"; check grep -Fq "posted nothing: requested again (2 of 3)" "${TMP}/run.out"
+( export BOT_COMMENTS="${REQUESTED}" BOT_AT=2026-11-05T10:30:00Z REVIEW_RUN_STATUS=queued; after_update )
+label="the same, with a review run still queued: not again"; check_not called "${REVIEW_CALL}"
+( export BOT_COMMENTS="[\"<!-- agent-merge-updated from=${OLD} -->\", \"<!-- agent-review-dispatched sha=${HEAD} -->\", \"<!-- agent-review-dispatched sha=${HEAD} -->\", \"<!-- agent-review-dispatched sha=${HEAD} -->\"]" BOT_AT=2026-11-05T10:30:00Z; after_update )
+label="three requests that all went nowhere: no fourth"; check_not called "${REVIEW_CALL}"
+label="a review request in the agent inbox instead"; check stub_gh_any_body 'role=merger issue=7 kind=review -->'
+label="and no label, so the review a person gets posted is all it needs"; check_not called "api -X POST repos/o/r/issues/44/labels"
+# A head the fixer pushed: its own request is the only one, so the gate asks again the same way.
+FIXED="[\"<!-- agent-run:fix kind=ci n=1 run=950 sha=${HEAD} -->\", \"<!-- agent-review-dispatched sha=${HEAD} -->\"]"
+( export ONE_PARENT=1 BOT_COMMENTS="${FIXED}" BOT_AT=2026-11-05T10:30:00Z; after_update )
+label="the fixer's head whose requested review never posted: requested again"; check called "${REVIEW_CALL}"
+label="as the second request"; check grep -Fq "(request 2 of 3)" <<<"$(stub_gh_last_body 'issue comment 44 *')"
+( export ONE_PARENT=1 BOT_COMMENTS="${FIXED}" BOT_AT=2026-11-05T11:30:00Z; after_update )
+label="the fixer's head with a recent request: left to that request"; check_not called "${REVIEW_CALL}"
+# The review of the older head, queued ahead of the request on the one-slot pool, posts after it:
+# stale for the gate and no answer to the request, so the request is still made again.
+( export ONE_PARENT=1 BOT_COMMENTS="${FIXED}" BOT_AT=2026-11-05T10:20:00Z REVIEW_AT=2026-11-05T10:30:30Z JOB_START=2026-11-05T09:55:00Z; green )
+label="the fixer's head, an older head's review posted after the request: requested again"; check called "${REVIEW_CALL}"
+( export ONE_PARENT=1 BOT_COMMENTS="${FIXED}" BOT_AT=2026-11-05T10:30:00Z BEHIND=1; after_update )
+label="the fixer's head behind main as well: requested again (the update waits for its Approve)"; check called "${REVIEW_CALL}"
+label="and not updated meanwhile"; check_not called "update-branch"
+( export ONE_PARENT=1 BOT_COMMENTS="${FIXED}" BOT_AT=2026-11-05T10:30:00Z MERGEABLE=CONFLICTING BEHIND=1; after_update )
+label="the fixer's head conflicting with main: no review"; check_not called "${REVIEW_CALL}"
+label="and nobody asked (that stays as it was)"; check_not called "issue comment 99"
+( export ONE_PARENT=1 BOT_COMMENTS="${FIXED}" BOT_AT=2026-11-05T10:30:00Z CHECK_OVERRIDE="test (unit)|completed|failure"; after_update )
+label="the fixer's head with a red check: no review (the fixer's turn)"; check_not called "${REVIEW_CALL}"
+( export ONE_PARENT=1 BOT_COMMENTS="[\"<!-- agent-run:fix kind=ci n=1 run=950 sha=${HEAD} -->\"]" BOT_AT=2026-11-05T10:30:00Z; after_update )
+label="the fixer's head with no review request of its own: still waits for the fixer's request"; check_not called "${REVIEW_CALL}"
+( export ONE_PARENT=1 BOT_COMMENTS="${FIXED}" BOT_AT=2026-11-05T10:20:00Z REVIEW_AT=2026-11-05T10:30:30Z \
+  REVIEW_BODY=$'<!-- verify-pr-review -->\n\n### Verdict\nRequest changes'; green )
+label="the fixer's head with a current Request changes: no second review (the fixer's turn)"; check_not called "${REVIEW_CALL}"
+label="the gate does not even ask"; check_not grep -Fq "already requested" "${TMP}/run.out"
 ( export REVIEW_RUN_STATUS=in_progress; after_update )
 label="never while a review is running"; check_not called "${REVIEW_CALL}"
 ( export CHECK_OVERRIDE="test (unit)|completed|failure"; after_update )

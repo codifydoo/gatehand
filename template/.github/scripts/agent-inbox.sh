@@ -29,6 +29,8 @@
 #               and what is left is a person's change on that PR or closing it
 #   merger    → the same: GitHub refused to bring the PR up to date with main (workflow files the
 #               App may not push, or a conflict), and a person merges main into it
+#   review    → the same: every Claude review requested for the PR's head ended without posting
+#               one (agent-state.sh request_review), and a person gets one to run
 #   <other>   → (a kind of lowercase letters only, which is what the request marker carries)
 #               agent_hook_inbox_<kind> from .github/agents/hooks/lib.sh, when the repo defines one:
 #               called as `agent_hook_inbox_<kind> approve|reject <REQ-id> <issue> <reason> <bot-comments>`,
@@ -115,7 +117,7 @@ dispatch() {
 }
 
 # builtin_kind <kind>: the request kinds this script handles itself; a repo hook never overrides them.
-builtin_kind() { case "$1" in protected | blocked | failed | breaker | untrusted | fixer | merger) return 0 ;; esac; return 1; }
+builtin_kind() { case "$1" in protected | blocked | failed | breaker | untrusted | fixer | merger | review) return 0 ;; esac; return 1; }
 
 # apply_one <command line> <bot-comments>: prints one result line for the reply.
 apply_one() {
@@ -129,7 +131,7 @@ apply_one() {
       if answered "${req}" "$2"; then printf -- '- `%s`: already answered\n' "${req}"; return; fi
       read -r role issue kind <<<"${found}"
       if [[ "${verb}" == reject ]]; then
-        # A breaker request has no issue to tell; a fixer or merger request's labels are on the PR,
+        # A breaker request has no issue to tell; a fixer, merger or review request is about the PR,
         # not the issue (which stays agent:pr-open), so a reject only records that it was seen.
         if ! builtin_kind "${kind}" && declare -F "agent_hook_inbox_${kind}" >/dev/null; then
           if "agent_hook_inbox_${kind}" reject "${req}" "${issue}" "$(printf '%s' "${arg2}" | agent_oneline 300)" "$2" </dev/null; then
@@ -138,7 +140,7 @@ apply_one() {
             printf -- '- `%s`: rejecting failed part way; nothing recorded, send it again\n' "${req}"
           fi
           return
-        elif [[ "${kind}" != breaker && "${kind}" != fixer && "${kind}" != merger ]]; then
+        elif [[ "${kind}" != breaker && "${kind}" != fixer && "${kind}" != merger && "${kind}" != review ]]; then
           note="$(mktemp)"
           printf 'The owner rejected %s in the agent inbox%s It stays blocked.\n' "${req}" \
             "$([[ -n "${arg2}" ]] && printf ': %s.' "$(printf '%s' "${arg2}" | agent_oneline 300)" || printf '.')" >"${note}"
@@ -184,6 +186,11 @@ apply_one() {
         merger)
           mark_answered "${req}" "seen"
           printf -- '- `%s` seen; nothing changed. Merge `main` into the PR'"'"'s branch yourself and remove `agent:needs-human` from it, or close it. When that merge is the only new commit, the merge gate asks for the fresh review itself; otherwise run `gh workflow run "Claude Code Review" -f pr=<PR>`\n' "${req}"
+          return
+          ;;
+        review)
+          mark_answered "${req}" "seen"
+          printf -- '- `%s` seen; nothing changed. Once the review can run, ask for it yourself: `gh workflow run "Claude Code Review" -f pr=<PR>`; or close the PR\n' "${req}"
           return
           ;;
         untrusted)

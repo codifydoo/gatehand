@@ -180,6 +180,10 @@ start; the inbox still works.
   run has ended. To free it sooner, swap the label back to `agent:ready` yourself.
 - **An agent PR that is green but not merged:** the newest "Agent merge" run's summary lists every
   reason it is waiting.
+- **A requested review that never posted:** a dispatched review run can end green without a review.
+  Once a request is 45 minutes old with no review answering it and none queued or running, the
+  merge gate's next run requests it again, at most twice per head; then the inbox gets one `review`
+  request for that head, and `gh workflow run "Claude Code Review" -f pr=<PR>` is yours to run.
 - **A run that failed before the model started** (a mirror outage in your setup steps) costs no
   attempt, no daily run and no breaker step, `infraGracePerDay` times per role per day.
 - **Nothing runs on its schedule:** GitHub fires a cron only from the default branch, may delay or

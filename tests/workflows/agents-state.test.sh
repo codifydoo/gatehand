@@ -634,5 +634,134 @@ stub_gh_reset_rules
 stub_gh_on 'label list *' "${labels_all}"
 if ROLE=coder RUN_ID=555 cmd_lock 7 1 >/dev/null 2>&1; then t_pass "a lock whose comment posted succeeds"; else t_fail "a posted lock failed"; fi
 
+# request_review: once per head, again when that request went nowhere (a dispatched review that
+# ended without posting, 2026-11-10), at most twice, then once in the inbox. Now is 12:00; a request
+# is stale after 45 minutes, so 11:30 is recent and 11:00 is not.
+RR_SHA=1111111111111111111111111111111111111111
+RR_CALL='workflow run Claude Code Review -f pr=44'
+rr_marker() { printf '<!-- agent-review-dispatched sha=%s -->\nwhy' "${2:-${RR_SHA}}"; }
+rr_comments() { # rr_comments "<login>|<created_at>|<body>" ... -> the REST comments array
+  local c rest a=() i=0
+  for c in "$@"; do
+    i=$((i + 1)); rest="${c#*|}"
+    a+=("$(jq -cn --argjson id "${i}" --arg u "${c%%|*}" --arg t "${rest%%|*}" --arg b "${rest#*|}" '{id: $id, user: {login: $u}, created_at: $t, updated_at: $t, body: $b}')")
+  done
+  if [[ ${#a[@]} -eq 0 ]]; then echo '[]'; else printf '%s\n' "${a[@]}" | jq -s .; fi
+}
+RR_RUNS_NONE='{"workflow_runs":[]}'
+# rr_case <comments-json>: request_review as the merge gate calls it (RR_AGAIN= for the fixer's call).
+# RR_RUNS: the review runs; RR_JOB: "<started> <completed>" of run 70's claude-review job; RR_INBOX:
+# the inbox's comments; RR_FAIL: a glob that fails.
+rr_case() {
+  stub_gh_reset_calls
+  stub_gh_reset_rules
+  AGENT_TRUST_CACHE=()
+  if [[ -n "${RR_FAIL:-}" ]]; then stub_gh_on "${RR_FAIL}" '' 1 'gh: HTTP 502'; fi
+  stub_gh_json 'api --paginate repos/o/r/issues/44/comments*' "$1"
+  stub_gh_json 'api --paginate repos/o/r/actions/workflows/claude-code-review.yml/runs*' "${RR_RUNS:-${RR_RUNS_NONE}}"
+  stub_gh_json 'api repos/o/r/actions/runs/70/jobs*' "$(jq -cn --arg w "${RR_JOB:-}" '($w | split(" ")) as $j
+    | {jobs: (if $w == "" then [] else [{name: "claude-review", started_at: $j[0], completed_at: $j[1]}] end)}')"
+  stub_gh_json 'api repos/o/r/collaborators/owner-login/permission*' '{"permission":"admin"}'
+  stub_gh_json 'api repos/o/r/collaborators/*/permission*' '{"permission":"read"}'
+  stub_gh_json 'api --paginate repos/o/r/issues/99/comments*' "${RR_INBOX:-[]}"
+  stub_gh_on 'pr view 44 --json body*' '{"body":"x\n\nRefs #7\n\n<!-- agent-run:coder run=900 issue=7 -->"}'
+  stub_gh_on 'issue view 99 --json body *' $'intro\n<!-- agent-inbox:open:start -->\n<!-- agent-inbox:open:end -->'
+  AGENT_INBOX_ISSUE=99 request_review 44 "${RR_SHA}" "CI passed on the fixer's ${RR_SHA:0:9}" ${RR_AGAIN-again} >"${TMP}/rr.out" 2>"${TMP}/rr.err"
+  echo "$?" >"${TMP}/rr.rc"
+}
+rr_dispatches() { stub_gh_calls | grep -c "^${RR_CALL}"; }
+
+rr_case '[]'
+expect "request_review: the first request for a head dispatches the review" "$(rr_dispatches)" 1
+if stub_gh_last_body 'issue comment 44 *' | grep -Fq "<!-- agent-review-dispatched sha=${RR_SHA} -->"$'\n'"CI passed on the fixer's ${RR_SHA:0:9}, so a fresh Claude review was requested."; then
+  t_pass "request_review: and records it on the PR with the caller's reason"
+else
+  t_fail "request_review: recorded '$(stub_gh_last_body 'issue comment 44 *')'"
+fi
+rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T11:30:00Z|$(rr_marker)")"
+expect "request_review: a request 30 minutes old is not repeated" "$(rr_dispatches)" 0
+expect_no_call "request_review: nor recorded again" "issue comment 44"
+if grep -Fq "a review of ${RR_SHA:0:9} was already requested" "${TMP}/rr.out"; then t_pass "request_review: and says it was already requested"; else t_fail "request_review: said '$(cat "${TMP}/rr.out")'"; fi
+rr_case "$(rr_comments "claude[bot]|2026-11-05T09:00:00Z|<!-- verify-pr-review -->" "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
+expect "request_review: a request an hour old with no review since: requested again" "$(rr_dispatches)" 1
+if stub_gh_last_body 'issue comment 44 *' | grep -Fq "<!-- agent-review-dispatched sha=${RR_SHA} -->" \
+  && stub_gh_last_body 'issue comment 44 *' | grep -Fq "requested at 2026-11-05T11:00:00Z posted nothing" \
+  && stub_gh_last_body 'issue comment 44 *' | grep -Fq "(request 2 of 3)"; then
+  t_pass "request_review: recorded as the second request for the head, naming the one that went nowhere"
+else
+  t_fail "request_review: recorded '$(stub_gh_last_body 'issue comment 44 *')'"
+fi
+expect "request_review: and the retry succeeds" "$(cat "${TMP}/rr.rc")" 0
+rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T10:00:00Z|$(rr_marker)" "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
+expect "request_review: two stale requests: a third, the last allowed" "$(rr_dispatches)" 1
+if stub_gh_last_body 'issue comment 44 *' | grep -Fq "(request 3 of 3)"; then t_pass "request_review: recorded as 3 of 3"; else t_fail "request_review: recorded '$(stub_gh_last_body 'issue comment 44 *')'"; fi
+RR_STALE="$(rr_comments "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
+RR_AGAIN= rr_case "${RR_STALE}"
+expect "request_review: the fixer's call never repeats a request, however old" "$(rr_dispatches)" 0
+# Whether a review posted after the request answers it: the review bot's must come from a job that
+# started after the request (review_attribution) and be unedited; a writer's counts as it is.
+RR_RUN70='{"workflow_runs":[{"id":70,"display_title":"Claude review of PR #44","created_at":"2026-11-05T11:00:01Z","status":"completed"}]}'
+RR_ANSWER="$(rr_comments "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)" "claude[bot]|2026-11-05T11:10:00Z|<!-- verify-pr-review -->")"
+RR_RUNS="${RR_RUN70}" RR_JOB="2026-11-05T11:01:00Z 2026-11-05T11:12:00Z" rr_case "${RR_ANSWER}"
+expect "request_review: a review its own job posted after the request: answered, not requested again" "$(rr_dispatches)" 0
+RR_RUNS="${RR_RUN70}" RR_JOB="2026-11-05T10:50:00Z 2026-11-05T11:12:00Z" rr_case "${RR_ANSWER}"
+expect "request_review: a review posted after the request by a job that started before it: no answer, requested again" "$(rr_dispatches)" 1
+RR_RUNS="${RR_RUN70}" rr_case "${RR_ANSWER}"
+expect "request_review: a review no job of the PR wrote: no answer, requested again" "$(rr_dispatches)" 1
+RR_RUNS="${RR_RUN70}" RR_JOB="2026-11-05T11:01:00Z 2026-11-05T11:12:00Z" \
+  rr_case "$(jq -c '(.[] | select(.user.login == "claude[bot]") | .updated_at) = "2026-11-05T11:20:00Z"' <<<"${RR_ANSWER}")"
+expect "request_review: the review bot's review edited after it posted: no answer, requested again" "$(rr_dispatches)" 1
+rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)" "owner-login|2026-11-05T11:10:00Z|<!-- verify-pr-review -->")"
+expect "request_review: a writer's review after the request: answered" "$(rr_dispatches)" 0
+rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)" "outsider|2026-11-05T11:10:00Z|<!-- verify-pr-review -->")"
+expect "request_review: an outsider's review after the request: no answer, requested again" "$(rr_dispatches)" 1
+RR_RUNS='{"workflow_runs":[{"id":70,"display_title":"Claude review of PR #44","created_at":"2026-11-05T11:00:01Z","status":"queued"}]}' \
+  rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
+expect "request_review: a stale request whose run is still queued: not requested again" "$(rr_dispatches)" 0
+RR_RUNS='{"workflow_runs":[{"id":70,"display_title":"Claude review of PR #45","created_at":"2026-11-05T11:00:01Z","status":"in_progress"}]}' \
+  rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
+expect "request_review: another PR's running review does not hold this one back" "$(rr_dispatches)" 1
+rr_case "$(rr_comments "outsider|2026-11-05T11:30:00Z|$(rr_marker)")"
+expect "request_review: a marker someone else pasted is no request" "$(rr_dispatches)" 1
+rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T11:30:00Z|$(rr_marker x 2222222222222222222222222222222222222222)")"
+expect "request_review: a request for another head is no request for this one" "$(rr_dispatches)" 1
+# The cap: three requests that all went nowhere, and the head goes to a person, once.
+RR_THREE="$(rr_comments "repo-agent[bot]|2026-11-05T10:00:00Z|$(rr_marker)" "repo-agent[bot]|2026-11-05T10:30:00Z|$(rr_marker)" "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
+rr_case "${RR_THREE}"
+expect "request_review: the cap reached: no fourth request" "$(rr_dispatches)" 0
+if stub_gh_last_body 'issue comment 99 *' | grep -Fq "<!-- agent-review-ask pr=44 sha=${RR_SHA} -->" \
+  && stub_gh_last_body 'issue comment 99 *' | grep -Eq "<!-- agent-req:REQ-[0-9]{8}-[0-9a-f]{4} role=merger issue=7 kind=review -->" \
+  && stub_gh_last_body 'issue comment 99 *' | grep -Fq 'gh workflow run "Claude Code Review" -f pr=44'; then
+  t_pass "request_review: the cap reached: a review request in the agent inbox, with what to do"
+else
+  t_fail "request_review: inbox got '$(stub_gh_last_body 'issue comment 99 *')'"
+fi
+expect_no_call "request_review: and nothing on the PR" "issue comment 44"
+expect_no_call "request_review: nor a label" "issues/44/labels"
+expect "request_review: the inbox request succeeds" "$(cat "${TMP}/rr.rc")" 0
+RR_RUNS="${RR_RUN70}" RR_JOB="2026-11-05T10:50:00Z 2026-11-05T11:12:00Z" \
+  rr_case "$(jq -c '. + [{id: 9, user: {login: "claude[bot]"}, created_at: "2026-11-05T11:10:00Z", updated_at: "2026-11-05T11:10:00Z", body: "<!-- verify-pr-review -->"}]' <<<"${RR_THREE}")"
+if stub_gh_calls | grep -q '^issue comment 99 ' && [[ "$(rr_dispatches)" == 0 ]]; then
+  t_pass "request_review: the cap reached with only an older job's review since: still the inbox, no fourth request"
+else
+  t_fail "request_review: cap with an older job's review: $(cat "${TMP}/rr.out")"
+fi
+RR_INBOX="$(jq -cn --arg b "<!-- agent-review-ask pr=44 sha=${RR_SHA} -->" '[{user: {login: "repo-agent[bot]"}, body: $b}]')" rr_case "${RR_THREE}"
+expect_no_call "request_review: a head already in the inbox: not asked twice" "issue comment 99"
+expect "request_review: nor requested" "$(rr_dispatches)" 0
+RR_INBOX="$(jq -cn --arg b "<!-- agent-review-ask pr=44 sha=${RR_SHA} -->" '[{user: {login: "outsider"}, body: $b}]')" rr_case "${RR_THREE}"
+if stub_gh_calls | grep -q '^issue comment 99 '; then t_pass "request_review: an ask marker someone else pasted does not count"; else t_fail "request_review: a pasted ask marker suppressed the inbox request"; fi
+RR_FAIL='issue comment 99 *' rr_case "${RR_THREE}"
+expect "request_review: an inbox request that failed fails, so the next run asks again" "$(cat "${TMP}/rr.rc")" 1
+rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T10:00:00Z|$(rr_marker)" "repo-agent[bot]|2026-11-05T10:30:00Z|$(rr_marker)" "repo-agent[bot]|2026-11-05T11:30:00Z|$(rr_marker)")"
+expect "request_review: three requests, the last one recent: it still has time" "$(rr_dispatches)" 0
+expect_no_call "request_review: and nobody is asked yet" "issue comment 99"
+RR_FAIL='api --paginate repos/o/r/issues/44/comments*' rr_case '[]'
+expect "request_review: unreadable comments fail" "$(cat "${TMP}/rr.rc")" 1
+expect "request_review: and request nothing" "$(rr_dispatches)" 0
+RR_FAIL='api --paginate repos/o/r/actions/workflows/claude-code-review.yml/runs*' rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
+expect "request_review: unreadable review runs on a stale request fail" "$(cat "${TMP}/rr.rc")" 1
+expect "request_review: and request nothing" "$(rr_dispatches)" 0
+
 printf '\n[agents-state] %d passed, %d failed\n' "${pass}" "${fail}"
 [[ "${fail}" -eq 0 ]]

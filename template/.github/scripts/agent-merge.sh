@@ -35,9 +35,12 @@
 #     across. Once the required checks pass on a head the gate's own update made (its first parent
 #     is a head the gate recorded updating, or one it asked a person to update), and nothing but the
 #     review and being behind main again is missing, the gate asks for one fresh Claude review of
-#     it (request_review: once per head, never while a review is queued or running). If that head
-#     conflicts with main as well, a person is asked instead. A head a person pushed on their own
-#     still waits for that person.
+#     it (request_review, never while a review is queued or running; a request no review answered
+#     is made again after 45 minutes, at most twice, then a person is asked in the inbox). If that
+#     head conflicts with main as well, a person is asked instead. A head a person pushed on their
+#     own still waits for that person. A head whose review the agents already asked for (the fixer,
+#     after CI passed on its push) gets the same retries, unless it conflicts with main: a
+#     dispatched review can end without posting, and nothing else would ask again.
 #
 # Usage: agent-merge.sh run [<pr>]   every open agent PR, or the one named
 # Env:   GH_TOKEN, GH_REPO, AGENTS_ENABLED, AGENT_AUTO_MERGE, AGENT_BOT_EMAIL;
@@ -195,12 +198,21 @@ gate_updated_head() {
   grep -Fq -e "<!-- agent-merge-updated from=${parent} -->" -e "<!-- agent-merge-needs-human sha=${parent} -->" <<<"${bodies}"
 }
 
+# review_requested_head <pr> <sha>: exit 0 when the agents already asked for a review of <sha> (the
+# fixer after CI passed on its push, or this gate): the review of that head is theirs to ask again.
+review_requested_head() {
+  local bodies
+  bodies="$(pr_bot_comments "$1")" || return 1
+  grep -Fq "<!-- agent-review-dispatched sha=$2 -->" <<<"${bodies}"
+}
+
 # gate_one <pr>: prints one of
 #   merge <sha>                    every condition holds
 #   update <sha> <n>               behind main by <n> is the only blocker: update the branch
 #   review <sha> wait: <reasons>   the head is the gate's own update, and a review of it is all
 #                                  that is missing (being behind again too, so the two cannot wait
-#                                  on each other)
+#                                  on each other); or the same on a head whose review the agents
+#                                  already asked for, unless it conflicts with main
 #   conflict <sha> <n>             the same, but it now conflicts with main as well: neither a
 #                                  review nor an update can move it, so a person merges main in
 #   wait: <reasons>                anything else; the reasons are each blocker found
@@ -240,6 +252,9 @@ gate_one() {
     else
       printf 'wait: %s\n' "${reasons}"
     fi
+  elif [[ -z "${others}" ]] && grep -Eq "${STALE_RE}" <<<"${blockers}" \
+    && ! grep -Eq "${CONFLICT_RE}" <<<"${blockers}" && review_requested_head "${pr}" "${sha}"; then
+    printf 'review %s wait: %s\n' "${sha}" "${reasons}"
   else
     printf 'wait: %s\n' "${reasons}"
   fi
@@ -394,7 +409,7 @@ cmd_run() {
         sha="${rest%% *}"
         if [[ "${live}" == 1 ]]; then
           echo "#${pr}: ${rest#* }"
-          request_review "${pr}" "${sha}" "The required checks pass on ${sha:0:9}, the head the merge gate's branch update made" || rc=1
+          request_review "${pr}" "${sha}" "The required checks pass on ${sha:0:9}, the head the merge gate's branch update made" again || rc=1
         else
           echo "#${pr}: ${rest#* }; would request a review of ${sha:0:9} (dry run: AGENT_AUTO_MERGE is not true)"
         fi

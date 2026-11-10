@@ -212,10 +212,16 @@ EVENT=workflow_run WR_PATH=.github/workflows/ci.yml WR_CONCLUSION=success WR_HEA
   cmd_route >/dev/null 2>&1
 expect_call "CI green on a head the fixer pushed: a fresh Claude review is dispatched" 'workflow run Claude Code Review -f pr=44'
 if stub_gh_any_body "<!-- agent-review-dispatched sha=${HEAD1} -->"; then t_pass "and recorded once for that head"; else t_fail "no review-dispatched marker"; fi
-base_rules "$(prjson)" "$(comments "repo-agent[bot]|2026-11-05T10:01:00Z|${FIXRUN}" "repo-agent[bot]|2026-11-05T10:20:00Z|<!-- agent-review-dispatched sha=${HEAD1} -->")"
+base_rules "$(prjson)" "$(comments "repo-agent[bot]|2026-11-05T10:01:00Z|${FIXRUN}" "repo-agent[bot]|2026-11-05T11:30:00Z|<!-- agent-review-dispatched sha=${HEAD1} -->")"
 EVENT=workflow_run WR_PATH=.github/workflows/ci.yml WR_CONCLUSION=success WR_HEAD_BRANCH=fix/agent-cli-nil-table WR_HEAD_SHA="${HEAD1}" WR_ID=906 \
   cmd_route >/dev/null 2>&1
 expect_no_call "a second green run of the same head requests no second review" 'Claude Code Review'
+# Even long after a request no review answered: the merge gate retries it, never the router, which
+# runs on the same CI completion and could spend the same retry twice.
+base_rules "$(prjson)" "$(comments "repo-agent[bot]|2026-11-05T10:01:00Z|${FIXRUN}" "repo-agent[bot]|2026-11-05T10:20:00Z|<!-- agent-review-dispatched sha=${HEAD1} -->")"
+EVENT=workflow_run WR_PATH=.github/workflows/ci.yml WR_CONCLUSION=success WR_HEAD_BRANCH=fix/agent-cli-nil-table WR_HEAD_SHA="${HEAD1}" WR_ID=909 \
+  cmd_route >/dev/null 2>&1
+expect_no_call "a green run long after an unanswered request: the router leaves the retry to the merge gate" 'Claude Code Review'
 base_rules "$(prjson)" '[]'
 EVENT=workflow_run WR_PATH=.github/workflows/ci.yml WR_CONCLUSION=success WR_HEAD_BRANCH=fix/agent-cli-nil-table WR_HEAD_SHA="${HEAD1}" WR_ID=907 \
   cmd_route >/dev/null 2>&1
