@@ -476,7 +476,9 @@ expect "...the comment gives the rule" "$(grep -c 'not updated: PR body uses a c
 fix_case fixbodyhuge
 agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
 fix_bundle
-{ printf 'Refs #7\n'; head -c 70000 /dev/zero | tr '\0' 'x'; printf '\n'; } >"${OUT}/pr-body.md"
+# A pasted footer near the top: reading first would cut the file to a short, valid text, so only a
+# size check BEFORE the read refuses it.
+{ printf 'Refs #7\n\n---\n<sub>Opened by the coder agent\n'; head -c 70000 /dev/zero | tr '\0' 'x'; printf '\n'; } >"${OUT}/pr-body.md"
 publish_fix
 expect "fix+body: (that case's fix went out)" "$(outv outcome)" "fix-pushed"
 expect "fix+body: an oversize body is refused before it is read" "$(edits)" 0
