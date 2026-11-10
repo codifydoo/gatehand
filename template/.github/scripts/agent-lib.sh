@@ -669,7 +669,8 @@ infra_failure() {
 #
 # .github/agents/hooks/lib.sh, when present, is sourced last. It is the adopter's file, never the
 # package's: it may add functions the scripts call when defined (agent_hook_pr_guard <labels>
-# <paths-file>, agent_hook_inbox_<kind>, agent_hook_digest_sections) or extend AGENT_LABELS. It lives
+# <paths-file>, agent_hook_inbox_<kind>, agent_hook_digest_sections, agent_hook_digest_done_pending,
+# agent_hook_labeler_trusted) or extend AGENT_LABELS. It lives
 # under .github/, which AGENT_NEVER_FLOOR keeps out of every agent PR, and every script that sources
 # this file runs from the default branch's checkout.
 AGENT_HOOKS_DIR="${AGENT_HOOKS_DIR:-${AGENT_ROOT}/.github/agents/hooks}"

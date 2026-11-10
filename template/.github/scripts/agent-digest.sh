@@ -158,8 +158,8 @@ section_waiting() {
     while IFS= read -r l; do [[ -n "${l}" ]] && lines+=("${l}"); done < <(jq -r "${JQ_CELL}"'
       .[] | select(.labels | index("agent:blocked") or index("agent:needs-human"))
       | "- #\(.number) \(.title | cell): \([.labels[] | select(. == "agent:blocked" or . == "agent:needs-human")] | join(", "))."' <<<"${ISSUES}")
-    # Triage's High and Critical findings and the SEO audit's issues: the coder takes only a
-    # person's agent:ready, so these wait for you to queue or close.
+    # Triage's High and Critical findings, the coder's follow-ups and anything else filed as a
+    # candidate: the coder takes only a person's agent:ready, so these wait for you to queue or close.
     l="$(jq -r '[.[] | select(.labels | index("agent:candidate")) | "#\(.number)"]
       | if length == 0 then empty
         else "- \(length) `agent:candidate` issue(s) to queue (add `agent:ready`) or close: \(.[0:10] | join(", "))\(if length > 10 then ", …" else "" end)." end' <<<"${ISSUES}")"
@@ -178,7 +178,17 @@ section_waiting() {
       pr="$(jq -r --arg b "$(policy '.botLogin')" '($b | rtrimstr("[bot]")) as $s
         | [.comments[] | select(.author.login as $a | $a == $s or $a == "app/\($s)" or $a == "\($s)[bot]")
            | (.body // "") | capture("<!-- agent-merged pr=(?<pr>[0-9]+) -->") | .pr] | last // empty' <<<"${row}")"
-      if [[ -z "${pr}" ]]; then
+      # A repo that knows when a merge is live (a deploy record) says so in its own line:
+      # agent_hook_digest_done_pending <issue> <title> <pr or empty> <issue-json>, when
+      # .github/agents/hooks/lib.sh defines it; no output, or a failure, keeps the line below.
+      l=""
+      if declare -F agent_hook_digest_done_pending >/dev/null; then
+        l="$(agent_hook_digest_done_pending "${n}" "${title}" "${pr}" "${row}" 2>/dev/null)" || l=""
+        l="${l%%$'\n'*}"
+      fi
+      if [[ -n "${l}" ]]; then
+        lines+=("${l}")
+      elif [[ -z "${pr}" ]]; then
         lines+=("- #${n} ${title}: merged, but with no merge note. Check it is live, then close it.")
       else
         lines+=("- #${n} ${title}: #${pr} is merged. Close it once the fix is live.")

@@ -65,6 +65,13 @@ Below, `ISSUE` is the first word and `AGENT_DIR` the second.
      results), `## Risks and follow-ups`, and a last line `Refs #ISSUE`.
    - `summary.md`: at most 30 lines for the issue thread: what you changed, how you verified it, and
      anything you noticed but left alone.
+   - `followups.json` (optional): things you noticed but left alone that deserve an issue of their
+     own, at most `roles.coder.maxFollowups` in `.github/agents/policy.json` (none when it is 0), as
+     `[{"title": "…", "body": "…"}]`. The title is 10 to 90 characters; the body says what is wrong
+     and where (file paths), and ends with a `### Done when` section saying how to check it is fixed
+     (one without it is not filed). They are filed as `agent:candidate`, so a person decides whether
+     anyone takes them. Leave out style nits, guesses you did not check, and anything an open issue
+     already covers.
 
 Do not edit anything outside the repository except files in `AGENT_DIR/outbox/`. Do not touch
 `CLAUDE.md` or the other protected paths unless the issue carries `agent:allow-protected`; even then,

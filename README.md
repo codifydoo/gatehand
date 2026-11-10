@@ -48,7 +48,7 @@ Requirements: a GitHub repository with Actions, a Claude subscription token
 | `project.md` | Your standing rules and the check commands per area; the agents read it every run |
 | `protected-paths.txt` | Paths an agent PR needs a person's label for, and `!` paths it may never touch |
 | `system/`, `toolchain/`, `dependencies/` | Composite actions that set up the agent's job like your CI |
-| `hooks/lib.sh` | Optional: extra PR-guard rules, inbox request kinds, digest sections |
+| `hooks/lib.sh` | Optional: extra PR-guard rules, inbox request kinds, digest sections and lines, a trust rule for issues your workflows queue |
 
 Everything else (the workflows, `.github/scripts/agent-*.sh`, the Claude commands) is rendered by
 the package and recorded in `.github/agents/install.lock.json`. `/repo-agents:update` re-renders

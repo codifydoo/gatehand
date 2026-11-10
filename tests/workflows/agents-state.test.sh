@@ -216,6 +216,17 @@ expect "fast track: a non-writer's rename since it was opened is not" \
   "$(FT_VIEW="$(ft_view owner-login)" labeler_case "$(jq -s . <(ev renamed '' outsider 2026-11-05T09:00:00Z) <(ev labeled agent:ready 'repo-agent[bot]' "${T0}"))" read)" no
 expect "fast track: a writer's later edit is fine" \
   "$(FT_VIEW="$(ft_view owner-login)" labeler_case "${BOTLABEL}" read "${T1}|owner-login")" yes
+# The repo's own rule (agent_hook_labeler_trusted, .github/agents/hooks/lib.sh): asked only when no
+# writer's label and no fast track vouches, and its answer stands.
+agent_hook_labeler_trusted() { echo "hook asked for $1" >>"${TMP}/hook-calls"; [[ "${HOOK_VOUCH:-}" == yes ]]; }
+: >"${TMP}/hook-calls"
+expect "labeler hook: no hook answer, only the bot labelled it: not trusted" "$(labeler_case "${BOTLABEL}" read)" no
+expect "labeler hook: the hook vouches for an issue only the bot labelled" "$(HOOK_VOUCH=yes labeler_case "${BOTLABEL}" read)" yes
+expect "labeler hook: it was asked about that issue" "$(sort -u "${TMP}/hook-calls")" "hook asked for 8"
+: >"${TMP}/hook-calls"
+expect "labeler hook: a writer's own label never asks it" "$(labeler_case "$(by owner-login)" read)" yes
+expect "labeler hook: not asked when a writer's label vouches" "$(cat "${TMP}/hook-calls")" ""
+unset -f agent_hook_labeler_trusted
 expect "fast track: a read-only collaborator's later agent:ready does not undo it" \
   "$(FT_VIEW="$(ft_view owner-login)" labeler_case "$(jq -s . <(ev labeled agent:ready 'repo-agent[bot]' "${T0}") <(ev labeled agent:ready outsider "${T1}"))" read)" yes
 # end to end: the higher-priority issue was labelled by a read-only collaborator, so the next one wins
