@@ -263,14 +263,20 @@ expect_eq "fix job ends: outbox upload, clear the path, restore main's setup for
   "${fend}" "uses: actions/upload-artifact|clear the path for main's agent setup|restore main's agent setup for the post steps|"
 step_block_named() { awk -v n="      - name: $1" '$0 == n {on = 1; print; next} on && /^      - / {exit} on' <<<"${fix_nc}"; }
 only_if_removed="^        if: always\(\) && steps\.drop_main\.outcome == 'success'$"
-has "main's copy is removed by the step the restore keys on" '^        id: drop_main$' "$(step_block_named "remove main's agent setup")"
-restore="$(step_block_named "restore main's agent setup for the post steps")"
-has "the restore runs whatever the outcome, once main's copy was removed" "${only_if_removed}" "${restore}"
-has "the restore is actions/checkout" '^        uses: actions/checkout@' "${restore}"
-has "of the default branch" '^          ref: \$\{\{ github.event.repository.default_branch \}\}$' "${restore}"
-has "into .agents-main" '^          path: \.agents-main$' "${restore}"
-has "as a sparse checkout of .github/agents" '^          sparse-checkout: \.github/agents$' "${restore}"
-has "without persisting credentials" '^          persist-credentials: false$' "${restore}"
+drop="$(step_block_named "remove main's agent setup")"
+has "main's copy is removed by the step the restore keys on" '^        id: drop_main$' "${drop}"
+hasnt "...which runs only when everything before it succeeded" '^        if:' "${drop}"
+# Exactly these lines: an extra key (repository:, token:) would load the post steps from elsewhere.
+expect_eq "the restore is a checkout of main's .github/agents into .agents-main, and nothing else" \
+  "$(step_block_named "restore main's agent setup for the post steps" | grep -v '^[[:space:]]*$')" \
+  "      - name: restore main's agent setup for the post steps
+        if: always() && steps.drop_main.outcome == 'success'
+        uses: actions/checkout@v7
+        with:
+          ref: \${{ github.event.repository.default_branch }}
+          path: .agents-main
+          sparse-checkout: .github/agents
+          persist-credentials: false"
 clear="$(step_block_named "clear the path for main's agent setup")"
 has "the path is cleared first, under the same condition" "${only_if_removed}" "${clear}"
 has "...by removing it" '^        run: rm -rf \.agents-main$' "${clear}"

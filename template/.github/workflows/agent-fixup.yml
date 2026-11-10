@@ -313,8 +313,9 @@ jobs:
       # So main's copy comes back once the model and the packaging are done: rebuilt from the default
       # branch into a cleared path rather than left as the agent's workspace (the agent still controls
       # this job, as agent-coder.yml's code job explains). Only when it was removed: a job that failed
-      # before that still has the first copy, and one more checkout failing in a GitHub outage would
-      # turn an uncounted pre-agent failure (agent-lib.sh pre_agent_failure) into a counted attempt.
+      # before that still has the copy its toolchain and dependency steps ran from, and one more
+      # checkout failing in a GitHub outage would turn an uncounted pre-agent failure (agent-lib.sh
+      # pre_agent_failure) into a counted attempt.
       - name: clear the path for main's agent setup
         if: always() && steps.drop_main.outcome == 'success'
         run: rm -rf .agents-main
