@@ -485,7 +485,9 @@ expect "fix+body: an oversize body is refused before it is read" "$(edits)" 0
 expect "...the comment says why" "$(grep -c 'not updated: pr-body.md is longer than' <<<"$(fix_comment)")" 1
 
 # Failing reads and writes cost the description, never the pushed fix or its comment.
-for f in BODY_FAIL EDITOR_FAIL PATCH_FAIL; do
+for fr in 'BODY_FAIL|the current one could not be read' 'EDITOR_FAIL|who last edited it could not be read' \
+  'PATCH_FAIL|the edit failed'; do
+  f="${fr%%|*}"
   fix_case "fixbody-${f}"
   agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
   fix_bundle
@@ -495,7 +497,8 @@ for f in BODY_FAIL EDITOR_FAIL PATCH_FAIL; do
   unset "${f}"
   expect "fix+body (${f}): the fix still goes out" "$(outv outcome)" "fix-pushed"
   expect "...its comment, with the review marker, still posts" "$(head -1 <<<"$(fix_comment)" | grep -c '^<!-- agent-run:fix ')" 1
-  expect "...and says the description was not updated" "$(grep -c '^The description was not updated: ' <<<"$(fix_comment)")" 1
+  expect "...and says the description was not updated, for that reason" \
+    "$(grep -cF "The description was not updated: ${fr#*|}." <<<"$(fix_comment)")" 1
 done
 
 fix_case fixmoved
