@@ -26,4 +26,6 @@
 # agent_hook_labeler_trusted <issue>: vouch for an agent:ready issue no person labelled, such as one
 # your own workflow filed and queued as the bot. Exit 0 only when you can vouch for its CURRENT title
 # and body: the text becomes an agent PR. content_untouched_since <issue> <iso> (agent-state.sh)
-# checks that nobody without write access changed it since <iso>.
+# checks that nobody without write access changed it since <iso>. Match your own workflow's issues
+# exactly (a marker it writes, a label it sets at creation): the coder's follow-ups are bot-filed
+# too, with model-written text, and must never pass.

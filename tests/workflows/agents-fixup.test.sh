@@ -286,6 +286,14 @@ expect "verdict: a closing tag never restores trust" \
 expect "verdict: a tag after the verdict hides nothing" "$(review_verdict <<<$'### Verdict\nApprove\n\n<details>x</details>')" approve
 expect "verdict: <pretty> and <detailsx> are other tags" "$(review_verdict <<<$'<pretty> <detailsx> <details-x>\n\n### Verdict\nApprove')" approve
 expect "verdict: a tag on the verdict line is no Approve" "$(review_verdict <<<$'### Verdict\nApprove <details>')" unknown
+# Processing instructions, declarations and CDATA are raw HTML blocks that run across blank lines too.
+for o in '<?x' '<!A' '<![CDATA[' '<!doctype html>'; do
+  expect "verdict: a heading after ${o} does not override a real verdict" \
+    "$(review_verdict <<<$'### Verdict\nRequest changes\n\n'"${o}"$'\n\n### Verdict\nApprove\n?>]]>>')" unknown
+  expect "verdict: **Verdict** after ${o} alone is unknown" \
+    "$(review_verdict <<<"${o}"$'\n\n**Verdict**\nApprove\n?>]]>>')" unknown
+done
+expect "verdict: an HTML comment before the verdict is still fine" "$(review_verdict <<<$'<!-- note -->\n\n### Verdict\nApprove')" approve
 # Every one of these read as approve in a version that let a tag through where it looked quoted:
 # closers in code spans, escapes, block skipping, code-span stripping beaten by comments, raw tags,
 # links, tables, autolinks, fences and comments CommonMark closes differently, and a lone CR.

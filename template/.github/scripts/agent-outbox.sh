@@ -179,7 +179,7 @@ finish() {
 # Claude's GitHub workflow (claude.yml in many repos) starts on any `@claude` in a new issue. Best effort: a bad file or a failed call files
 # nothing more and never changes the run's outcome, which is written before this runs.
 file_followups() {
-  local f="$1/followups.json" issue="$2" pr="$3" max n=0 row title body open seen="" tmp url
+  local f="$1/followups.json" issue="$2" pr="$3" max n=0 row title len body open seen="" tmp url
   [[ -s "${f}" ]] || return 0
   max="$(policy '.roles.coder.maxFollowups // 0')"
   [[ "${max}" =~ ^[0-9]+$ ]] && (( max > 0 )) || return 0
@@ -190,8 +190,11 @@ file_followups() {
   tmp="$(mktemp)"
   while IFS= read -r row; do
     (( n >= max )) && break
-    title="$(jq -r '.title // "" | tostring' <<<"${row}" | agent_oneline 200 | sed -E 's/^[[:space:]]+|[[:space:]]+$//g; s/@([Cc][Ll][Aa][Uu][Dd][Ee])/@-\1/g')"
-    if (( ${#title} < 10 || ${#title} > 90 )); then agent_log "follow-up skipped: title not 10 to 90 characters"; continue; fi
+    title="$(jq -r '.title // "" | tostring' <<<"${row}" | agent_oneline 400 | sed -E 's/^[[:space:]]+|[[:space:]]+$//g; s/@([Cc][Ll][Aa][Uu][Dd][Ee])/@-\1/g')"
+    # Characters, not bytes: 90 of them fit in 400 bytes, so the byte cut above only ever shortens a
+    # title that is refused here anyway, and never splits a character of one that is filed.
+    len="$(jq -rn --arg t "${title}" '$t | length')"
+    if (( len < 10 || len > 90 )); then agent_log "follow-up skipped: title not 10 to 90 characters"; continue; fi
     if grep -Fxq -- "$(tr '[:upper:]' '[:lower:]' <<<"${title}")" <<<"${open}${seen}"; then
       agent_log "follow-up skipped: an open issue has the title '${title}'"
       continue

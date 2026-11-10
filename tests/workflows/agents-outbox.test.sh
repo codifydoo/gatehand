@@ -151,6 +151,22 @@ echo '{"title": "not a list of follow-ups at all"}' >"${OUT}/followups.json"
 publish
 expect "followups: a file that is not a list still opens the PR" "$(outv outcome)" "pr-opened"
 expect "followups: ...and files nothing" "$(stub_gh_calls | grep -c '^issue create ')" 0
+# Length in characters: an 80-character title in a three-byte script is 240 bytes, and is filed whole.
+CJK_TITLE="$(printf '表%.0s' $(seq 1 80))"
+new_case followupscjk
+agent_commit cli/table.go $'fix(cli): handle a nil table\n\nRefs #7'
+bundle
+jq -n --arg t "${CJK_TITLE}" '[{title: $t, body: "a body that is long enough to pass the length check\n### Done when\n- x"}]' >"${OUT}/followups.json"
+publish
+expect "followups: an 80-character multibyte title is filed" "$(outv followups)" "1"
+if stub_gh_calls | grep '^issue create ' | grep -qF -- "--title ${CJK_TITLE} --body-file"; then
+  t_pass "followups: ...whole, not cut by bytes"
+else
+  t_fail "followups: the multibyte title was cut: $(stub_gh_calls | grep '^issue create ')"
+fi
+jq -n --arg t "${CJK_TITLE}表表表表表表表表表表表" '[{title: $t, body: "a body that is long enough to pass the length check\n### Done when\n- x"}]' >"${OUT}/followups.json"
+publish
+expect "followups: a 91-character multibyte title is refused" "$(stub_gh_calls | grep -c '^issue create ')" 0
 unset -f publish_extra
 
 # --- 2. refusals -----------------------------------------------------------------------------------

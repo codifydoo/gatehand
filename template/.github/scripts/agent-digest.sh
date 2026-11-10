@@ -183,7 +183,7 @@ section_waiting() {
       # .github/agents/hooks/lib.sh defines it; no output, or a failure, keeps the line below.
       l=""
       if declare -F agent_hook_digest_done_pending >/dev/null; then
-        l="$(agent_hook_digest_done_pending "${n}" "${title}" "${pr}" "${row}" 2>/dev/null)" || l=""
+        l="$(agent_hook_digest_done_pending "${n}" "${title}" "${pr}" "${row}" 2>/dev/null </dev/null)" || l=""
         l="${l%%$'\n'*}"
       fi
       if [[ -n "${l}" ]]; then
@@ -328,7 +328,7 @@ render() {
   section_runs || rc=1
   section_queue || rc=1
   if declare -F agent_hook_digest_sections >/dev/null; then
-    agent_hook_digest_sections || rc=1
+    agent_hook_digest_sections </dev/null || rc=1
   fi
   return "${rc}"
 }
