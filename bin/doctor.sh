@@ -106,8 +106,10 @@ if [[ "${c_hour:-}|${c_dom:-}|${c_mon:-}|${c_dow:-}" == '*|*|*|*' ]]; then
   fi
   fired="$(gh api "repos/${NWO}/actions/workflows/agent-sweep.yml/runs?event=schedule&per_page=1" --jq .total_count 2>/dev/null)" || fired=""
 fi
-if [[ "${c_hour:-}|${c_dom:-}|${c_mon:-}|${c_dow:-}" != '*|*|*|*' ]]; then
-  ok "the sweep's schedule (${sweep_cron:-none}) is not hourly; not checking whether it fires"
+if [[ -z "${sweep_cron}" ]]; then
+  warn "cannot read schedules.sweep from policy.json; not checking whether the sweep fires"
+elif [[ "${c_hour:-}|${c_dom:-}|${c_mon:-}|${c_dow:-}" != '*|*|*|*' ]]; then
+  ok "the sweep's schedule (${sweep_cron}) is not hourly; not checking whether it fires"
 elif [[ -z "${added}" || ! "${fired}" =~ ^[0-9]+$ ]]; then
   warn "cannot tell whether the sweep runs on its schedule (no agent-sweep.yml on ${DEFAULT}, or the API refused)"
 elif [[ "${fired}" -gt 0 ]]; then

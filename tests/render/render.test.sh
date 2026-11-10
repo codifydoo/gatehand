@@ -36,6 +36,7 @@ check "--check passes right after a render" "${R}" --check "${TMP}/r"
 check "a non-repo is refused" bash -c "! '${R}' '${TMP}' 2>/dev/null"
 # The one exception: hooks/lib.sh.example is the package's reference, so an update refreshes it.
 EX="${TMP}/r/.github/agents/hooks/lib.sh.example"
+check "a render created hooks/lib.sh.example" cmp -s "${PKG}/defaults/hooks/lib.sh.example" "${EX}"
 echo "# an older package's example" >"${EX}"
 "${R}" "${TMP}/r" >/dev/null
 check "a render refreshes a stale hooks/lib.sh.example" cmp -s "${PKG}/defaults/hooks/lib.sh.example" "${EX}"
