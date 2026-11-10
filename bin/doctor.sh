@@ -88,6 +88,25 @@ else
   bad "no ${runner_ref} branch: git push origin origin/${DEFAULT}:refs/heads/${runner_ref}"
 fi
 
+# GitHub fires a cron only from the default branch and says nothing when it does not (one private repo
+# on a Free personal account saw none at all, cause unconfirmed). The sweep is hourly, so two hours
+# after agent-sweep.yml reached the default branch it should have a scheduled run, even a skipped one.
+added="$(gh api --paginate "repos/${NWO}/commits?sha=${DEFAULT}&path=.github/workflows/agent-sweep.yml&per_page=100" \
+  --jq '.[].commit.committer.date' 2>/dev/null | tail -n 1)" || added=""
+fired="$(gh api "repos/${NWO}/actions/workflows/agent-sweep.yml/runs?event=schedule&per_page=1" --jq .total_count 2>/dev/null)" || fired=""
+if [[ -z "${added}" || ! "${fired}" =~ ^[0-9]+$ ]]; then
+  warn "cannot tell whether the sweep runs on its schedule (no agent-sweep.yml on ${DEFAULT}, or the API refused)"
+elif [[ "${fired}" -gt 0 ]]; then
+  ok "the sweep has run on its schedule"
+else
+  hours="$(jq -n --arg d "${added}" '(now - ($d | fromdateiso8601)) / 3600 | floor')"
+  if [[ "${hours}" -ge 2 ]]; then
+    warn "the sweep has never run on its schedule in the ${hours} h since agent-sweep.yml reached ${DEFAULT}: dispatch the workflows by hand or from your own machine (README: Nothing runs on its schedule)"
+  else
+    ok "agent-sweep.yml reached ${DEFAULT} under 2 h ago; too early to check its schedule"
+  fi
+fi
+
 labels="$(gh label list --repo "${NWO}" --limit 300 --json name --jq '.[].name' 2>/dev/null)"
 missing=()
 for l in agent:ready agent:in-progress agent:pr-open agent:pr agent:blocked agent:needs-human agent:hold agent:allow-protected agent:fixing; do

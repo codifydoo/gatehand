@@ -343,6 +343,16 @@ if [[ -n "${view_at}" && -n "${gql_at}" && "${gql_at}" -gt "${view_at}" ]]; then
 else
   t_fail "snapshot: the edit check (call ${gql_at:-none}) does not follow the fetch (call ${view_at:-none})"
 fi
+# A failed sanitize leaves no copy of the issue behind: the fixer's task file is a mktemp.
+stub_gh_reset_rules
+AGENT_TRUST_CACHE=()
+stub_gh_on 'issue view 7 --json number,title,body,labels,author,comments,createdAt' '{"number":7,"title":"t","body":"b","labels":[],"comments":[]}'
+mkdir -p "${TMP}/failing" && printf '#!/usr/bin/env bash\nexit 1\n' >"${TMP}/failing/agent-sanitize-input.sh"
+saved_script_dir="${SCRIPT_DIR}"
+SCRIPT_DIR="${TMP}/failing"
+if cmd_snapshot 7 "${TMP}/task4.md" "${T0}" 2>/dev/null; then t_fail "snapshot: a failed sanitize passed"; else t_pass "snapshot: a failed sanitize fails it"; fi
+SCRIPT_DIR="${saved_script_dir}"
+expect "snapshot: a failed sanitize leaves no issue JSON behind" "$([[ -e "${TMP}/task4.md.json" ]] && echo left || echo gone)" gone
 # snap_case <since> <timeline-json> [edit…] -> yes/no: which window the read-back checks.
 snap_case() {
   local since="$1" tl="$2"

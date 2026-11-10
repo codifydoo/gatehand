@@ -309,7 +309,8 @@ cmd_snapshot() {
     if actor_trusted "${who}"; then list+="${list:+,}${who}"; fi
   done < <(jq -r '.comments[].author.login' <<<"${json}" | sort -u)
   printf '%s\n' "${json}" >"${out}.json"
-  TRUSTED_COMMENTERS="${list}" bash "${SCRIPT_DIR}/agent-sanitize-input.sh" --from-json "${out}.json" >"${out}" || return 1
+  TRUSTED_COMMENTERS="${list}" bash "${SCRIPT_DIR}/agent-sanitize-input.sh" --from-json "${out}.json" >"${out}" \
+    || { rm -f "${out}.json"; return 1; }
   rm -f "${out}.json"
   if [[ "${since}" == label ]]; then
     labeler_trusted "${issue}" || { agent_log "#${issue}: no longer trusted after the snapshot"; return 1; }

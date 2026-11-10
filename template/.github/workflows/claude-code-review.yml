@@ -341,7 +341,7 @@ jobs:
                 printf '%s\n\n%s\n\n%s\n\n```bash\ngh workflow run "Claude Code Review" -f pr=%s\n```\n\n%s\n' \
                   "${skip_marker}" \
                   '**Claude did not review this PR.** The review action skipped it without running Claude. The usual reason: this PR edits `.github/workflows/claude-code-review.yml`, and the action only runs when that file matches `main`.' \
-                  'Nothing runs the review later on its own. Once this merges, ask for it by hand:' \
+                  'Nothing runs the review later on its own. Ask for it by hand; this works before merging, because a dispatch runs the default branch'"'"'s copy of this workflow:' \
                   "${PR}" \
                   "Run log: ${RUN_URL}" \
                   | gh pr comment "${PR}" --repo "${{ github.repository }}" --body-file -

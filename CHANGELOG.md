@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.1 (2026-11-10)
+
+Fixes from upgrading a 0.1.0 install to 0.2.0:
+
+- `bin/render.sh` refreshes `.github/agents/hooks/lib.sh.example`, the package's reference for the
+  hooks, so an update documents new hooks. Every other file of yours is still only created when
+  missing, and the example still stays away once `hooks/lib.sh` exists.
+- `bin/doctor.sh` warns when the hourly sweep has never run on its schedule two hours after it
+  reached the default branch, and the README says what to do then. GitHub reports nothing when a
+  cron does not fire; one private repository on a Free personal account saw none at all.
+- The note on a PR the review skipped says the review can be asked for before merging: a dispatch
+  runs the default branch's copy of the workflow.
+- The issue snapshot removes its temporary copy of the issue when sanitizing fails.
+
 ## 0.2.0 (2026-11-10)
 
 - The coder may file what it noticed but left alone as `agent:candidate` issues (`followups.json`,
