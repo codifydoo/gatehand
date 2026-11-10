@@ -12,7 +12,8 @@
   paragraph, and fails closed (verdict unknown) when a `<details>`, `<pre>`, `<script>`, `<style>`
   or `<textarea>` tag, or a line opening with a processing instruction (`<?`), a declaration
   (`<!X`) or CDATA, comes before the verdict line: GitHub can hide what follows them. A `<?php`
-  mentioned mid-line does not count.
+  mentioned mid-line does not count. A lone CR anywhere makes the verdict unknown too: CommonMark
+  breaks the line there and the parser would not.
 - New hooks in `.github/agents/hooks/lib.sh`: `agent_hook_labeler_trusted <issue>` vouches for
   issues the repo's own workflows queue as the bot (asked only when no person ever applied
   `agent:ready`), and `agent_hook_digest_done_pending` writes the digest's line for a merged issue
