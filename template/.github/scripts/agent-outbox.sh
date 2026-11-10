@@ -335,15 +335,21 @@ cmd_publish() {
 # description untrue), it replaces the description, so the next review does not find the PR
 # contradicting itself. It passes the coder's body rules (check_body). The coder's footer, from the
 # `---` above "Opened by the coder agent" to the end, is kept verbatim from the PR as it is now: it
-# carries the agent-run:coder marker that pr_issue reads. Left alone when a person edited the
-# description (their words win), or when the footer is gone. Prints one line for the fix comment;
-# never fails the fix, which is already pushed.
+# carries the agent-run:coder marker that pr_issue reads. Left alone when anyone but the agent bot
+# last edited the description (a person's words win), or when the footer is gone. Prints one line
+# for the fix comment; never fails the fix, which is already pushed. Only a fix with commits gets
+# here: a description-only answer to a review is out of scope (no new head, so no new review).
 coder_footer() { awk '{l[NR] = $0} END {s = 0; for (i = 1; i < NR; i++) if (l[i] == "---" && index(l[i + 1], "<sub>Opened by the coder agent") == 1) s = i; if (s) for (i = s; i <= NR; i++) print l[i]}'; }
 before_footer() { awk '{l[NR] = $0} END {s = NR + 1; for (i = 1; i < NR; i++) if (l[i] == "---" && index(l[i + 1], "<sub>Opened by the coder agent") == 1) { s = i; break }; for (i = 1; i < s; i++) print l[i]}'; }
 update_pr_body() {
-  local pr="$1" issue="$2" f="$3/pr-body.md" cur editor footer bot text new
+  local pr="$1" issue="$2" f="$3/pr-body.md" cur editor footer bot text new max
   [[ -s "${f}" ]] || return 0
   bot="$(policy '.botLogin')"
+  max="$(policy '.maxPrBodyBytes')"
+  # Measured before anything reads it: the helpers below hold the whole file in memory.
+  if [[ "$(wc -c <"${f}")" -gt "${max}" ]]; then
+    printf 'The description was not updated: pr-body.md is longer than %s bytes.\n' "${max}"; return 0
+  fi
   text="$(mktemp)"
   # The footer is the outbox's to keep: drop a copy the fixer pasted in despite its instructions.
   before_footer <"${f}" >"${text}"
@@ -353,12 +359,15 @@ update_pr_body() {
   if ! cur="$(gh pr view "${pr}" --json body --jq '.body // ""')"; then
     rm -f "${text}"; printf 'The description was not updated: the current one could not be read.\n'; return 0
   fi
-  if ! editor="$(gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){editor{login}}}}' \
-    -f o="${GH_REPO%%/*}" -f r="${GH_REPO#*/}" -F n="${pr}" --jq '.data.repository.pullRequest.editor.login // ""')"; then
+  # "Bot <login>" or "User <login>"; GraphQL drops a bot's [bot] suffix. Only the agent bot itself (a
+  # Bot, not a user who registered the same name) may have edited it last.
+  if ! editor="$(gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){editor{__typename login}}}}' \
+    -f o="${GH_REPO%%/*}" -f r="${GH_REPO#*/}" -F n="${pr}" \
+    --jq '.data.repository.pullRequest.editor | if . == null then "" else "\(.__typename) \(.login)" end')"; then
     rm -f "${text}"; printf 'The description was not updated: who last edited it could not be read.\n'; return 0
   fi
-  if [[ -n "${editor}" && "${editor}" != "${bot}" && "${editor}" != "${bot%\[bot\]}" ]]; then
-    rm -f "${text}"; printf 'The description was not updated: %s edited it, so it stays as they left it.\n' "$(printf '%s' "${editor}" | agent_oneline 60)"; return 0
+  if [[ -n "${editor}" && "${editor}" != "Bot ${bot%\[bot\]}" && "${editor}" != "Bot ${bot}" ]]; then
+    rm -f "${text}"; printf 'The description was not updated: %s edited it, so it stays as they left it.\n' "$(printf '%s' "${editor#* }" | agent_oneline 60)"; return 0
   fi
   footer="$(printf '%s\n' "${cur}" | coder_footer)"
   if ! grep -Eq "<!-- agent-run:coder run=[0-9a-z]+ issue=${issue} -->" <<<"${footer}"; then
@@ -366,7 +375,8 @@ update_pr_body() {
   fi
   new="$(mktemp)"
   { agent_sanitize <"${text}"; printf '\n%s\n' "${footer}"; } >"${new}"
-  if gh pr edit "${pr}" --body-file "${new}" >/dev/null; then
+  # The REST call the other body writes use (agent-digest.sh), with the App token's pull-requests: write.
+  if jq -Rs '{body: .}' <"${new}" | gh api -X PATCH "repos/${GH_REPO}/pulls/${pr}" --input - >/dev/null; then
     printf 'The PR description was updated to match the change.\n'
   else
     printf 'The description was not updated: the edit failed.\n'

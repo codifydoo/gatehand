@@ -350,6 +350,9 @@ publish_fix() {
   stub_gh_on 'api -X POST markdown --input -' ''
   local pr_view='{"state":"OPEN","isDraft":false,"labels":[{"name":"agent:pr"},{"name":"agent:fixing"}]}'
   stub_gh_json 'pr view 44 --json state,isDraft,labels *' "${PR_VIEW:-${pr_view}}"
+  if [[ -n "${BODY_FAIL:-}" ]]; then stub_gh_on 'pr view 44 --json body *' '' 1 'gh: HTTP 502'; fi
+  if [[ -n "${EDITOR_FAIL:-}" ]]; then stub_gh_on 'api graphql *' '' 1 'gh: HTTP 502'; fi
+  if [[ -n "${PATCH_FAIL:-}" ]]; then stub_gh_on 'api -X PATCH repos/o/r/pulls/44 *' '' 1 'gh: HTTP 403'; fi
   stub_gh_json 'pr view 44 --json body *' "$(jq -n --arg b "${CURRENT_BODY:-${CODER_BODY}}" '{body: $b}')"
   stub_gh_json 'api graphql *' "{\"data\":{\"repository\":{\"pullRequest\":{\"editor\":${EDITOR_JSON:-null}}}}}"
   : >"${TMP}/gh_out"
@@ -359,6 +362,10 @@ publish_fix() {
     CODE_RESULT="${CODE_RESULT:-success}" GH_REPO=o/r PUSH_URL="${ORIGIN}" bash "${OUTBOX_SH}" publish-fix >/dev/null 2>&1)
 }
 remote_head() { git --git-dir="${ORIGIN}" rev-parse fix/agent-x; }
+# The description write (a REST PATCH with a JSON body on stdin): how many, and the text of the last.
+edits() { stub_gh_calls | grep -c '^api -X PATCH repos/o/r/pulls/44 '; }
+edited_body() { stub_gh_last_body 'api -X PATCH repos/o/r/pulls/44 *' | jq -r '.body // empty'; }
+fix_comment() { stub_gh_last_body 'pr comment 44 *'; }
 CODER_FOOTER=$'---\n<sub>Opened by the coder agent for #7 (attempt 1, [run](https://example/coder)). It merges only through CI and the Claude review. Deploys and closing the issue stay with a person.</sub>\n<!-- agent-run:coder run=900 issue=7 -->'
 CODER_BODY=$'Handles a nil table by printing nothing.\n\nRefs #7\n\n'"${CODER_FOOTER}"
 
@@ -373,7 +380,7 @@ body="$(stub_gh_last_body 'pr comment 44 *')"
 expect "fix: the PR comment carries the fix marker with the new head" "$(head -1 <<<"${body}")" \
   "<!-- agent-run:fix kind=ci n=1 run=970 sha=$(git -C "${AGENT}" rev-parse agent-work) -->"
 expect "fix: the summary is sanitised" "$(grep -c '@-owner-login' <<<"${body}")" 1
-expect "fix: without a pr-body.md the description is not touched" "$(stub_gh_calls | grep -c '^pr edit ')" 0
+expect "fix: without a pr-body.md the description is not touched" "$(edits)" 0
 expect "...and the comment says nothing about it" "$(grep -c 'description' <<<"${body}")" 0
 
 # A fix that changes behaviour rewrites the description (pr-body.md), keeping the coder's footer.
@@ -383,22 +390,22 @@ fix_bundle
 printf 'Prints an empty table for nil, as the review asked. @owner-login\n\nRefs #7\n' >"${OUT}/pr-body.md"
 publish_fix
 expect "fix+body: outcome" "$(outv outcome)" "fix-pushed"
-new="$(stub_gh_last_body 'pr edit 44 *')"
+new="$(edited_body)"
 expect "fix+body: the description is replaced with the fixer's text" "$(head -1 <<<"${new}")" "Prints an empty table for nil, as the review asked. @-owner-login"
 expect "...sanitised like the coder's" "$(grep -c '@owner-login' <<<"${new}")" 0
 expect "...and ends with the coder's footer, verbatim" "$(tail -n 3 <<<"${new}")" "${CODER_FOOTER}"
 expect "...whose marker (pr_issue reads it) is the only one, naming the issue" \
   "$(grep -oE '<!-- agent-run:coder run=[0-9a-z]+ issue=[0-9]+ -->' <<<"${new}" | grep -oE 'issue=[0-9]+' | tr '\n' ' ')" "issue=7 "
 expect "...before the fix comment, whose marker asks for the review" \
-  "$(stub_gh_calls | grep -nE '^pr (edit|comment) 44 ' | cut -d: -f2 | cut -d' ' -f2 | tr '\n' ' ')" "edit comment "
-expect "...and the comment says so" "$(grep -c '^The PR description was updated to match the change\.$' <<<"$(stub_gh_last_body 'pr comment 44 *')")" 1
+  "$(stub_gh_calls | grep -oE '^(api -X PATCH repos/o/r/pulls/44|pr comment 44) ' | sed -E 's/^api.*/edit/; s/^pr comment.*/comment/' | tr '\n' ' ')" "edit comment "
+expect "...and the comment says so" "$(grep -c '^The PR description was updated to match the change\.$' <<<"$(fix_comment)")" 1
 
 fix_case fixbodypasted
 agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
 fix_bundle
 printf 'Prints an empty table for nil.\n\nRefs #7\n\n%s\n' "${CODER_FOOTER}" >"${OUT}/pr-body.md"
 publish_fix
-new="$(stub_gh_last_body 'pr edit 44 *')"
+new="$(edited_body)"
 expect "fix+body: a footer the fixer pasted in is dropped, so there is one" "$(grep -c 'Opened by the coder agent' <<<"${new}")" 1
 expect "...the live one" "$(grep -c '<!-- agent-run:coder run=900 issue=7 -->' <<<"${new}")" 1
 
@@ -406,33 +413,88 @@ fix_case fixbodyperson
 agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
 fix_bundle
 printf 'Prints an empty table for nil.\n\nRefs #7\n' >"${OUT}/pr-body.md"
-EDITOR_JSON='{"login":"owner-login"}' publish_fix
-expect "fix+body: a description a person edited is left alone" "$(stub_gh_calls | grep -c '^pr edit ')" 0
+EDITOR_JSON='{"__typename":"User","login":"owner-login"}' publish_fix
+expect "fix+body: a description a person edited is left alone" "$(edits)" 0
 expect "...the fix still goes out" "$(outv outcome)" "fix-pushed"
-expect "...and the comment says why" "$(grep -c 'owner-login edited it' <<<"$(stub_gh_last_body 'pr comment 44 *')")" 1
+expect "...and the comment says why" "$(grep -c 'owner-login edited it' <<<"$(fix_comment)")" 1
 
 fix_case fixbodybot
 agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
 fix_bundle
 printf 'Prints an empty table for nil.\n\nRefs #7\n' >"${OUT}/pr-body.md"
-EDITOR_JSON='{"login":"repo-agent"}' publish_fix
-expect "fix+body: the bot's own earlier edit does not count as a person's" "$(stub_gh_calls | grep -c '^pr edit 44 ')" 1
+EDITOR_JSON='{"__typename":"Bot","login":"repo-agent"}' publish_fix
+expect "fix+body: the bot's own earlier edit does not count as a person's" "$(edits)" 1
+fix_case fixbodyimpostor
+agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
+fix_bundle
+printf 'Prints an empty table for nil.\n\nRefs #7\n' >"${OUT}/pr-body.md"
+EDITOR_JSON='{"__typename":"User","login":"repo-agent"}' publish_fix
+expect "fix+body: (that case's fix went out)" "$(outv outcome)" "fix-pushed"
+expect "...but a User who took the bot's name is a person" "$(edits)" 0
 
 fix_case fixbodyrefs
 agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
 fix_bundle
 printf 'Prints an empty table for nil. Closes #7\n' >"${OUT}/pr-body.md"
 publish_fix
-expect "fix+body: a body without Refs #7 is not applied" "$(stub_gh_calls | grep -c '^pr edit ')" 0
-expect "...the comment gives the rule" "$(grep -c 'not updated: PR body does not say Refs #7' <<<"$(stub_gh_last_body 'pr comment 44 *')")" 1
+expect "fix+body: a body without Refs #7 is not applied" "$(edits)" 0
+expect "...the comment gives the rule" "$(grep -c 'not updated: PR body does not say Refs #7' <<<"$(fix_comment)")" 1
 
 fix_case fixbodynofooter
 agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
 fix_bundle
 printf 'Prints an empty table for nil.\n\nRefs #7\n' >"${OUT}/pr-body.md"
 CURRENT_BODY=$'A description with no coder footer.\n\nRefs #7' publish_fix
-expect "fix+body: without the coder's footer (and its marker) nothing is replaced" "$(stub_gh_calls | grep -c '^pr edit ')" 0
-expect "...and the comment says so" "$(grep -c 'coder footer is missing' <<<"$(stub_gh_last_body 'pr comment 44 *')")" 1
+expect "fix+body: without the coder's footer (and its marker) nothing is replaced" "$(edits)" 0
+expect "...and the comment says so" "$(grep -c 'coder footer is missing' <<<"$(fix_comment)")" 1
+fix_case fixbodyotherissue
+agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
+fix_bundle
+printf 'Prints an empty table for nil.\n\nRefs #7\n' >"${OUT}/pr-body.md"
+CURRENT_BODY="${CODER_BODY/issue=7/issue=9}" publish_fix
+expect "fix+body: (that case's fix went out)" "$(outv outcome)" "fix-pushed"
+expect "fix+body: a footer whose marker names another issue is not this PR's" "$(edits)" 0
+
+# The coder's own text may hold a footer-shaped pair (its sanitiser keeps `---` and the words); the
+# real footer is the LAST one, the one the outbox appended.
+fix_case fixbodytwofooters
+agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
+fix_bundle
+printf 'Prints an empty table for nil.\n\nRefs #7\n' >"${OUT}/pr-body.md"
+CURRENT_BODY=$'Old text.\n\n---\n<sub>Opened by the coder agent, as quoted\n&lt;!-- agent-run:coder run=111 issue=7 -->\n\nRefs #7\n\n'"${CODER_FOOTER}" publish_fix
+new="$(edited_body)"
+expect "fix+body: the footer kept is the last one, the outbox's" "$(grep -c 'Opened by the coder agent' <<<"${new}")" 1
+expect "...with its own marker" "$(tail -n 3 <<<"${new}")" "${CODER_FOOTER}"
+
+fix_case fixbodyrules
+agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
+fix_bundle
+printf 'Prints an empty table for nil.\n\nRefs #7\nCloses #7\n' >"${OUT}/pr-body.md"
+publish_fix
+expect "fix+body: Refs #7 does not excuse a closing keyword" "$(edits)" 0
+expect "...the comment gives the rule" "$(grep -c 'not updated: PR body uses a closing keyword' <<<"$(fix_comment)")" 1
+fix_case fixbodyhuge
+agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
+fix_bundle
+{ printf 'Refs #7\n'; head -c 70000 /dev/zero | tr '\0' 'x'; printf '\n'; } >"${OUT}/pr-body.md"
+publish_fix
+expect "fix+body: (that case's fix went out)" "$(outv outcome)" "fix-pushed"
+expect "fix+body: an oversize body is refused before it is read" "$(edits)" 0
+expect "...the comment says why" "$(grep -c 'not updated: pr-body.md is longer than' <<<"$(fix_comment)")" 1
+
+# Failing reads and writes cost the description, never the pushed fix or its comment.
+for f in BODY_FAIL EDITOR_FAIL PATCH_FAIL; do
+  fix_case "fixbody-${f}"
+  agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
+  fix_bundle
+  printf 'Prints an empty table for nil.\n\nRefs #7\n' >"${OUT}/pr-body.md"
+  declare "${f}=1"
+  publish_fix
+  unset "${f}"
+  expect "fix+body (${f}): the fix still goes out" "$(outv outcome)" "fix-pushed"
+  expect "...its comment, with the review marker, still posts" "$(head -1 <<<"$(fix_comment)" | grep -c '^<!-- agent-run:fix ')" 1
+  expect "...and says the description was not updated" "$(grep -c '^The description was not updated: ' <<<"$(fix_comment)")" 1
+done
 
 fix_case fixmoved
 agent_commit cli/table.go $'fix(cli): make the nil-table test deterministic\n\nRefs #7'
