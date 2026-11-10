@@ -255,17 +255,24 @@ head_line="$(grep -n 'ref: \${{ needs.preflight.outputs.head }}' <<<"${fix_nc}" 
 [[ -n "${sudo_line}" && -n "${head_line}" && "${sudo_line}" -lt "${head_line}" ]] && t_pass "fix job drops sudo before it checks out the PR's head" \
   || t_fail "fix job: sudo is still there when the PR's head is checked out (drop sudo at ${sudo_line:-?}, head at ${head_line:-?})"
 # Post steps re-read their composite action's action.yml at the end of the job, so main's copy comes
-# back after the model and the outbox upload, from the default branch, whatever the job's outcome.
-fend="$(grep -oE '^      - (name: .*|uses: actions/upload-artifact.*)' <<<"${fix_nc}" | sed -E 's/^      - (name: )?//; s/@.*$//' | tail -n 3 | tr '\n' '|')"
+# back after the model and the outbox upload, from the default branch, as the job's last steps. Only
+# when it was removed: before that the first copy is still there, and an extra checkout failing in an
+# outage would make an uncounted pre-agent failure a counted attempt.
+fend="$(grep -oE '^      - .*' <<<"${fix_nc}" | sed -E 's/^      - (name: )?//; s/@.*$//' | tail -n 3 | tr '\n' '|')"
 expect_eq "fix job ends: outbox upload, clear the path, restore main's setup for the post steps" \
   "${fend}" "uses: actions/upload-artifact|clear the path for main's agent setup|restore main's agent setup for the post steps|"
-restore="$(awk '/^      - name: restore main.s agent setup for the post steps$/ {on = 1; print; next} on && /^      - / {exit} on' <<<"${fix_nc}")"
-has "the restore runs whatever the outcome" '^        if: always\(\)$' "${restore}"
-has "the restore checks out the default branch" '^          ref: \$\{\{ github.event.repository.default_branch \}\}$' "${restore}"
+step_block_named() { awk -v n="      - name: $1" '$0 == n {on = 1; print; next} on && /^      - / {exit} on' <<<"${fix_nc}"; }
+only_if_removed="^        if: always\(\) && steps\.drop_main\.outcome == 'success'$"
+has "main's copy is removed by the step the restore keys on" '^        id: drop_main$' "$(step_block_named "remove main's agent setup")"
+restore="$(step_block_named "restore main's agent setup for the post steps")"
+has "the restore runs whatever the outcome, once main's copy was removed" "${only_if_removed}" "${restore}"
+has "the restore is actions/checkout" '^        uses: actions/checkout@' "${restore}"
+has "of the default branch" '^          ref: \$\{\{ github.event.repository.default_branch \}\}$' "${restore}"
 has "into .agents-main" '^          path: \.agents-main$' "${restore}"
 has "as a sparse checkout of .github/agents" '^          sparse-checkout: \.github/agents$' "${restore}"
-clear="$(awk '/^      - name: clear the path for main.s agent setup$/ {on = 1; print; next} on && /^      - / {exit} on' <<<"${fix_nc}")"
-has "the path is cleared first, whatever the outcome" '^        if: always\(\)$' "${clear}"
+has "without persisting credentials" '^          persist-credentials: false$' "${restore}"
+clear="$(step_block_named "clear the path for main's agent setup")"
+has "the path is cleared first, under the same condition" "${only_if_removed}" "${clear}"
 has "...by removing it" '^        run: rm -rf \.agents-main$' "${clear}"
 has "fix job's system packages come from main's copy" '^        uses: \./\.agents-main/\.github/agents/system$' "${fix_nc}"
 has "main's copy is kept out of the agent's commits" '^        run: echo "\.agents-main/" >> \.git/info/exclude$' "${fix_nc}"

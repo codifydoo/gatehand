@@ -239,6 +239,7 @@ jobs:
       - name: project dependencies
         uses: ./.agents-main/.github/agents/dependencies
       - name: remove main's agent setup
+        id: drop_main
         run: rm -rf .agents-main
       - uses: actions/download-artifact@v4
         with:
@@ -309,13 +310,16 @@ jobs:
       # Post steps read their composite action's action.yml again at the end of the job, and a
       # toolchain's setup-node or setup-go registers one: with main's copy removed above, the job
       # failed there ("Can't find 'action.yml'") after the fix was packaged, and the fix was dropped.
-      # So main's copy comes back once the model and the packaging are done: checked out again from
-      # the default branch into a cleared path, never taken from what the agent left in the workspace.
+      # So main's copy comes back once the model and the packaging are done: rebuilt from the default
+      # branch into a cleared path rather than left as the agent's workspace (the agent still controls
+      # this job, as agent-coder.yml's code job explains). Only when it was removed: a job that failed
+      # before that still has the first copy, and one more checkout failing in a GitHub outage would
+      # turn an uncounted pre-agent failure (agent-lib.sh pre_agent_failure) into a counted attempt.
       - name: clear the path for main's agent setup
-        if: always()
+        if: always() && steps.drop_main.outcome == 'success'
         run: rm -rf .agents-main
       - name: restore main's agent setup for the post steps
-        if: always()
+        if: always() && steps.drop_main.outcome == 'success'
         uses: actions/checkout@v7
         with:
           ref: ${{ github.event.repository.default_branch }}
