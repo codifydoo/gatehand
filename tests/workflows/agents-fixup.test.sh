@@ -294,6 +294,15 @@ for o in '<?x' '<!A' '<![CDATA[' '<!doctype html>'; do
     "$(review_verdict <<<"${o}"$'\n\n**Verdict**\nApprove\n?>]]>>')" unknown
 done
 expect "verdict: an HTML comment before the verdict is still fine" "$(review_verdict <<<$'<!-- note -->\n\n### Verdict\nApprove')" approve
+for o in '   <?x' '> <?x' '- <!A' '1. <![CDATA[' '> - <?x' $'\t<?x'; do
+  expect "verdict: '${o}' opens a block too" "$(review_verdict <<<"${o}"$'\n\n### Verdict\nApprove')" unknown
+done
+# Mid-line they are inline HTML, which a blank line ends: a PHP or XML review keeps its verdict.
+# shellcheck disable=SC2016 # the backticks are markdown code spans, not command substitution
+expect "verdict: a mid-line <?php mention keeps the verdict" \
+  "$(review_verdict <<<$'- `src/a.php:1` opens with `<?php` and no strict_types\n\n**Verdict**\nApprove')" approve
+expect "verdict: a mid-line <!DOCTYPE mention keeps the verdict" \
+  "$(review_verdict <<<$'The template keeps its <!DOCTYPE html> line.\n\n### Verdict\nApprove')" approve
 # Every one of these read as approve in a version that let a tag through where it looked quoted:
 # closers in code spans, escapes, block skipping, code-span stripping beaten by comments, raw tags,
 # links, tables, autolinks, fences and comments CommonMark closes differently, and a lone CR.

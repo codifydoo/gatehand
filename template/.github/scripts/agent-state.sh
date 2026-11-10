@@ -256,7 +256,8 @@ named_anchor() {
 # Or the repo's own rule vouches for it: agent_hook_labeler_trusted <issue>, when
 # .github/agents/hooks/lib.sh defines it, for issues the repo's own workflows file and queue as the
 # bot. It is asked only when NO person ever applied agent:ready (a label by someone without write
-# access never reaches it) and the timeline was readable. It must exit 0 only when it can vouch for
+# access never reaches it), after a first readable timeline; a later read inside triage's check can
+# still fail before it is asked, so the hook checks the content itself. It must exit 0 only when it can vouch for
 # the issue's CURRENT title and body (content_untouched_since is here for that), since its text
 # becomes an agent PR. The coder's follow-ups (`<!-- agent-followup:` marker) are bot-filed too,
 # with model-written text: a hook must never vouch for those.
@@ -603,9 +604,12 @@ review_verdict() {
   # of what the line above opened (an inline comment, a code span, ~~strikethrough~~, a quote or list
   # item by lazy continuation), and its Approve could render hidden or quoted. So it counts only at
   # the start of a paragraph: the first line, or right after a raw blank line (wb).
-  # A <details>, <pre>, <script>, <style> or <textarea> tag, or a processing instruction (`<?`), a
-  # declaration (`<!X`) or CDATA (`<![CDATA[`), which CommonMark also runs as raw HTML across blank
-  # lines, can put what follows it out of a
+  # A processing instruction (`<?`), a declaration (`<!X`) or CDATA (`<![CDATA[`) at the start of a
+  # line (after indentation, `>` or a list marker) opens a raw HTML block that runs across blank
+  # lines too. Mid-line they are inline HTML, which a blank line ends, so a review that mentions
+  # `<?php` or `<?xml` in its text still has a verdict; one on a line of its own (fenced or not)
+  # does not.
+  # A <details>, <pre>, <script>, <style> or <textarea> tag can put what follows it out of a
   # reader's sight (collapsed, hidden or quoted) across blank lines, and where it ends depends on
   # HTML parsing no regex reproduces. So it fails closed: any of them in the raw text
   # before the verdict line (above the heading or between it and the line) makes the whole verdict
@@ -617,7 +621,9 @@ review_verdict() {
   # The cost: a review that only names one of the tags before its verdict strands its PR; 2 of 449
   # reviews from 2026-08 to 2026-11 did, both of PRs about this parser.
   line="$(LC_ALL=C tr '\000' '?' | awk '
-    function hides(s) { return tolower(s) ~ /<(\?|!\[cdata\[|![a-z]|(details|pre|script|style|textarea)([^a-z0-9-]|$))/ }
+    function hides(s,  t) { t = tolower(s)
+      return t ~ /<(details|pre|script|style|textarea)([^a-z0-9-]|$)/ ||
+        t ~ /^([[:space:]>]|[-*+][[:space:]]|[0-9]+[.)][[:space:]])*<(\?|!\[cdata\[|![a-z])/ }
     { wb = pb; pb = ($0 ~ /^[[:space:]]*$/); if (hides($0)) seen = 1; l = $0
       if (comment) { e = index(l, "-->"); if (!e) next; l = substr(l, e + 3); comment = 0 }
       else if (fence) {
