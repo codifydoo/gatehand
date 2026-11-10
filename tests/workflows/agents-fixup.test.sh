@@ -387,6 +387,69 @@ expect "verdict: <!--> is a complete empty comment" \
 expect "verdict: a template quoted in a fence after the verdict does not win" \
   "$(review_verdict <<<$'### Verdict\nApprove\n\n```\n### Verdict\nRequest changes\n```')" approve
 
+# GitHub's own render must agree (render-fixtures.jsonl holds its real output for these texts).
+# The regexes read each of these as Approve; GitHub shows the earlier Request changes as the last
+# verdict anyone sees: a list-item `<!--` comments the rest out, and the others quote, strike,
+# raise, hide or tabulate the Approve.
+for x in '- <!--' '<blockquote>' '<s>' '<del>' '<sup>' '<div hidden>' '<table><tr><td>' '<ul><li>' '* <s>x'; do
+  expect "verdict: GitHub does not show the Approve after ${x} as a verdict: unknown" \
+    "$(review_verdict <<<$'### Verdict\nRequest changes\n\n'"${x}"$'\n\n### Verdict\nApprove')" unknown
+  # A failed render is unknown too, so check that GitHub's own reading is the visible Request changes.
+  expect "render: GitHub's last visible verdict after ${x} is Request changes" \
+    "$(rendered_verdict <<<$'### Verdict\nRequest changes\n\n'"${x}"$'\n\n### Verdict\nApprove')" request-changes
+done
+expect "verdict: a list-item <!-- before the only verdict leaves none" "$(review_verdict <<<$'- <!--\n\n### Verdict\nApprove')" unknown
+rendered_verdict <<<$'- <!--\n\n### Verdict\nApprove' >/dev/null
+expect "render: and that is GitHub's reading, not a failed render" "$?" 0
+# Tags GitHub drops or escapes hide nothing: the Approve after them is what a reader sees.
+for x in '<xmp>' '<plaintext>' '<noscript>' '<template>'; do
+  expect "verdict: GitHub shows the Approve after ${x}, so it counts" \
+    "$(review_verdict <<<$'### Verdict\nRequest changes\n\n'"${x}"$'\n\n### Verdict\nApprove')" approve
+done
+expect "verdict: a bold heading's verdict on the next line renders after a <br>" "$(review_verdict <<<$'**Verdict**\nApprove')" approve
+expect "verdict: a raw <h3> heading's verdict renders as bare text" "$(review_verdict <<<$'<h3>Verdict</h3>\nRequest changes')" request-changes
+# The render call itself.
+stub_gh_reset_calls
+expect "verdict: a review the regexes read as unknown is not rendered" "$(review_verdict <<<$'### Verdict\nLooks fine')" unknown
+expect_no_call "verdict: no render call for it" 'markdown'
+stub_gh_reset_rules
+stub_gh_on 'api --method POST markdown --input -' '' 1 'gh: HTTP 502'
+expect "verdict: a failed render is unknown, never the regexes alone" "$(review_verdict <<<$'### Verdict\nApprove' 2>"${TMP}/err")" unknown
+expect "verdict: and the failure is logged" "$(grep -c 'could not render' "${TMP}/err")" 1
+stub_gh_reset_rules
+stub_gh_on 'api --method POST markdown --input -' $'<h3>Verdict</h3>\n<p>Request changes</p>'
+expect "verdict: a render that disagrees with the regexes is unknown" "$(review_verdict <<<$'### Verdict\nApprove' 2>"${TMP}/err")" unknown
+expect "verdict: and the disagreement is logged" "$(grep -c 'markdown reads approve, GitHub.s render reads request-changes' "${TMP}/err")" 1
+stub_gh_reset_rules
+# The HTML reader, on HTML a rule hands it.
+rv_html() { stub_gh_reset_rules; stub_gh_on 'api --method POST markdown --input -' "$1"; rendered_verdict <<<'x'; stub_gh_reset_rules; }
+expect "html: an h3 and a paragraph" "$(rv_html $'<h3 dir="auto">Verdict</h3>\n<p dir="auto"><strong>Approve</strong>.</p>')" approve
+expect "html: the last top-level heading wins" \
+  "$(rv_html $'<h3>Verdict</h3>\n<p>Approve</p>\n<h3>Verdict</h3>\n<p><em>Request changes</em></p>')" request-changes
+expect "html: a heading inside an element is not the review's" \
+  "$(rv_html $'<h3>Verdict</h3>\n<p>Request changes</p>\n<details><summary>x</summary>\n<h3>Verdict</h3>\n<p>Approve</p>\n</details>')" request-changes
+expect "html: nor is its verdict paragraph" "$(rv_html $'<h3>Verdict</h3>\n<blockquote>\n<p>Approve</p>\n</blockquote>')" unknown
+expect "html: a paragraph that is just a bold Verdict is a heading" "$(rv_html $'<p><strong>Verdict</strong></p>\n<p>Approve</p>')" approve
+expect "html: so is one that starts with it and a line break" "$(rv_html $'<p><strong>Verdict</strong><br>\nApprove<br>\nmore</p>')" approve
+expect "html: bold Verdict within a sentence is not" "$(rv_html $'<p>see <strong>Verdict</strong></p>\n<p>Approve</p>')" unknown
+expect "html: a line runs to the <br>, newlines render as spaces" "$(rv_html $'<h3>Verdict</h3>\n<p>Approve\nwith nits</p>')" unknown
+expect "html: code counts like emphasis" "$(rv_html $'<h3>Verdict</h3>\n<p><code class="notranslate">Approve</code></p>')" approve
+for t in s del a sup span; do
+  expect "html: a <${t}> in the verdict line is unknown" "$(rv_html "<h3>Verdict</h3>"$'\n'"<p><${t}>Approve</${t}></p>")" unknown
+done
+expect "html: bare text runs on through inline tags" "$(rv_html $'<h3>Verdict</h3>\nApprove <s>x</s>\n<p>y</p>')" unknown
+expect "html: and stops at a block element" "$(rv_html $'<h3>Verdict</h3>\nApprove\n<p>y</p>')" approve
+expect "html: a > inside a quoted attribute is no tag end" "$(rv_html $'<h3 title="a>b">Verdict</h3>\n<p>Approve</p>')" approve
+expect "html: an unclosed element is unknown" "$(rv_html $'<h3>Verdict</h3>\n<p>Approve')" unknown
+expect "html: a mismatched close is unknown" "$(rv_html $'<h3>Verdict</p>\n<p>Approve</p>')" unknown
+expect "html: a comment is unknown" "$(rv_html $'<h3>Verdict</h3>\n<p>Approve</p>\n<!-- x -->')" unknown
+expect "html: an unterminated tag is unknown" "$(rv_html $'<h3>Verdict</h3>\n<p>Approve</p><p title="x>')" unknown
+expect "html: no heading is unknown" "$(rv_html $'<p>Approve</p>')" unknown
+for h in '<h3>VERDICT</h3>' '<h2>Verdict</h2>' '<h3>Verdict:</h3>' '<h3><strong>Verdict</strong></h3>' '<p><strong>Verdict:</strong> see above</p>'; do
+  expect "html: a later ${h} cancels the Approve before it" "$(rv_html $'<h3>Verdict</h3>\n<p>Approve</p>\n'"${h}"$'\n<p>Request changes</p>')" unknown
+done
+expect "html: a heading that only mentions a verdict does not" "$(rv_html $'<h3>Verdict</h3>\n<p>Approve</p>\n<h3>Why this verdict</h3>')" approve
+
 # --- 3. preflight ----------------------------------------------------------------------------------
 pre_case() { # pre_case <pr-json> <comments-json> <kind> <source>; outputs land in ${TMP}/out
   base_rules "$1" "$2"

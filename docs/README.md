@@ -142,7 +142,10 @@ git fetch origin main && git push origin origin/main:agent-runner
   a draft, mergeable, and carries none of `agent:hold`, `agent:blocked`, `agent:needs-human`,
   `agent:fixing`, `agent:allow-protected`; every `requiredChecks` entry and `agent pr guard` passed;
   the newest review verdict (by `claude[bot]` or a writer) is Approve and newer than the head; no
-  changed file is protected or in `humanPaths`; and the head contains the default branch's tip. It
+  changed file is protected or in `humanPaths`; and the head contains the default branch's tip. The
+  verdict is read twice, from the review's markdown and from GitHub's own render of it
+  (`POST /markdown`, the token's rate limit, one call per review read), and the two must agree; a
+  render that fails reads as no verdict, so the PR waits. It
   merges with a merge commit pinned to that head, never `--admin`. With `requiredChecks` empty it
   merges nothing. The issue then becomes
   `agent:done-pending-deploy`: close it yourself once the fix is live.

@@ -575,7 +575,119 @@ review_attribution() {
   if [[ "${early}" == 1 ]]; then echo before; elif [[ "${inside}" == 1 ]]; then echo after; else echo none; fi
 }
 
-# review_verdict: stdin is a review comment; prints approve, request-changes or unknown, from the
+# review_verdict: stdin is a review comment; prints approve, request-changes or unknown. Two readers
+# must agree: markdown_verdict, which models CommonMark with regexes, and rendered_verdict, which
+# reads the HTML GitHub itself renders, so a verdict GitHub shows nobody (in a list item a raw
+# `<!--` comments out, a quote, a collapsed block) cannot pass for the one a person sees. A wrong
+# approve now needs both fooled by the same review; when they disagree the verdict is unknown,
+# which only makes the gate wait. The render is a call to the GitHub API: when
+# it fails, the verdict is unknown too, never the regexes alone. A review the regexes already read
+# as unknown is not sent. Replayed over 449 reviews from 2026-08 to 2026-11, the two readers agree
+# on all but the 2 the regexes strand (rendered_verdict reads both as Approve).
+review_verdict() {
+  local f md rv
+  f="$(mktemp)" || { echo unknown; return 0; }
+  cat >"${f}"
+  md="$(markdown_verdict <"${f}")"
+  if [[ "${md}" == unknown ]]; then rm -f "${f}"; echo unknown; return 0; fi
+  if ! rv="$(rendered_verdict <"${f}")"; then
+    agent_log "review: GitHub could not render the review; its verdict is unknown"
+    rv=unknown
+  fi
+  rm -f "${f}"
+  if [[ "${rv}" == "${md}" ]]; then echo "${md}"; return 0; fi
+  # Logged, so a change in GitHub's HTML that turns every verdict unknown shows up as the cause.
+  agent_log "review: the markdown reads ${md}, GitHub's render reads ${rv}; its verdict is unknown"
+  echo unknown
+}
+
+# verdict_word <line>: approve, request-changes or unknown for a verdict line already lowercased.
+# The line must be the verdict alone, give or take emphasis and punctuation: /verify-pr's template
+# line is `Approve / Request changes`, and a review that copies it, or hedges, has approved nothing.
+verdict_word() {
+  local approve='^approve[[:space:][:punct:]]*$' changes='^request changes[[:space:][:punct:]]*$'
+  if [[ "$1" =~ ${approve} ]]; then
+    echo approve
+  elif [[ "$1" =~ ${changes} ]]; then
+    echo request-changes
+  else
+    echo unknown
+  fi
+}
+
+# rendered_verdict: stdin is a review comment; renders it with GitHub's own renderer (POST
+# /markdown, mode gfm: the way comments render, a line break included) and prints approve,
+# request-changes or unknown from the HTML. Exit 1 when the render call fails.
+# The HTML has been through GitHub's sanitizer, which parses it and writes it out again, so every
+# element is closed, comments are gone and text cannot hold a raw `<`. Anything else (an unclosed
+# or mismatched tag, `<!`, `<?`) makes the verdict unknown rather than a guess. Only TOP-LEVEL
+# elements count: whatever sits inside a <details>, <blockquote>, list item or any other element is
+# collapsed, quoted or decorated, not the review's own verdict. The verdict is the last top-level
+# heading among <h3>Verdict</h3>, a paragraph that is just <strong>Verdict</strong> (`**Verdict**`
+# or `__Verdict__` with a blank line after it) and one that starts with it and a line break; then
+# the first rendered line after it: the next top-level paragraph, or bare text up to the next block
+# element (raw HTML like `<h3>Verdict</h3>` with Approve on the next line renders Approve unwrapped),
+# or the rest of that paragraph. A line ends at a <br>, not at a newline, which renders as a space.
+# The line may hold <strong>, <em>, <b>, <i> and <code> and no other tag: <s>, <del>, a link, an
+# image or a superscript all change what a reader sees.
+rendered_verdict() {
+  local html
+  html="$(jq -Rs '{mode: "gfm", text: .}' | gh api --method POST markdown --input -)" || return 1
+  verdict_word "$(LC_ALL=C awk '
+    function trim(x) { sub(/^[ \t\r\n]+/, "", x); sub(/[ \t\r\n]+$/, "", x); return x }
+    function line(x) {
+      if (match(x, /<br[ \t\n\/]*>/)) x = substr(x, 1, RSTART - 1)
+      gsub(/<\/?(strong|em|b|i|code)([ \t\n][^>]*)?>/, "", x)
+      return index(x, "<") ? "\001" : trim(x) }
+    function block(t) { return t ~ /^(p|h[1-6]|ul|ol|dl|pre|blockquote|details|div|table|hr|markdown-accessiblity-table)$/ }
+    function after(m,  e) {
+      if (m >= n) return "\001"
+      if (type[m + 1] == "p") return line(inner[m + 1])
+      if (type[m + 1] != "#text") return "\001"
+      for (e = m + 2; e <= n && !block(type[e]); e++) ;
+      return line(substr(s, os[m + 1], (e <= n ? os[e] : L + 1) - os[m + 1])) }
+    { s = s $0 "\n" }
+    END {
+      # Top-level nodes m = 1..n: type[m] (a tag name, or #text), os[m] where it starts in s, and
+      # inner[m] the HTML between an element'"'"'s tags.
+      L = length(s); i = 1; d = 0; n = 0
+      while (i <= L) {
+        j = index(substr(s, i), "<")
+        if (d == 0 && (j ? substr(s, i, j - 1) : substr(s, i)) ~ /[^ \t\r\n]/) { n++; type[n] = "#text"; os[n] = i }
+        if (!j) break
+        i += j - 1; k = i + 1; q = ""
+        while (k <= L) { c = substr(s, k, 1)
+          if (q != "") { if (c == q) q = "" } else if (c == "\"" || c == "\047") q = c; else if (c == ">") break
+          k++ }
+        if (k > L) exit 1
+        tag = tolower(substr(s, i, k - i + 1)); at = i; i = k + 1
+        if (tag ~ /^<\/[a-z][a-z0-9-]*[ \t\n]*>$/) {
+          name = tag; gsub(/^<\/|[ \t\n]*>$/, "", name)
+          if (d == 0 || stack[d] != name) exit 1
+          if (--d == 0) inner[n] = substr(s, st, at - st)
+        } else if (tag ~ /^<[a-z][a-z0-9-]*([ \t\n\/].*)?>$/) {
+          name = substr(tag, 2); sub(/[ \t\n\/>].*/, "", name)
+          if (d == 0) { n++; type[n] = name; inner[n] = ""; os[n] = at; st = i }
+          if (name !~ /^(area|base|br|col|embed|hr|img|input|link|meta|source|track|wbr)$/ && tag !~ /\/>$/) stack[++d] = name
+        } else exit 1
+      }
+      if (d) exit 1
+      v = "\001"
+      for (m = 1; m <= n; m++) {
+        x = trim(inner[m])
+        if (type[m] == "h3" && x == "Verdict") v = after(m)
+        else if (type[m] == "p" && x == "<strong>Verdict</strong>") v = after(m)
+        else if (type[m] == "p" && match(x, /^<strong>Verdict<\/strong><br>/)) v = line(substr(x, RLENGTH + 1))
+        # Any other top-level heading, or bold paragraph start, that reads as a verdict (VERDICT,
+        # ## Verdict, Verdict:) is one a reader sees after the last one counted: no verdict wins.
+        else if ((type[m] ~ /^h[1-6]$/ && tolower(x) ~ /^(<[^>]*>)*[^a-z<]*verdict/) ||
+          (type[m] == "p" && tolower(x) ~ /^<(strong|b)>[^a-z<]*verdict/)) v = "\001"
+      }
+      if (v != "\001") print v
+    }' <<<"${html}" | tr '[:upper:]' '[:lower:]')"
+}
+
+# markdown_verdict: stdin is a review comment; prints approve, request-changes or unknown, from the
 # first non-empty line under the LAST Verdict heading (a finding may quote an earlier one), with
 # fenced code blocks and HTML comments skipped: a review that quotes the template AFTER its verdict
 # would otherwise have the quote win, and a comment could hide a second heading. The
@@ -585,10 +697,8 @@ review_attribution() {
 # same result. Only plain wrapper tags (p, b, i, em, strong) are dropped from the verdict line,
 # and a line of them alone is skipped: any other tag can change what a reader sees (<s>Approve</s>,
 # <del>, a comment or <details> that hides the line), so it stays literal and the verdict unknown.
-# The line must be the verdict alone, give or take emphasis and punctuation: /verify-pr's template
-# line is `Approve / Request changes`, and a review that copies it, or hedges, has approved nothing.
-review_verdict() {
-  local line approve='^approve[[:space:][:punct:]]*$' changes='^request changes[[:space:][:punct:]]*$'
+markdown_verdict() {
+  local line
   # Text inside a fenced code block or an HTML comment is quoted, not said: a review that shows the
   # template there after its real verdict must not have that copy win (the last heading counts).
   # Both follow CommonMark: a fence closes only on the same character, at least as long, with
@@ -649,13 +759,7 @@ review_verdict() {
     ((NR == 1 || wb) && (/^[*][*]Verdict[*][*][[:space:]]*$/ || /^__Verdict__[[:space:]]*$/)) { if (stripped || seen) ambiguous = 1; on = 1; v = ""; next }
     on { if (seen) ambiguous = 1; l = $0; gsub(/<\/?([pP]|[bB]|[iI]|[eE][mM]|[sS][tT][rR][oO][nN][gG])>/, "", l); if (l ~ /^[[:space:]]*$/) next; v = l; on = 0 }
     END { if (!fence && !comment && !ambiguous) print v }' | tr -d '*_`' | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+//')"
-  if [[ "${line}" =~ ${approve} ]]; then
-    echo approve
-  elif [[ "${line}" =~ ${changes} ]]; then
-    echo request-changes
-  else
-    echo unknown
-  fi
+  verdict_word "${line}"
 }
 
 # head_pushed_at <sha>: when the commit reached GitHub: the earliest check suite created for it,
