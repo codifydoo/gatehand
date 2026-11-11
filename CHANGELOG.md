@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1 (2026-11-11)
+
+- The fixer's job restores main's copy of the setup actions for its post steps from the commit its
+  setup steps checked out, not from the default branch's newest commit. When the default branch
+  moved during a fix, a post step could read a different `action.yml` than the one its main step
+  ran. The update changes `agent-fixup.yml`, so fast-forward your runner ref (`agent-runner` by
+  default) once it merges.
+
 ## 0.3.0 (2026-11-11)
 
 The package is renamed from `repo-agents` to Gatehand, and its repository from
