@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.6 (2026-11-11)
+
+- Docs only. The 0.2.1 entry below said that in one private repository on a Free personal account
+  no scheduled run fired at all, and the README stopped at the first seven hours. They did fire,
+  late and rarely: the first came eight hours after the install, and the hourly crons then fired
+  only every four to eight hours. The README's "Nothing runs on its schedule", that entry and a
+  comment in `bin/doctor.sh` now say so. No workflow or script behaves differently; an update
+  re-renders the agents' README and the lock file.
+
 ## 0.2.5 (2026-11-11)
 
 - A Claude review the agents requested that never posts no longer leaves the PR waiting for good.
