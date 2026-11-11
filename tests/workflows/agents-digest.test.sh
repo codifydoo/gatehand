@@ -86,7 +86,7 @@ ISSUES_JSON="$(
 
 # The note as the merge gate (agent-state.sh mark_merged) writes it.
 note() { jq -cn --arg a "$1" --arg b "$2" '{author: {login: $a}, body: $b}'; }
-merged() { note repo-agent "<!-- agent-merged pr=$1 -->"$'\n'"#$1 is merged. It is not deployed yet: close this issue once the fix is live."; }
+merged() { note gatehand "<!-- agent-merged pr=$1 -->"$'\n'"#$1 is merged. It is not deployed yet: close this issue once the fix is live."; }
 dpd() { jq -cn --argjson n "$1" --arg t "$2" '{number: $n, title: $t, comments: [inputs]}' < <(shift 2; for c in "$@"; do printf '%s\n' "${c}"; done); }
 DPD_JSON="$(
   {
@@ -94,7 +94,7 @@ DPD_JSON="$(
     dpd 24 'No merge note' "$(note someone 'when does this ship?')"
     dpd 25 'Second PR' "$(merged 100)" "$(merged 106)"
     dpd 26 'Forged merge note' "$(note mallory '<!-- agent-merged pr=101 -->')"
-    dpd 27 'App-form login' "$(note app/repo-agent '<!-- agent-merged pr=107 -->')"
+    dpd 27 'App-form login' "$(note app/gatehand '<!-- agent-merged pr=107 -->')"
   } | jq -s .
 )"
 
@@ -148,7 +148,7 @@ setup() {
   stub_gh_json 'issue list --state open --limit 500 --json number,title,labels *' "${ISSUES_JSON}"
   stub_gh_json 'issue view 45 --json body *' "$(jq -cn --arg b "${INBOX_BODY}" '{body: $b}')"
   stub_gh_json 'issue list --state open --label agent:done-pending-deploy *' "${DPD_JSON}"
-  stub_gh_json 'pr list --state all --author app/repo-agent *' "${PRS_JSON}"
+  stub_gh_json 'pr list --state all --author app/gatehand *' "${PRS_JSON}"
   stub_gh_json 'api repos/o/r/actions/workflows/ci.yml/runs?event=pull_request&branch=fix%2Fagent-x101&per_page=100 *' \
     "$(ci_runs '2026-11-03T10:00:00Z|failure' '2026-11-03T09:00:05Z|success' '2026-11-03T08:59:00Z|failure')"
   stub_gh_json 'api repos/o/r/actions/workflows/ci.yml/runs?event=pull_request&branch=fix%2Fagent-x102&per_page=100 *' \
@@ -234,7 +234,7 @@ for bad in '{not json' '[]'; do
   has "breaker '${bad}': says so, never 'nothing stopped'" 'Could not read the breaker state on the ledger branch' "${out}"
 done
 
-setup "stub_gh_on 'pr list --state all --author app/repo-agent *' '' 1 '${BOOM}'"
+setup "stub_gh_on 'pr list --state all --author app/gatehand *' '' 1 '${BOOM}'"
 out="$(render)"
 expect "PR list unreadable: render exits 1" "$?" 1
 has "PR list unreadable: says so" 'Could not list the agent PRs.' "${out}"
@@ -352,7 +352,7 @@ expect "run, comments unreadable: exit 1" "$?" 1
 not_called "run, comments unreadable: posts nothing" 'issue comment 45'
 not_called "run, comments unreadable: edits nothing" 'PATCH'
 
-setup "stub_gh_on 'pr list --state all --author app/repo-agent *' '' 1 '${BOOM}'"
+setup "stub_gh_on 'pr list --state all --author app/gatehand *' '' 1 '${BOOM}'"
 run_digest
 expect "run, a section fails: exit 1" "$?" 1
 called "run, a section fails: still posts the rest" 'issue comment 45 --body-file'
@@ -370,7 +370,7 @@ expect "run, no trusted inbox: exit 1" "$?" 1
 not_called "run, no trusted inbox: never creates one" 'issue create'
 not_called "run, no trusted inbox: comments nowhere" 'issue comment'
 
-setup "stub_gh_json 'issue list --state open --limit 300 --json number,body,author *' '[{\"number\": 45, \"body\": \"<!-- agent-inbox -->\", \"author\": {\"login\": \"app/repo-agent\"}}]'"
+setup "stub_gh_json 'issue list --state open --limit 300 --json number,body,author *' '[{\"number\": 45, \"body\": \"<!-- agent-inbox -->\", \"author\": {\"login\": \"app/gatehand\"}}]'"
 run_digest
 expect "run, the bot's inbox found by its marker: exit 0" "$?" 0
 called "run, the bot's inbox found by its marker: posts there" 'issue comment 45 --body-file'

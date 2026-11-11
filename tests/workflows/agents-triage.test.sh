@@ -113,7 +113,7 @@ done
 tri_case "$(ijson 5 Low outsider)"
 expect_no_call "an issue a read-only collaborator opened is left alone" "issue edit 5"
 expect_no_call "and gets no comment" "issue comment 5"
-tri_case "$(ijson 5 Low app/repo-agent)"
+tri_case "$(ijson 5 Low app/gatehand)"
 expect_no_call "an issue the bot opened is left alone" "issue edit 5"
 tri_case "$(ijson 5 Low owner-login 'security,agent:hold')"
 expect_no_call "an issue with an agent label already is left alone" "issue edit 5"
@@ -122,7 +122,7 @@ expect_no_call "a closed issue is left alone" "issue edit 5"
 tri_case "$(ijson 5 Low owner-login 'priority: low')"
 expect_no_call "a non-security issue is left alone" "issue edit 5"
 expect_no_call "without reading its comments" "issues/5/comments"
-tri_case "$(ijson 5 Low)" '[{"user":{"login":"repo-agent[bot]"},"body":"<!-- agent-triage:fast-track -->\nqueued"}]'
+tri_case "$(ijson 5 Low)" '[{"user":{"login":"gatehand[bot]"},"body":"<!-- agent-triage:fast-track -->\nqueued"}]'
 expect_no_call "triaged before (the bot's marker): never again" "issue edit 5"
 tri_case "$(ijson 5 Low)" '[{"user":{"login":"outsider"},"body":"<!-- agent-triage:fast-track -->\nforged"}]'
 label="a marker pasted by someone else does not stop triage"; check marker fast-track

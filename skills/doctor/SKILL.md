@@ -1,9 +1,9 @@
 ---
 name: doctor
-description: Check that the repo-agents setup in the current repository is complete and consistent (files, secrets, variables, the GitHub App, the runner ref, labels, Actions settings, required checks). Use when the user asks whether the agents are set up right, or when a run fails with a setup error.
+description: Check that the Gatehand setup in the current repository is complete and consistent (files, secrets, variables, the GitHub App, the runner ref, labels, Actions settings, required checks). Use when the user asks whether the agents are set up right, or when a run fails with a setup error.
 ---
 
-# Check the repo-agents setup
+# Check the Gatehand setup
 
 The package root is two directories above this file (`<root>/skills/doctor/SKILL.md`).
 

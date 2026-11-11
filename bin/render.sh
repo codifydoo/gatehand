@@ -240,7 +240,7 @@ if [[ "${mode}" == check ]]; then
   while IFS= read -r rel; do
     [[ -f "${REPO}/${rel}" ]] && { echo "no longer part of the package: ${rel}"; rc=1; }
   done < <(jq -r --argjson n "${NEW}" 'keys[] | select($n[.] == null)' <<<"${OLD}")
-  [[ "${rc}" == 0 ]] && echo "up to date with repo-agents ${VERSION}"
+  [[ "${rc}" == 0 ]] && echo "up to date with Gatehand ${VERSION}"
   exit "${rc}"
 fi
 
@@ -276,10 +276,10 @@ done < <(jq -r --argjson n "${NEW}" 'keys[] | select($n[.] == null)' <<<"${OLD}"
 # Built in the staging directory, never beside the lock: a name created in the repo is a name a
 # committed symlink could already hold. The destination itself was guarded above.
 jq -n --arg v "${VERSION}" --argjson f "${NEW}" \
-  '{"$comment": "Written by repo-agents bin/render.sh. Hashes of the package files as rendered; do not edit.", version: $v, files: $f}' \
+  '{"$comment": "Written by Gatehand bin/render.sh. Hashes of the package files as rendered; do not edit.", version: $v, files: $f}' \
   >"${STAGE}/install.lock.json"
 if ! cmp -s "${STAGE}/install.lock.json" "${REPO}/${LOCK_REL}" 2>/dev/null; then
   cp "${STAGE}/install.lock.json" "${REPO}/${LOCK_REL}"
   changed=1
 fi
-if [[ "${changed}" == 1 ]]; then echo "repo-agents ${VERSION} rendered into ${REPO}"; else echo "already up to date with repo-agents ${VERSION}"; fi
+if [[ "${changed}" == 1 ]]; then echo "Gatehand ${VERSION} rendered into ${REPO}"; else echo "already up to date with Gatehand ${VERSION}"; fi

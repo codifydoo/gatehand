@@ -47,7 +47,7 @@ HEAD1=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 HEAD2=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
 prjson() { # prjson [labels-csv] [author] [head] [branch]
-  jq -cn --arg l "${1:-agent:pr}" --arg a "${2:-app/repo-agent}" --arg h "${3:-${HEAD1}}" --arg b "${4:-fix/agent-cli-nil-table}" '
+  jq -cn --arg l "${1:-agent:pr}" --arg a "${2:-app/gatehand}" --arg h "${3:-${HEAD1}}" --arg b "${4:-fix/agent-cli-nil-table}" '
     {number: 44, state: "OPEN", isDraft: false, author: {login: $a},
      labels: ($l | split(",") | map(select(. != "") | {name: .})), headRefName: $b, headRefOid: $h,
      baseRefName: "main", isCrossRepository: false, title: "fix(cli): handle a nil table",
@@ -207,18 +207,18 @@ expect_call "listed out of order: still the newer one (Request changes) decides"
 
 # --- 2. a fresh review after a fix -----------------------------------------------------------------
 FIXRUN="<!-- agent-run:fix kind=ci n=1 run=950 sha=${HEAD1} -->"
-base_rules "$(prjson)" "$(comments "repo-agent[bot]|2026-11-05T10:01:00Z|${FIXRUN}")"
+base_rules "$(prjson)" "$(comments "gatehand[bot]|2026-11-05T10:01:00Z|${FIXRUN}")"
 EVENT=workflow_run WR_PATH=.github/workflows/ci.yml WR_CONCLUSION=success WR_HEAD_BRANCH=fix/agent-cli-nil-table WR_HEAD_SHA="${HEAD1}" WR_ID=905 \
   cmd_route >/dev/null 2>&1
 expect_call "CI green on a head the fixer pushed: a fresh Claude review is dispatched" 'workflow run Claude Code Review -f pr=44'
 if stub_gh_any_body "<!-- agent-review-dispatched sha=${HEAD1} -->"; then t_pass "and recorded once for that head"; else t_fail "no review-dispatched marker"; fi
-base_rules "$(prjson)" "$(comments "repo-agent[bot]|2026-11-05T10:01:00Z|${FIXRUN}" "repo-agent[bot]|2026-11-05T11:30:00Z|<!-- agent-review-dispatched sha=${HEAD1} -->")"
+base_rules "$(prjson)" "$(comments "gatehand[bot]|2026-11-05T10:01:00Z|${FIXRUN}" "gatehand[bot]|2026-11-05T11:30:00Z|<!-- agent-review-dispatched sha=${HEAD1} -->")"
 EVENT=workflow_run WR_PATH=.github/workflows/ci.yml WR_CONCLUSION=success WR_HEAD_BRANCH=fix/agent-cli-nil-table WR_HEAD_SHA="${HEAD1}" WR_ID=906 \
   cmd_route >/dev/null 2>&1
 expect_no_call "a second green run of the same head requests no second review" 'Claude Code Review'
 # Even long after a request no review answered: the merge gate retries it, never the router, which
 # runs on the same CI completion and could spend the same retry twice.
-base_rules "$(prjson)" "$(comments "repo-agent[bot]|2026-11-05T10:01:00Z|${FIXRUN}" "repo-agent[bot]|2026-11-05T10:20:00Z|<!-- agent-review-dispatched sha=${HEAD1} -->")"
+base_rules "$(prjson)" "$(comments "gatehand[bot]|2026-11-05T10:01:00Z|${FIXRUN}" "gatehand[bot]|2026-11-05T10:20:00Z|<!-- agent-review-dispatched sha=${HEAD1} -->")"
 EVENT=workflow_run WR_PATH=.github/workflows/ci.yml WR_CONCLUSION=success WR_HEAD_BRANCH=fix/agent-cli-nil-table WR_HEAD_SHA="${HEAD1}" WR_ID=909 \
   cmd_route >/dev/null 2>&1
 expect_no_call "a green run long after an unanswered request: the router leaves the retry to the merge gate" 'Claude Code Review'
@@ -526,20 +526,20 @@ unset -f pre_extra issue_rules
 COMMENT_FAILS=1 pre_case "$(prjson)" '[]' ci 901
 expect "preflight: a lock whose comment fails is no go" "$(outv go)" false
 label="and the label comes off again (no publish job would free it)"; check pr_label_removed agent:fixing
-pre_case "$(prjson 'agent:pr' app/repo-agent "${HEAD2}")" '[]' ci 901
+pre_case "$(prjson 'agent:pr' app/gatehand "${HEAD2}")" '[]' ci 901
 expect "preflight: a CI run of an older head is stale" "$(outv go)" false
 label="and nothing is locked"; if pr_label_added agent:fixing; then t_fail "${label}"; else t_pass "${label}"; fi
-pre_case "$(prjson)" "$(comments "repo-agent[bot]|2026-11-05T10:01:00Z|<!-- agent:fix-lock kind=ci n=1 run=1 sha=x source=1 expires=x -->" "repo-agent[bot]|2026-11-05T10:31:00Z|<!-- agent:fix-lock kind=ci n=2 run=2 sha=x source=2 expires=x -->")" ci 901
+pre_case "$(prjson)" "$(comments "gatehand[bot]|2026-11-05T10:01:00Z|<!-- agent:fix-lock kind=ci n=1 run=1 sha=x source=1 expires=x -->" "gatehand[bot]|2026-11-05T10:31:00Z|<!-- agent:fix-lock kind=ci n=2 run=2 sha=x source=2 expires=x -->")" ci 901
 expect "preflight: past 2 CI fixes it stops" "$(outv go)" false
 label="and blocks the PR for a person (agent:blocked)"; check pr_label_added agent:blocked
 label="and agent:needs-human"; check pr_label_added agent:needs-human
 if stub_gh_any_body 'kind=fixer -->'; then t_pass "with a fixer request in the inbox"; else t_fail "no fixer request"; fi
 pre_case "$(prjson)" "$(comments "outsider|2026-11-05T10:01:00Z|<!-- agent:fix-lock kind=ci n=1 run=1 sha=x source=1 expires=x -->" "outsider|2026-11-05T10:31:00Z|<!-- agent:fix-lock kind=ci n=2 run=2 sha=x source=2 expires=x -->")" ci 901
 expect "preflight: fix locks pasted by someone else do not use up attempts" "$(outv go)" true
-pre_case "$(prjson)" "$(comments "repo-agent[bot]|2026-11-05T10:01:00Z|<!-- agent:fix-lock kind=ci n=1 run=1 sha=x source=1 expires=x -->")" ci 901
+pre_case "$(prjson)" "$(comments "gatehand[bot]|2026-11-05T10:01:00Z|<!-- agent:fix-lock kind=ci n=1 run=1 sha=x source=1 expires=x -->")" ci 901
 expect "preflight: one CI fix used, the second is allowed" "$(outv n)" 2
 pre_extra() { review_body_rule 2 "${REVIEW_RC}"; }
-pre_case "$(prjson)" "$(comments "repo-agent[bot]|2026-11-05T10:01:00Z|<!-- agent:fix-lock kind=review n=1 run=1 sha=x source=c expires=x -->" "claude[bot]|2026-11-05T11:00:00Z|${REVIEW_RC}")" review comment-2
+pre_case "$(prjson)" "$(comments "gatehand[bot]|2026-11-05T10:01:00Z|<!-- agent:fix-lock kind=review n=1 run=1 sha=x source=c expires=x -->" "claude[bot]|2026-11-05T11:00:00Z|${REVIEW_RC}")" review comment-2
 expect "preflight: past 1 review fix it stops" "$(outv go)" false
 expect "preflight: because of the review cap" "$(outv reason)" "review fix cap reached (1 of 1)"
 # A review fix and its reasons: each check of source_current, starting from one that passes.
@@ -601,7 +601,7 @@ if [[ "$(outv reason)" == daily-cap* ]]; then t_fail "preflight: a run that neve
 unset -f pre_extra
 
 # The reason is checked before the cap: a stale run must not block a PR that used up its cap.
-pre_case "$(prjson 'agent:pr' app/repo-agent "${HEAD2}")" "$(comments "repo-agent[bot]|2026-11-05T10:01:00Z|<!-- agent:fix-lock kind=ci n=1 run=1 sha=x source=1 expires=x -->" "repo-agent[bot]|2026-11-05T10:31:00Z|<!-- agent:fix-lock kind=ci n=2 run=2 sha=x source=2 expires=x -->")" ci 901
+pre_case "$(prjson 'agent:pr' app/gatehand "${HEAD2}")" "$(comments "gatehand[bot]|2026-11-05T10:01:00Z|<!-- agent:fix-lock kind=ci n=1 run=1 sha=x source=1 expires=x -->" "gatehand[bot]|2026-11-05T10:31:00Z|<!-- agent:fix-lock kind=ci n=2 run=2 sha=x source=2 expires=x -->")" ci 901
 expect "preflight: a stale reason on a PR at its cap is just stale" "$(outv reason | cut -c1-6)" "stale:"
 label="and the PR is not blocked"; if pr_label_added agent:blocked; then t_fail "${label}"; else t_pass "${label}"; fi
 # The whole PR's files, before a run is spent.
@@ -653,7 +653,7 @@ JOB_START=2026-11-05T09:55:00Z base_rules "$(prjson)" "$(comments "claude[bot]|2
 review_body_rule 1 "${REVIEW_RC}"
 EVENT=workflow_run WR_PATH=.github/workflows/claude-code-review.yml cmd_route >/dev/null 2>&1
 expect_no_call "route: a review its job began before the push: no fix" "workflow run"
-JOB_START='' base_rules "$(prjson)" "$(comments "claude[bot]|2026-11-05T11:00:00Z|${REVIEW_RC}" "repo-agent[bot]|2026-11-05T11:05:00Z|<!-- agent:fix-lock kind=review n=1 run=5 sha=${HEAD1} source=comment-1 expires=x -->")"
+JOB_START='' base_rules "$(prjson)" "$(comments "claude[bot]|2026-11-05T11:00:00Z|${REVIEW_RC}" "gatehand[bot]|2026-11-05T11:05:00Z|<!-- agent:fix-lock kind=review n=1 run=5 sha=${HEAD1} source=comment-1 expires=x -->")"
 review_body_rule 1 "${REVIEW_RC}"
 EVENT=workflow_run WR_PATH=.github/workflows/claude-code-review.yml cmd_route >/dev/null 2>&1
 expect_no_call "route: a review a fix attempt already answered is not dispatched again" "workflow run"
@@ -821,9 +821,9 @@ expect "infra: and the reason says the grace is used" "$(last_fixer_row | jq -r 
 # fix_locks: a fix-lock is voided only by the BOT's no-attempt marker for the same run.
 stub_gh_reset_rules
 stub_gh_json 'api --paginate repos/o/r/issues/44/comments*' "$(comments \
-  "repo-agent[bot]|2026-11-05T10:00:00Z|<!-- agent:fix-lock kind=ci n=1 run=11 sha=${HEAD1} source=901 expires=x -->" \
-  "repo-agent[bot]|2026-11-05T10:05:00Z|<!-- agent:fix-no-attempt run=11 -->" \
-  "repo-agent[bot]|2026-11-05T10:10:00Z|<!-- agent:fix-lock kind=ci n=1 run=12 sha=${HEAD1} source=901 expires=x -->" \
+  "gatehand[bot]|2026-11-05T10:00:00Z|<!-- agent:fix-lock kind=ci n=1 run=11 sha=${HEAD1} source=901 expires=x -->" \
+  "gatehand[bot]|2026-11-05T10:05:00Z|<!-- agent:fix-no-attempt run=11 -->" \
+  "gatehand[bot]|2026-11-05T10:10:00Z|<!-- agent:fix-lock kind=ci n=1 run=12 sha=${HEAD1} source=901 expires=x -->" \
   "mallory|2026-11-05T10:15:00Z|<!-- agent:fix-no-attempt run=12 -->")"
 expect "fix_locks: the bot's marker voids its run's lock; anyone else's voids nothing" "$(fix_locks 44 ci)" 1
 # Preflight said go, then the run was cancelled (the fix job ends skipped), or a preflight step failed.

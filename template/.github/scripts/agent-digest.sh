@@ -25,7 +25,7 @@
 #
 # Env: GH_TOKEN, GH_REPO; AGENT_INBOX_ISSUE, AGENT_OWNER_LOGIN (finding the inbox); AGENTS_ENABLED,
 #      AGENT_AUTO_MERGE (the first line); AGENT_NOW_EPOCH (tests);
-#      AGENT_DIGEST_NO_MAIN=1 loads the functions only (repo-agents' tests/workflows/agents-digest.test.sh).
+#      AGENT_DIGEST_NO_MAIN=1 loads the functions only (Gatehand's tests/workflows/agents-digest.test.sh).
 #
 # Backticks in the single-quoted printf formats are literal markdown, never meant to expand.
 # shellcheck disable=SC2016

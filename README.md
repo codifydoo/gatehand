@@ -1,4 +1,6 @@
-# repo-agents
+# Gatehand
+
+Formerly `repo-agents`.
 
 Unattended Claude coding agents for a GitHub repository, as a Claude Code plugin that installs
 plain GitHub Actions workflows into your repo:
@@ -23,9 +25,9 @@ installed into your repo as `.github/agents/README.md`.
 In Claude Code, from your repository:
 
 ```text
-/plugin marketplace add codifydoo/repo-agents
-/plugin install repo-agents@repo-agents
-/repo-agents:install
+/plugin marketplace add codifydoo/gatehand
+/plugin install gatehand@gatehand
+/gatehand:install
 ```
 
 The install skill reads your CI, toolchain and contributor docs, drafts the configuration with you,
@@ -51,7 +53,7 @@ Requirements: a GitHub repository with Actions, a Claude subscription token
 | `hooks/lib.sh` | Optional: extra PR-guard rules, inbox request kinds, digest sections and lines, a trust rule for issues your workflows queue |
 
 Everything else (the workflows, `.github/scripts/agent-*.sh`, the Claude commands) is rendered by
-the package and recorded in `.github/agents/install.lock.json`. `/repo-agents:update` re-renders
+the package and recorded in `.github/agents/install.lock.json`. `/gatehand:update` re-renders
 them; it refuses to overwrite a file you edited by hand, because that change belongs in one of the
 files above.
 

@@ -4,7 +4,7 @@ name: Agent digest
 # days and what waits for the owner (open requests, stopped roles, blocked issues, fixes to check
 # in production), the agent PRs with CI on the first push and the first review's verdict, runs and
 # cost per role, the queue, and any sections the repo adds (agent_hook_digest_sections).
-# .github/scripts/agent-digest.sh has the rules; repo-agents' tests/workflows/agents-digest.test.sh covers them.
+# .github/scripts/agent-digest.sh has the rules; Gatehand's tests/workflows/agents-digest.test.sh covers them.
 # Design and runbook: .github/agents/README.md.
 #
 # No model runs here, and nothing from an issue or PR is executed: the script reads the ledger branch

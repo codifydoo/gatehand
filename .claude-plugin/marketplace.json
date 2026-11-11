@@ -1,10 +1,10 @@
 {
-  "name": "repo-agents",
+  "name": "gatehand",
   "owner": { "name": "codifydoo" },
-  "metadata": { "description": "repo-agents: unattended Claude coding agents for a GitHub repository." },
+  "metadata": { "description": "Gatehand: unattended Claude coding agents for a GitHub repository." },
   "plugins": [
     {
-      "name": "repo-agents",
+      "name": "gatehand",
       "source": "./",
       "description": "Unattended Claude coding agents for a GitHub repository: coder, fixer, review and merge gate, with a read-only model job."
     }

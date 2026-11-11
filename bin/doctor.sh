@@ -20,7 +20,7 @@ p() { jq -r "$1" "${POLICY}"; }
 
 # --- local files -----------------------------------------------------------------------------------
 if out="$("${PKG}/bin/render.sh" --check "${REPO_DIR}" 2>&1)"; then
-  ok "package files match policy.json and repo-agents $(jq -r .version "${PKG}/.claude-plugin/plugin.json")"
+  ok "package files match policy.json and Gatehand $(jq -r .version "${PKG}/.claude-plugin/plugin.json")"
 else
   bad "package files differ from a fresh render (re-render with the update skill):"
   while IFS= read -r l; do printf '        %s\n' "${l}"; done <<<"${out}"

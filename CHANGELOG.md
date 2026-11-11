@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.0 (2026-11-11)
+
+The package is renamed from `repo-agents` to Gatehand, and its repository from
+`codifydoo/repo-agents` to `codifydoo/gatehand` (GitHub redirects the old address). Nothing the
+agents read or write changes: the `agent:*` labels, the `agent-run:*` and `verify-pr-review`
+markers, the workflow and script names, `.github/agents/`, and the variable and secret names all
+stay as they are, so a running install needs no migration.
+
+- The plugin is `gatehand@gatehand`, and its commands are `/gatehand:install`, `/gatehand:update`
+  and `/gatehand:doctor`.
+- A new install's defaults: the GitHub App name `<repo>-gatehand` (the manifest's `gatehand`), the
+  bot `gatehand[bot]` in `defaults/policy.json`, and the branches `chore/install-gatehand` and
+  `chore/update-gatehand`. An existing `policy.json` keeps its own `botLogin`.
+- `addons/hardened-runner` installs its kick timers as `gatehand-kick@*` with the token in
+  `/etc/gatehand-kick/token`.
+
+Upgrading from 0.2.x:
+
+- Re-add the plugin: `/plugin marketplace add codifydoo/gatehand`, then
+  `/plugin install gatehand@gatehand`, then `/gatehand:update` in your repository.
+- The update rewrites comments in `agent-coder.yml` and `agent-fixup.yml`, so fast-forward your
+  runner ref (`agent-runner` by default) to the default branch once it merges, or the coder and
+  fixer stop with `runner-ref-stale` until you do.
+- If you installed the kick timers, move them over: `systemctl disable --now
+  'repo-agent-kick@*.timer'`, move `/etc/repo-agent-kick/token` to `/etc/gatehand-kick/token`, then
+  run `agent-kick.sh install` again and delete the old unit files and
+  `/usr/local/libexec/repo-agent-kick`.
+
 ## 0.2.6 (2026-11-11)
 
 - Docs only. The 0.2.1 entry below said that in one private repository on a Free personal account

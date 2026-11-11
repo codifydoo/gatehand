@@ -47,7 +47,7 @@ PUSHED=2026-11-05T10:00:00Z
 
 # green: one all-green PR; each variable below breaks one condition when set.
 prjson() { # prjson [pr] [head]
-  jq -cn --argjson n "${1:-44}" --arg l "${LABELS-agent:pr}" --arg a "${AUTHOR:-app/repo-agent}" --arg m "${MERGEABLE:-MERGEABLE}" \
+  jq -cn --argjson n "${1:-44}" --arg l "${LABELS-agent:pr}" --arg a "${AUTHOR:-app/gatehand}" --arg m "${MERGEABLE:-MERGEABLE}" \
     --argjson d "${DRAFT:-false}" --arg base "${BASE:-main}" --arg h "${2:-${HEAD}}" --arg st "${STATE:-OPEN}" --argjson fork "${FORK:-false}" '
     {number: $n, state: $st, isDraft: $d, author: {login: $a}, mergeable: $m,
      labels: ($l | split(",") | map(select(. != "") | {name: .})), headRefName: "fix/agent-x\($n)", headRefOid: $h,
@@ -80,7 +80,7 @@ stub_pr() {
     "$(jq -cn --argjson id "${cid}" --arg b "${REVIEW_BODY:-${REVIEW_OK}}" --arg u "${REVIEWER:-claude[bot]}" --arg t "${REVIEW_AT:-2026-11-05T10:30:00Z}" --arg e "${REVIEW_EDITED:-}" \
       --argjson bot "${BOT_COMMENTS:-[]}" '
       [{id: $id, user: {login: $u}, created_at: $t, updated_at: (if $e == "" then $t else $e end), body: $b}]
-      + ($bot | map({id: 1, user: {login: "repo-agent[bot]"}, created_at: ($ENV.BOT_AT // "2026-11-05T09:10:00Z"), updated_at: ($ENV.BOT_AT // "2026-11-05T09:10:00Z"), body: .}))')"
+      + ($bot | map({id: 1, user: {login: "gatehand[bot]"}, created_at: ($ENV.BOT_AT // "2026-11-05T09:10:00Z"), updated_at: ($ENV.BOT_AT // "2026-11-05T09:10:00Z"), body: .}))')"
   stub_gh_json "api repos/o/r/issues/comments/${cid} *" "$(jq -cn --arg b "${REVIEW_BODY:-${REVIEW_OK}}" '{body: $b}')"
   stub_gh_json "api --paginate repos/o/r/pulls/${pr}/files*" "$(jq -cn --arg f "${FILES:-cli/table.go}" --arg p "${RENAMED_FROM:-}" \
     '$f | split(",") | map({filename: .}) | if $p == "" then . else .[0].previous_filename = $p end')"
@@ -121,7 +121,7 @@ green() {
   if [[ -n "${COMMENT_FAIL:-}" ]]; then stub_gh_on 'issue comment 44 *' '' 1 'gh: HTTP 502'; fi
   if [[ -n "${INBOX_FAIL:-}" ]]; then stub_gh_on 'issue comment 99 *' '' 1 'gh: HTTP 502'; fi
   if [[ -n "${LABEL_FAIL:-}" ]]; then stub_gh_on 'api -X POST repos/o/r/issues/44/labels*' '' 1 'gh: HTTP 502'; fi
-  stub_gh_json 'api --paginate repos/o/r/issues/99/comments*' "$(jq -cn --argjson b "${INBOX_COMMENTS:-[]}" '$b | map({user: {login: "repo-agent[bot]"}, body: .})')"
+  stub_gh_json 'api --paginate repos/o/r/issues/99/comments*' "$(jq -cn --argjson b "${INBOX_COMMENTS:-[]}" '$b | map({user: {login: "gatehand[bot]"}, body: .})')"
   : >"${TMP}/run.out"
   AGENT_INBOX_ISSUE=99 AGENTS_ENABLED="${ENABLED:-true}" AGENT_AUTO_MERGE="${AUTO-true}" cmd_run "${WANT_PR:-}" >"${TMP}/run.out" 2>"${TMP}/run.err"
   echo "$?" >"${TMP}/run.rc"

@@ -24,7 +24,7 @@
 #
 # Usage: agent-fixup.sh route | preflight | finalize
 # Env:   GH_TOKEN, GH_REPO, and per command the variables named on each cmd_* below;
-#        AGENT_FIXUP_NO_MAIN=1 loads the functions only (repo-agents' tests/workflows/agents-fixup.test.sh).
+#        AGENT_FIXUP_NO_MAIN=1 loads the functions only (Gatehand's tests/workflows/agents-fixup.test.sh).
 #
 # Backticks in the single-quoted printf formats are literal markdown.
 # shellcheck disable=SC2016

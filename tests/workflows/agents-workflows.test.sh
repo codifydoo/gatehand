@@ -160,7 +160,7 @@ for f in "${files[@]}"; do
   while IFS= read -r -d '' step; do
     k=$((k + 1))
     has "${n}: claude-code-action step ${k} gets an explicit github_token (no OIDC App token)" '^          github_token: ' "${step}"
-    has "${n}: claude-code-action step ${k} accepts the agent bot as actor" '^          allowed_bots: repo-agent$' "${step}"
+    has "${n}: claude-code-action step ${k} accepts the agent bot as actor" '^          allowed_bots: gatehand$' "${step}"
   done < <(step_blocks "${f}" 'anthropics/claude-code-action')
   [[ "${n}" != agent-coder.yml || "${k}" -ge 1 ]] && t_pass "${n}: claude-code-action steps found: ${k}" || t_fail "${n}: no claude-code-action step found (renamed?)"
 done
@@ -401,7 +401,7 @@ hasnt "triage runs no model" 'claude-code-action|CLAUDE_CODE_OAUTH_TOKEN' "$(gre
 hasnt "no issue text is spliced into a run line" 'run:.*github\.event\.issue\.(title|body)' "${tri}"
 
 # --- 5 ---------------------------------------------------------------------------------------------
-has "claude-code-review.yml accepts the agent bot" '^          allowed_bots: repo-agent$' "$(cat "${WF}/claude-code-review.yml")"
+has "claude-code-review.yml accepts the agent bot" '^          allowed_bots: gatehand$' "$(cat "${WF}/claude-code-review.yml")"
 
 # --- workflow_run is told apart by file, never by name ---------------------------------------------
 for f in "${WF}"/agent-*.yml; do

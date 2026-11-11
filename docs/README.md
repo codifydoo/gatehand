@@ -1,6 +1,6 @@
-# Autonomous agents (repo-agents)
+# Autonomous agents (Gatehand)
 
-Written by [repo-agents](https://github.com/codifydoo/repo-agents); `bin/render.sh` overwrites this
+Written by [Gatehand](https://github.com/codifydoo/gatehand); `bin/render.sh` overwrites this
 file on update. Your settings live next to it: `policy.json`, `protected-paths.txt`, `project.md`,
 `system/`, `toolchain/`, `dependencies/` and `hooks/`.
 
@@ -87,7 +87,7 @@ Residual risks you accept by running this:
 
 ## Setup
 
-The install skill (`/repo-agents:install`) walks through this; it is here for reference.
+The install skill (`/gatehand:install`) walks through this; it is here for reference.
 
 1. **Create the GitHub App** (Settings → Developer settings → GitHub Apps → New, or from the
    package's `docs/app-manifest.json`). Webhook off. Repository permissions: Contents, Issues, Pull
@@ -199,7 +199,7 @@ start; the inbox still works.
 ## Changing the rules
 
 - **Numbers, models, schedules, runners, tools:** edit `policy.json`, then re-render
-  (`/repo-agents:update`, or `bin/render.sh .` from a checkout of the package) and commit both.
+  (`/gatehand:update`, or `bin/render.sh .` from a checkout of the package) and commit both.
 - **Your project's rules and checks:** `project.md`. The coder and fixer read it on every run. Every
   check command must also be in `policy.json` `tools.allow`, as `Bash(<prefix>:*)`.
 - **Setup:** `system/action.yml` (sudo, fixed packages only), `toolchain/action.yml`,
