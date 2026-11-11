@@ -184,7 +184,8 @@ start; the inbox still works.
   attempt, no daily run and no breaker step, `infraGracePerDay` times per role per day.
 - **Nothing runs on its schedule:** GitHub fires a cron only from the default branch, may delay or
   drop it, and reports nothing when it does not fire. In one private repository on a Free personal
-  account, no scheduled run fired at all in the first seven hours; we have not confirmed why.
+  account, the first scheduled run came eight hours after the install, and the hourly crons then
+  fired only every four to eight hours; we have not confirmed why.
   `bin/doctor.sh` warns when the hourly sweep has never run on its schedule. Until it does,
   dispatch the workflows by hand (the coder on your runner ref, `gh workflow run agent-coder.yml
   --ref agent-runner` by default, and the sweep and merge gate on the default branch), or have a

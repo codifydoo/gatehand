@@ -89,7 +89,8 @@ else
 fi
 
 # GitHub fires a cron only from the default branch and says nothing when it does not (one private repo
-# on a Free personal account saw none at all, cause unconfirmed). An hourly sweep should have a
+# on a Free personal account got its first scheduled run eight hours after the install, then one every
+# four to eight hours, cause unconfirmed). An hourly sweep should have a
 # scheduled run, even a skipped one, two hours after agent-sweep.yml reached the default branch: when
 # its oldest commit came in through a PR, that is the PR's merge time, not the commit's own date.
 sweep_cron="$(jq -r -s '(.[0] * .[1]).schedules.sweep // ""' "${PKG}/defaults/policy.json" "${POLICY}")"

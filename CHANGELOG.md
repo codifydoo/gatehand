@@ -42,9 +42,10 @@ Fixes from upgrading a 0.1.0 install to 0.2.0:
   created when missing, and the example is still not created once `hooks/lib.sh` exists.
 - `bin/doctor.sh` warns when an hourly sweep has never run on its schedule two hours after
   `agent-sweep.yml` reached the default branch (the merge time of the PR that brought it), and the
-  README says what to do then. GitHub reports nothing when a cron does not fire; one private
-  repository on a Free personal account saw none at all. A sweep schedule that is not hourly is
-  not checked.
+  README says what to do then. GitHub reports nothing when a cron does not fire; in one private
+  repository on a Free personal account the first scheduled run came eight hours after the
+  install, and the hourly crons then fired only every four to eight hours. A sweep schedule that
+  is not hourly is not checked.
 - The note on a PR the review skipped says the review can be asked for before merging: a dispatch
   runs the default branch's copy of the workflow.
 - The issue snapshot removes its temporary copy of the issue when sanitizing fails.
