@@ -18,15 +18,24 @@ stay as they are, so a running install needs no migration.
 
 Upgrading from 0.2.x:
 
-- Re-add the plugin: `/plugin marketplace add codifydoo/gatehand`, then
-  `/plugin install gatehand@gatehand`, then `/gatehand:update` in your repository.
+- Swap the plugin: `/plugin uninstall repo-agents@repo-agents` and
+  `/plugin marketplace remove repo-agents`, then `/plugin marketplace add codifydoo/gatehand`,
+  `/plugin install gatehand@gatehand`, and `/gatehand:update` in your repository. Left installed,
+  the old plugin's `/repo-agents:update` would render 0.2.x over 0.3.0.
 - The update rewrites comments in `agent-coder.yml` and `agent-fixup.yml`, so fast-forward your
   runner ref (`agent-runner` by default) to the default branch once it merges, or the coder and
   fixer stop with `runner-ref-stale` until you do.
-- If you installed the kick timers, move them over: `systemctl disable --now
-  'repo-agent-kick@*.timer'`, move `/etc/repo-agent-kick/token` to `/etc/gatehand-kick/token`, then
-  run `agent-kick.sh install` again and delete the old unit files and
-  `/usr/local/libexec/repo-agent-kick`.
+- If you installed the kick timers, move them over as root. First note the settings the old
+  install used, from the `Environment=` line of `/etc/systemd/system/repo-agent-kick@.service`.
+  Then:
+
+  ```bash
+  systemctl disable --now repo-agent-kick@{sweep,merge,coder,digest}.timer   # and @triage.timer if you had it
+  mv /etc/repo-agent-kick /etc/gatehand-kick
+  rm -f /etc/systemd/system/repo-agent-kick@* /usr/local/libexec/repo-agent-kick
+  systemctl daemon-reload
+  AGENT_KICK_REPO=<owner>/<repo> bash agent-kick.sh install   # from the new package, with the same AGENT_KICK_* values
+  ```
 
 ## 0.2.6 (2026-11-11)
 
