@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.5 (2026-11-10)
+## 0.2.5 (2026-11-11)
 
 - A Claude review the agents requested that never posts no longer leaves the PR waiting for good.
   A dispatched review run can end green without one (claude-code-action's OIDC exchange failed once
