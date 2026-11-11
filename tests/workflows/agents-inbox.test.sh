@@ -169,6 +169,19 @@ approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker merger)"))" 0 '/reject 
 expect_no_call "reject merger: says nothing on the issue (its label is on the PR)" "issue comment 7"
 expect_no_call "reject merger: relabels nothing on the issue" "issue edit 7"
 if reply | grep -Fq '<!-- agent-answer:REQ-20261105-ab12 -->'; then t_pass "reject merger: still recorded as answered"; else t_fail "reject merger: reply was '$(reply)'"; fi
+approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker review)"))"
+expect_no_call "approve review: dispatches nothing (the review is the owner's to ask for)" "workflow run"
+expect_no_call "approve review: relabels nothing" "issue edit 7"
+if reply | grep -q "seen; nothing changed. Once the review can run" && reply | grep -Fq 'gh workflow run "Claude Code Review" -f pr=<PR>' \
+  && reply | grep -Fq '<!-- agent-answer:REQ-20261105-ab12 -->'; then
+  t_pass "approve review: recorded as seen, with what to do"
+else
+  t_fail "approve review: reply was '$(reply)'"
+fi
+approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker review)"))" 0 '/reject REQ-20261105-ab12 not now'
+expect_no_call "reject review: says nothing on the issue (it is about the PR)" "issue comment 7"
+expect_no_call "reject review: relabels nothing on the issue" "issue edit 7"
+if reply | grep -Fq '<!-- agent-answer:REQ-20261105-ab12 -->'; then t_pass "reject review: still recorded as answered"; else t_fail "reject review: reply was '$(reply)'"; fi
 expect "parse: /rerun is for the coder only" "$(printf '/rerun fixer #12\n' | parse_commands)" "unknown /rerun fixer #12"
 expect "parse: /pause fixer is understood" "$(printf '/pause fixer\n' | parse_commands)" "pause fixer"
 

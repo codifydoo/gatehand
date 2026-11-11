@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.5 (2026-11-11)
+
+- A Claude review the agents requested that never posts no longer leaves the PR waiting for good.
+  A dispatched review run can end green without one (claude-code-action's OIDC exchange failed once
+  with a "not retryable" workflow validation error, and the review's own check reads a run with no
+  execution file as a skip), and `request_review` asked once per head, so nothing asked again. Now
+  the merge gate makes a request again when it is older than 45 minutes (the review job's 30-minute
+  timeout and slack), no review answered it and no review run of the PR is queued or running, at
+  most twice per head. A review answers the request when it is a writer's posted after it, or the
+  review bot's, unedited, from a job that started after it: an older head's review that was queued
+  ahead of it and posts later does not. When the third request goes unanswered too, the agent inbox
+  gets one request of the new `review` kind for that head (`/approve` and `/reject` record it as
+  seen) and the PR waits; nothing is labelled. A new head starts over. Only the gate retries: the
+  fixer's router, which runs on the same CI completion, still asks once per head, so the two cannot
+  spend one retry twice.
+- The merge gate retries on a head the fixer pushed too: a head whose review the agents already
+  requested, missing nothing but its review (being behind main aside) and not conflicting, goes
+  through `request_review` on every run, which does nothing until that request is stale. Before,
+  only the gate's own branch updates were asked for, and such a fixer head waited for a person.
+
 ## 0.2.4 (2026-11-10)
 
 - The fixer can rewrite the PR's description. When its fix makes the description untrue (what the
