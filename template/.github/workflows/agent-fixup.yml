@@ -181,7 +181,7 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.go == 'true'
     runs-on: @@RUNS_ON_AGENT@@
-    # Rendered from .github/agents/policy.json roles.fixer.timeoutMinutes; repo-agents' tests/commands/agent-fix.test.sh pins it.
+    # Rendered from .github/agents/policy.json roles.fixer.timeoutMinutes; Gatehand's tests/commands/agent-fix.test.sh pins it.
     timeout-minutes: @@FIXER_TIMEOUT@@
     # READ ONLY, for the reasons on agent-coder.yml's code job: the action exports this token to the
     # model, and code the model writes can use it.
@@ -272,7 +272,7 @@ jobs:
           allowed_bots: @@BOT_SLUG@@
           prompt: "/agent-fix ${{ inputs.pr }} ${{ runner.temp }}/agent"
           # --allowedTools must equal the allowed-tools frontmatter of .claude/commands/agent-fix.md
-          # (repo-agents' tests/commands/agent-fix.test.sh), and --disallowedTools the coder's deny list.
+          # (Gatehand's tests/commands/agent-fix.test.sh), and --disallowedTools the coder's deny list.
           claude_args: |
             --model @@FIXER_MODEL@@
             --max-turns @@FIXER_MAX_TURNS@@

@@ -9,15 +9,15 @@
 # and a second digest in the same week edits the first.
 #
 # The token is a fine-grained PAT: access to the one repository only, repository permission
-# Actions: Read and write, nothing else. It lives in /etc/repo-agent-kick/token (root-owned, 0600).
+# Actions: Read and write, nothing else. It lives in /etc/gatehand-kick/token (root-owned, 0600).
 # The service runs as a dynamic user that cannot read that file; systemd hands it over as a
 # credential, and this script gives it to curl on stdin, never in argv.
 #
 # Usage, as root:
 #   AGENT_KICK_REPO=<owner>/<repo> bash agent-kick.sh install   # copy, write the units, enable timers
-#   systemctl list-timers 'repo-agent-kick@*'
-#   journalctl -u 'repo-agent-kick@*' --since today
-#   systemctl start repo-agent-kick@sweep.service              # one kick now, through systemd
+#   systemctl list-timers 'gatehand-kick@*'
+#   journalctl -u 'gatehand-kick@*' --since today
+#   systemctl start gatehand-kick@sweep.service              # one kick now, through systemd
 # `run <job>` is what each timer's service executes; it needs systemd's credential directory.
 #
 # The calendars below are the DEFAULT schedules of .github/agents/policy.json. If you change a
@@ -30,8 +30,8 @@ BASE_REF="${AGENT_KICK_BASE_REF:-main}"
 API=https://api.github.com
 # Tests point ROOT at a temp dir; the paths written INTO the units never carry it.
 ROOT="${AGENT_KICK_ROOT:-}"
-TOKEN_FILE=/etc/repo-agent-kick/token
-BIN=/usr/local/libexec/repo-agent-kick
+TOKEN_FILE=/etc/gatehand-kick/token
+BIN=/usr/local/libexec/gatehand-kick
 UNIT_DIR=/etc/systemd/system
 
 # job -> workflow file, ref, systemd OnCalendar (each the policy's default cron, in UTC).
@@ -107,7 +107,7 @@ cmd_run() {
   [[ "${job}" != triage || "${TRIAGE}" == true ]] || die "triage is off (AGENT_KICK_TRIAGE is not true); no kick"
   ref="$(job_ref "${job}")"
   [[ -n "${CREDENTIALS_DIRECTORY:-}" && -r "${CREDENTIALS_DIRECTORY}/token" ]] \
-    || die "no token credential: run it through systemd (systemctl start repo-agent-kick@${job}.service)"
+    || die "no token credential: run it through systemd (systemctl start gatehand-kick@${job}.service)"
   [[ "${REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "AGENT_KICK_REPO is unset or not owner/repo"
   # The first line, with surrounding blanks trimmed by read; anything else in it is malformed.
   IFS=$' \t' read -r TOKEN <"${CREDENTIALS_DIRECTORY}/token" || true
@@ -202,20 +202,20 @@ cmd_install() {
 
   install -d -m 0755 "${ROOT}$(dirname "${BIN}")" "${ROOT}${UNIT_DIR}"
   install -m 0755 "${BASH_SOURCE[0]}" "${ROOT}${BIN}"
-  render_service >"${ROOT}${UNIT_DIR}/repo-agent-kick@.service"
+  render_service >"${ROOT}${UNIT_DIR}/gatehand-kick@.service"
   for job in "${JOBS[@]}"; do
-    render_timer "${job}" >"${ROOT}${UNIT_DIR}/repo-agent-kick@${job}.timer"
-    units+=("repo-agent-kick@${job}.timer")
+    render_timer "${job}" >"${ROOT}${UNIT_DIR}/gatehand-kick@${job}.timer"
+    units+=("gatehand-kick@${job}.timer")
   done
-  if [[ "${TRIAGE}" != true && -e "${ROOT}${UNIT_DIR}/repo-agent-kick@triage.timer" ]]; then
-    systemctl disable --now repo-agent-kick@triage.timer || true
-    rm -f "${ROOT}${UNIT_DIR}/repo-agent-kick@triage.timer"
+  if [[ "${TRIAGE}" != true && -e "${ROOT}${UNIT_DIR}/gatehand-kick@triage.timer" ]]; then
+    systemctl disable --now gatehand-kick@triage.timer || true
+    rm -f "${ROOT}${UNIT_DIR}/gatehand-kick@triage.timer"
     log "triage is off: removed its timer"
   fi
   systemctl daemon-reload
   systemctl enable --now "${units[@]}"
   log "installed ${BIN} and ${#units[@]} timers"
-  systemctl list-timers --no-pager 'repo-agent-kick@*' || true
+  systemctl list-timers --no-pager 'gatehand-kick@*' || true
 }
 
 main() {

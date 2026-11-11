@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.3.0 (2026-11-11)
+
+The package is renamed from `repo-agents` to Gatehand, and its repository from
+`codifydoo/repo-agents` to `codifydoo/gatehand` (GitHub redirects the old address). Nothing the
+agents read or write changes: the `agent:*` labels, the `agent-run:*` and `verify-pr-review`
+markers, the workflow and script names, `.github/agents/`, and the variable and secret names all
+stay as they are, so a running install needs no migration.
+
+- The plugin is `gatehand@gatehand`, and its commands are `/gatehand:install`, `/gatehand:update`
+  and `/gatehand:doctor`.
+- A new install's defaults: the GitHub App name `<repo>-gatehand` (the manifest's `gatehand`), the
+  bot `gatehand[bot]` in `defaults/policy.json`, and the branches `chore/install-gatehand` and
+  `chore/update-gatehand`. An existing `policy.json` keeps its own `botLogin`.
+- `addons/hardened-runner` installs its kick timers as `gatehand-kick@*` with the token in
+  `/etc/gatehand-kick/token`.
+
+Upgrading from 0.2.x:
+
+- Swap the plugin: `/plugin uninstall repo-agents@repo-agents` and
+  `/plugin marketplace remove repo-agents`, then `/plugin marketplace add codifydoo/gatehand`,
+  `/plugin install gatehand@gatehand`, and `/gatehand:update` in your repository. Left installed,
+  the old plugin's `/repo-agents:update` would render 0.2.x over 0.3.0.
+- The update rewrites comments in `agent-coder.yml` and `agent-fixup.yml`, so fast-forward your
+  runner ref (`agent-runner` by default) to the default branch once it merges, or the coder and
+  fixer stop with `runner-ref-stale` until you do.
+- If you installed the kick timers, move them over as root. First note the settings the old
+  install used, from the `Environment=` line of `/etc/systemd/system/repo-agent-kick@.service`.
+  Then:
+
+  ```bash
+  systemctl disable --now repo-agent-kick@{sweep,merge,coder,digest}.timer   # and @triage.timer if you had it
+  mv /etc/repo-agent-kick /etc/gatehand-kick
+  rm -f /etc/systemd/system/repo-agent-kick@* /usr/local/libexec/repo-agent-kick
+  systemctl daemon-reload
+  AGENT_KICK_REPO=<owner>/<repo> bash agent-kick.sh install   # from the new package, with the same AGENT_KICK_* values
+  ```
+
 ## 0.2.6 (2026-11-11)
 
 - Docs only. The 0.2.1 entry below said that in one private repository on a Free personal account

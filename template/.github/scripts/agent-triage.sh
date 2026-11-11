@@ -23,7 +23,7 @@
 #
 # Usage: agent-triage.sh run [<issue>]    every open `security` issue, or the one named
 # Env:   GH_TOKEN, GH_REPO; AGENT_TRIAGE_NO_MAIN=1 loads the functions only
-#        (repo-agents' tests/workflows/agents-triage.test.sh).
+#        (Gatehand's tests/workflows/agents-triage.test.sh).
 #
 # Backticks in the single-quoted printf formats are literal markdown.
 # shellcheck disable=SC2016

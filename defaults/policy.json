@@ -1,6 +1,6 @@
 {
   "$comment": "The agents' configuration (.github/agents/README.md). The scripts read it at run time; bin/render.sh reads it to render the workflows and commands, so after changing runners, schedules, models, turns, timeouts, tools or ci, re-render (the update skill, or bin/render.sh) and commit the result. Everything else takes effect on the next run.",
-  "botLogin": "repo-agent[bot]",
+  "botLogin": "gatehand[bot]",
   "baseBranch": "main",
   "ledgerBranch": "agent-ledger",
   "inboxMarker": "<!-- agent-inbox -->",

@@ -20,7 +20,7 @@ weaker than a hosted runner, not stronger.
    the agent jobs need (GitHub, Claude, common toolchains) in Squid syntax. Run in an audit mode
    first and add what your toolchain fetches.
 
-Then set `runners.agent` to the pool's labels, for example `["self-hosted", "repo-agent"]`, and
+Then set `runners.agent` to the pool's labels, for example `["self-hosted", "gatehand"]`, and
 re-render. If you lint workflows with actionlint, declare the label in `.github/actionlint.yaml`.
 
 ## Timers that dispatch on time (`agent-kick.sh`)
@@ -34,8 +34,8 @@ and caps, so a doubled run is harmless.
 2. As root on the box:
 
    ```bash
-   install -d -m 0700 /etc/repo-agent-kick
-   (umask 077; cat > /etc/repo-agent-kick/token)   # paste the token, then Ctrl-D
+   install -d -m 0700 /etc/gatehand-kick
+   (umask 077; cat > /etc/gatehand-kick/token)   # paste the token, then Ctrl-D
    AGENT_KICK_REPO=<owner>/<repo> bash agent-kick.sh install   # add AGENT_KICK_TRIAGE=true if workflows.triage is on
    ```
 

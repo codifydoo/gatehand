@@ -183,7 +183,7 @@ jobs:
     if: needs.preflight.outputs.go == 'true'
     # The agent runner (see the header). Never a self-hosted pool that CI also uses.
     runs-on: @@RUNS_ON_AGENT@@
-    # Rendered from .github/agents/policy.json roles.coder.timeoutMinutes; repo-agents' tests/commands/agent-implement.test.sh pins it.
+    # Rendered from .github/agents/policy.json roles.coder.timeoutMinutes; Gatehand's tests/commands/agent-implement.test.sh pins it.
     timeout-minutes: @@CODER_TIMEOUT@@
     # READ ONLY, no id-token, and no issues or pull-requests: claude-code-action exports the token
     # below as GH_TOKEN to the model's process whatever this job sets, and code the model writes can
@@ -271,7 +271,7 @@ jobs:
           allowed_bots: @@BOT_SLUG@@
           prompt: "/agent-implement ${{ needs.preflight.outputs.issue }} ${{ runner.temp }}/agent"
           # --allowedTools must equal the allowed-tools frontmatter of .claude/commands/agent-implement.md;
-          # repo-agents' tests/commands/agent-implement.test.sh pins them together, plus --model and --max-turns
+          # Gatehand's tests/commands/agent-implement.test.sh pins them together, plus --model and --max-turns
           # against policy.json. Both lists are rendered from policy.json tools.*. --disallowedTools
           # is what BOUNDS the grant: a checked-out .claude/settings.json may allow more, and deny
           # beats allow from every scope. Defence in depth only: the read-only token is the real

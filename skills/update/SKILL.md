@@ -1,15 +1,15 @@
 ---
 name: update
-description: Update the repo-agents files in the current repository to the installed package version, or re-render them after a policy.json change. Use when the user asks to update or upgrade repo-agents, or changed .github/agents/policy.json.
+description: Update the Gatehand files in the current repository to the installed package version, or re-render them after a policy.json change. Use when the user asks to update or upgrade Gatehand, or changed .github/agents/policy.json.
 ---
 
-# Update repo-agents in this repository
+# Update Gatehand in this repository
 
 The package root is two directories above this file (`<root>/skills/update/SKILL.md`).
 
 1. Check: a clean working tree, `.github/agents/install.lock.json` exists (else use the install
    skill), and note its `version` against `<root>/.claude-plugin/plugin.json`.
-2. On a new branch `chore/update-repo-agents`, run `bash <root>/bin/render.sh .`.
+2. On a new branch `chore/update-gatehand`, run `bash <root>/bin/render.sh .`.
    - If it refuses because package files were edited in the repo, show the user `git diff` of those
      files against the lock's version (`git log -p` on them helps). Move each change to where it
      belongs (`policy.json`, `project.md`, the setup actions or `hooks/lib.sh`), restore the file,

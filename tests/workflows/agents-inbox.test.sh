@@ -76,7 +76,7 @@ approve_case() { # approve_case <comments-json-array> [dispatch-rc] [command]
 }
 reply() { stub_gh_last_body 'issue comment 99 *'; }
 
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker protected)"))"
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker protected)"))"
 expect_call "approve protected: re-queued with one-shot permission" \
   "issue edit 7 --add-label agent:ready --add-label agent:allow-protected --remove-label agent:blocked --remove-label agent:needs-human"
 expect_call "approve: the coder is dispatched on the RUNNER ref" "workflow run agent-coder.yml --ref agent-runner -f issue=7"
@@ -88,11 +88,11 @@ else
   t_fail "approve: the inbox checklist line was not ticked"
 fi
 
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker blocked)"))"
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker blocked)"))"
 expect_call "approve blocked: re-queued WITHOUT protected-path permission" \
   "issue edit 7 --add-label agent:ready --remove-label agent:blocked --remove-label agent:needs-human"
 
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker untrusted)"))"
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker untrusted)"))"
 expect_no_call "approve untrusted: dispatches nothing" "workflow run"
 expect_no_call "approve untrusted: re-queues nothing" "issue edit 7"
 if reply | grep -q 'acknowledged; nothing changed' && reply | grep -Fq '/rerun coder #7' && reply | grep -Fq '<!-- agent-answer:REQ-20261105-ab12 -->'; then
@@ -103,7 +103,7 @@ fi
 
 # A kind the core does not know goes to the repo's agent_hook_inbox_<kind> (.github/agents/hooks/lib.sh),
 # which does the work and prints the reply line; exit 0 records the answer. Without a hook it is unknown.
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker demo)"))"
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker demo)"))"
 if reply | grep -Fq 'unknown request kind demo'; then t_pass "a kind with no hook is unknown"; else t_fail "no hook: reply was '$(reply)'"; fi
 expect_no_call "a kind with no hook: nothing is recorded" "issue edit 99"
 HOOK_RC=0
@@ -112,7 +112,7 @@ agent_hook_inbox_demo() { # the call is recorded as a gh call so the stub's log 
   printf -- '- `%s`: %s, by the demo hook\n' "$2" "$1"
   return "${HOOK_RC}"
 }
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker demo)"))"
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker demo)"))"
 expect_call "approve via hook: the hook gets the verb, the request and the issue" "hook-demo approve REQ-20261105-ab12 7"
 expect_no_call "approve via hook: the coder is not dispatched" "workflow run"
 if reply | grep -Fq 'approve, by the demo hook' && reply | grep -Fq '<!-- agent-answer:REQ-20261105-ab12 -->'; then
@@ -120,7 +120,7 @@ if reply | grep -Fq 'approve, by the demo hook' && reply | grep -Fq '<!-- agent-
 else
   t_fail "approve via hook: reply was '$(reply)'"
 fi
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker demo)"))" 0 '/reject REQ-20261105-ab12 too <!-- x --> salesy'
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker demo)"))" 0 '/reject REQ-20261105-ab12 too <!-- x --> salesy'
 expect_call "reject via hook: the hook gets the sanitised reason" "hook-demo reject REQ-20261105-ab12 7 too &lt;!-- x --> salesy"
 if reply | grep -Fq 'reject, by the demo hook' && reply | grep -Fq '<!-- agent-answer:REQ-20261105-ab12 -->'; then
   t_pass "reject via hook: recorded"
@@ -128,7 +128,7 @@ else
   t_fail "reject via hook: reply was '$(reply)'"
 fi
 HOOK_RC=1
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker demo)"))"
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker demo)"))"
 if reply | grep -Fq 'failed part way' && ! reply | grep -Fq '<!-- agent-answer:'; then
   t_pass "a hook that fails: nothing recorded, send it again"
 else
@@ -138,13 +138,13 @@ unset -f agent_hook_inbox_demo
 # A hook named after a built-in kind never takes it over, on /approve or /reject.
 HOOK_RC=0
 agent_hook_inbox_fixer() { gh hook-fixer "$@" >/dev/null; return 0; }
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker fixer)"))" 0 '/reject REQ-20261105-ab12 no'
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker fixer)"))" 0 '/reject REQ-20261105-ab12 no'
 expect_no_call "a hook cannot override a built-in kind on /reject" "hook-fixer"
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker fixer)"))"
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker fixer)"))"
 expect_no_call "nor on /approve" "hook-fixer"
 unset -f agent_hook_inbox_fixer
 
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker fixer)"))"
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker fixer)"))"
 expect_no_call "approve fixer: dispatches nothing" "workflow run"
 expect_no_call "approve fixer: relabels nothing" "issue edit 7"
 if reply | grep -q 'seen; nothing changed' && reply | grep -Fq '<!-- agent-answer:REQ-20261105-ab12 -->'; then
@@ -152,11 +152,11 @@ if reply | grep -q 'seen; nothing changed' && reply | grep -Fq '<!-- agent-answe
 else
   t_fail "approve fixer: reply was '$(reply)'"
 fi
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker fixer)"))" 0 '/reject REQ-20261105-ab12 not now'
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker fixer)"))" 0 '/reject REQ-20261105-ab12 not now'
 expect_no_call "reject fixer: says nothing on the issue (its labels are on the PR)" "issue comment 7"
 expect_no_call "reject fixer: relabels nothing on the issue" "issue edit 7"
 if reply | grep -Fq '<!-- agent-answer:REQ-20261105-ab12 -->'; then t_pass "reject fixer: still recorded as answered"; else t_fail "reject fixer: reply was '$(reply)'"; fi
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker merger)"))"
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker merger)"))"
 expect_no_call "approve merger: dispatches nothing" "workflow run"
 expect_no_call "approve merger: relabels nothing" "issue edit 7"
 if reply | grep -q "seen; nothing changed. Merge \`main\`" && reply | grep -Fq 'When that merge is the only new commit, the merge gate asks for the fresh review itself' \
@@ -165,11 +165,11 @@ if reply | grep -q "seen; nothing changed. Merge \`main\`" && reply | grep -Fq '
 else
   t_fail "approve merger: reply was '$(reply)'"
 fi
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker merger)"))" 0 '/reject REQ-20261105-ab12 not now'
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker merger)"))" 0 '/reject REQ-20261105-ab12 not now'
 expect_no_call "reject merger: says nothing on the issue (its label is on the PR)" "issue comment 7"
 expect_no_call "reject merger: relabels nothing on the issue" "issue edit 7"
 if reply | grep -Fq '<!-- agent-answer:REQ-20261105-ab12 -->'; then t_pass "reject merger: still recorded as answered"; else t_fail "reject merger: reply was '$(reply)'"; fi
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker review)"))"
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker review)"))"
 expect_no_call "approve review: dispatches nothing (the review is the owner's to ask for)" "workflow run"
 expect_no_call "approve review: relabels nothing" "issue edit 7"
 if reply | grep -q "seen; nothing changed. Once the review can run" && reply | grep -Fq 'gh workflow run "Claude Code Review" -f pr=<PR>' \
@@ -178,7 +178,7 @@ if reply | grep -q "seen; nothing changed. Once the review can run" && reply | g
 else
   t_fail "approve review: reply was '$(reply)'"
 fi
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker review)"))" 0 '/reject REQ-20261105-ab12 not now'
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker review)"))" 0 '/reject REQ-20261105-ab12 not now'
 expect_no_call "reject review: says nothing on the issue (it is about the PR)" "issue comment 7"
 expect_no_call "reject review: relabels nothing on the issue" "issue edit 7"
 if reply | grep -Fq '<!-- agent-answer:REQ-20261105-ab12 -->'; then t_pass "reject review: still recorded as answered"; else t_fail "reject review: reply was '$(reply)'"; fi
@@ -189,18 +189,18 @@ approve_case '[]'
 expect_no_call "an id the agent never issued dispatches nothing" "workflow run"
 approve_case "$(jq -s . <(cj outsider "$(marker protected)"))"
 expect_no_call "a request comment forged by someone else is ignored" "workflow run"
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker protected)") <(cj 'repo-agent[bot]' '<!-- agent-answer:REQ-20261105-ab12 -->'))"
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker protected)") <(cj 'gatehand[bot]' '<!-- agent-answer:REQ-20261105-ab12 -->'))"
 expect_no_call "an already-answered request dispatches nothing" "workflow run"
 # 300 bot comments of padding after the answer: a `gh | grep -q` under pipefail would miss it.
-big="$(jq -cn --arg m "$(marker protected)" '[{user: {login: "repo-agent[bot]"}, body: $m},
-  {user: {login: "repo-agent[bot]"}, body: "<!-- agent-answer:REQ-20261105-ab12 -->"}]
-  + [range(0; 300) | {user: {login: "repo-agent[bot]"}, body: ("x" * 400)}]')"
+big="$(jq -cn --arg m "$(marker protected)" '[{user: {login: "gatehand[bot]"}, body: $m},
+  {user: {login: "gatehand[bot]"}, body: "<!-- agent-answer:REQ-20261105-ab12 -->"}]
+  + [range(0; 300) | {user: {login: "gatehand[bot]"}, body: ("x" * 400)}]')"
 approve_case "${big}"
 expect_no_call "an answer early in a long inbox is still seen" "workflow run"
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker protected)"))" 1
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker protected)"))" 1
 if reply | grep -Fq '<!-- agent-answer:'; then t_fail "a failed dispatch was recorded as answered"; else t_pass "a failed dispatch is NOT recorded as answered"; fi
 if reply | grep -q 'nothing recorded, send it again'; then t_pass "a failed dispatch says to send it again"; else t_fail "a failed dispatch is silent"; fi
-approve_case "$(jq -s . <(cj 'repo-agent[bot]' "$(marker protected)"))" 0 $'/approve REQ-20261105-ab12\n/approve REQ-20261105-ab12'
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker protected)"))" 0 $'/approve REQ-20261105-ab12\n/approve REQ-20261105-ab12'
 expect "the same id twice in one comment is applied once" "$(stub_gh_calls | grep -c 'workflow run')" 1
 
 # --- 4. pause / resume -----------------------------------------------------------------------------
@@ -218,7 +218,7 @@ expect "/resume resets it" \
 printf 'Body.\n\nRefs #7\n' >"${TMP}/body"
 printf 'cli/table.go\n' >"${TMP}/files"
 printf 'fix(cli): x\n\nRefs #7\n' >"${TMP}/msgs"
-BOT="repo-agent[bot]"
+BOT="gatehand[bot]"
 expect "guard: a clean agent PR passes" "$(guard_decide "${BOT}" 'fix(cli): x' "${TMP}/body" '' "${TMP}/files" "${TMP}/msgs")" ""
 printf 'scripts/x.sh\n' >"${TMP}/pfiles"
 expect "guard: a human PR is never judged" "$(guard_decide owner-login 'Fixes #1' "${TMP}/body" '' "${TMP}/pfiles" "${TMP}/msgs")" ""
@@ -270,7 +270,7 @@ guard_main() { # guard_main <labeler> -> pass/fail
   if PR_AUTHOR="${BOT}" PR_NUMBER=9 PR_TITLE='fix(cli): x' PR_BODY="$(cat "${TMP}/body")" \
     PR_LABELS_JSON='["agent:pr","agent:allow-protected"]' main >/dev/null 2>&1; then echo pass; else echo fail; fi
 }
-expect "guard main: the bot's agent:allow-protected unlocks a protected path" "$(guard_main 'repo-agent[bot]')" pass
+expect "guard main: the bot's agent:allow-protected unlocks a protected path" "$(guard_main 'gatehand[bot]')" pass
 expect "guard main: anyone else's agent:allow-protected is ignored" "$(guard_main outsider)" fail
 
 printf '\n[agents-inbox] %d passed, %d failed\n' "${pass}" "${fail}"

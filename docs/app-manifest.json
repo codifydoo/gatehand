@@ -1,7 +1,7 @@
 {
-  "name": "repo-agent",
-  "url": "https://github.com/codifydoo/repo-agents",
-  "hook_attributes": { "url": "https://github.com/codifydoo/repo-agents", "active": false },
+  "name": "gatehand",
+  "url": "https://github.com/codifydoo/gatehand",
+  "hook_attributes": { "url": "https://github.com/codifydoo/gatehand", "active": false },
   "public": false,
   "default_permissions": {
     "contents": "write",

@@ -1,9 +1,9 @@
 {
-  "name": "repo-agents",
-  "version": "0.2.6",
+  "name": "gatehand",
+  "version": "0.3.0",
   "description": "Unattended Claude coding agents for a GitHub repository: a coder that turns agent:ready issues into PRs, a fixer for red CI and review findings, a Claude review, and a merge gate, with a read-only model job and a separate publish step.",
   "license": "MIT",
   "author": { "name": "Codify d.o.o.", "url": "https://github.com/codifydoo" },
-  "homepage": "https://github.com/codifydoo/repo-agents",
-  "repository": "https://github.com/codifydoo/repo-agents"
+  "homepage": "https://github.com/codifydoo/gatehand",
+  "repository": "https://github.com/codifydoo/gatehand"
 }

@@ -115,7 +115,7 @@ issue() { # issue <n> <created> <labels-csv> <body> [locks]
   labels="$(jq -cn --arg l "$3" '$l | split(",") | map(select(. != "") | {name: .})')"
   jq -cn --argjson n "$1" --arg c "$2" --argjson labels "${labels}" --arg b "$4" --argjson k "${5:-0}" \
     '{number: $n, state: "OPEN", createdAt: $c, labels: $labels, body: $b,
-      comments: ([range(0; $k) | {author: {login: "repo-agent"}, body: "<!-- agent:lock role=coder run=1 attempt=1 expires=x -->"}]
+      comments: ([range(0; $k) | {author: {login: "gatehand"}, body: "<!-- agent:lock role=coder run=1 attempt=1 expires=x -->"}]
         + [{author: {login: "outsider"}, body: "<!-- agent:lock role=coder run=9 attempt=9 expires=x -->"},
            {author: {login: "outsider"}, body: "<!-- agent:lock role=coder run=9 attempt=9 expires=x -->"}])}'
 }
@@ -161,7 +161,7 @@ labeler_case() { # labeler_case <timeline-json> <perm-of-everyone-else> [edit…
 FT_MARK='<!-- agent-triage:fast-track -->
 A low-severity Claude Security finding by a writer: queued for the coder agent.'
 ft_view() {
-  jq -cn --arg a "$1" --arg ca "${2:-app/repo-agent}" --arg cb "${3-${FT_MARK}}" \
+  jq -cn --arg a "$1" --arg ca "${2:-app/gatehand}" --arg cb "${3-${FT_MARK}}" \
     '{author: {login: $a}, createdAt: "2026-11-05T08:00:00Z", comments: [{author: {login: $ca}, body: $cb}]}'
 }
 T0=2026-11-05T10:00:00Z
@@ -172,7 +172,7 @@ expect "labeler: a write collaborator is trusted" "$(labeler_case "$(by bob)" wr
 expect "labeler: a read-only collaborator is not" "$(labeler_case "$(by outsider)" read)" no
 expect "labeler: a triage collaborator is not" "$(labeler_case "$(by outsider)" triage)" no
 expect "labeler: no labeled event at all is not" "$(labeler_case '[]' write)" no
-expect "labeler: only the bot ever labelled it: not trusted" "$(labeler_case "$(by 'repo-agent[bot]')" read)" no
+expect "labeler: only the bot ever labelled it: not trusted" "$(labeler_case "$(by 'gatehand[bot]')" read)" no
 expect "labeler: the LATEST person's agent:ready label counts" \
   "$(labeler_case "$(jq -s . <(ev labeled agent:ready owner-login 2026-11-01T00:00:00Z) <(ev labeled agent:ready outsider "${T0}"))" read)" no
 expect "labeler: another label by an untrusted actor does not matter" \
@@ -180,7 +180,7 @@ expect "labeler: another label by an untrusted actor does not matter" \
 expect "labeler: a rename by a non-writer after the label is not trusted" \
   "$(labeler_case "$(jq -s . <(ev labeled agent:ready owner-login "${T0}") <(ev renamed '' outsider "${T1}"))" read)" no
 expect "labeler: the bot's re-label does NOT reset the window over a non-writer's edit" \
-  "$(labeler_case "$(jq -s . <(ev labeled agent:ready owner-login "${T0}") <(ev renamed '' outsider "${T1}") <(ev labeled agent:ready 'repo-agent[bot]' "${T2}"))" read)" no
+  "$(labeler_case "$(jq -s . <(ev labeled agent:ready owner-login "${T0}") <(ev renamed '' outsider "${T1}") <(ev labeled agent:ready 'gatehand[bot]' "${T2}"))" read)" no
 expect "labeler: a body edit by a non-writer after the label is not trusted" \
   "$(labeler_case "$(by owner-login)" read "${T1}|outsider")" no
 expect "labeler: a non-writer's edit hidden behind a writer's later edit is still caught" \
@@ -196,24 +196,24 @@ expect "labeler: a non-writer's rename in the same second as the label counts as
 expect "labeler: more edits than one page holds is not trusted" \
   "$(EDITS_TOTAL=101 labeler_case "$(by owner-login)" read)" no
 # Triage's fast track: only the bot labelled it, and its fast-track comment is there.
-BOTLABEL="$(jq -s . <(ev labeled agent:ready 'repo-agent[bot]' "${T0}"))"
+BOTLABEL="$(jq -s . <(ev labeled agent:ready 'gatehand[bot]' "${T0}"))"
 expect "fast track: the bot's label + its triage comment + a writer's own issue is trusted" \
   "$(FT_VIEW="$(ft_view owner-login)" labeler_case "${BOTLABEL}" read)" yes
 expect "fast track: the triage comment written by anyone but the bot is not" \
   "$(FT_VIEW="$(ft_view owner-login outsider)" labeler_case "${BOTLABEL}" read)" no
 expect "fast track: a bot comment without the fast-track marker is not" \
-  "$(FT_VIEW="$(ft_view owner-login app/repo-agent 'The coder agent picked this up.')" labeler_case "${BOTLABEL}" read)" no
+  "$(FT_VIEW="$(ft_view owner-login app/gatehand 'The coder agent picked this up.')" labeler_case "${BOTLABEL}" read)" no
 expect "fast track: the bot's candidate marker is not a fast track" \
-  "$(FT_VIEW="$(ft_view owner-login app/repo-agent '<!-- agent-triage:candidate -->
+  "$(FT_VIEW="$(ft_view owner-login app/gatehand '<!-- agent-triage:candidate -->
 A high-severity Claude Security finding: marked agent:candidate.')" labeler_case "${BOTLABEL}" read)" no
 expect "fast track: an issue a read-only collaborator opened is not" \
   "$(FT_VIEW="$(ft_view outsider)" labeler_case "${BOTLABEL}" read)" no
 expect "fast track: an issue the bot itself opened is not" \
-  "$(FT_VIEW="$(ft_view app/repo-agent)" labeler_case "${BOTLABEL}" read)" no
+  "$(FT_VIEW="$(ft_view app/gatehand)" labeler_case "${BOTLABEL}" read)" no
 expect "fast track: a non-writer's edit since it was opened (even before the label) is not" \
   "$(FT_VIEW="$(ft_view owner-login)" labeler_case "${BOTLABEL}" read "2026-11-05T09:00:00Z|outsider")" no
 expect "fast track: a non-writer's rename since it was opened is not" \
-  "$(FT_VIEW="$(ft_view owner-login)" labeler_case "$(jq -s . <(ev renamed '' outsider 2026-11-05T09:00:00Z) <(ev labeled agent:ready 'repo-agent[bot]' "${T0}"))" read)" no
+  "$(FT_VIEW="$(ft_view owner-login)" labeler_case "$(jq -s . <(ev renamed '' outsider 2026-11-05T09:00:00Z) <(ev labeled agent:ready 'gatehand[bot]' "${T0}"))" read)" no
 expect "fast track: a writer's later edit is fine" \
   "$(FT_VIEW="$(ft_view owner-login)" labeler_case "${BOTLABEL}" read "${T1}|owner-login")" yes
 # The repo's own rule (agent_hook_labeler_trusted, .github/agents/hooks/lib.sh): asked only when no
@@ -239,7 +239,7 @@ if HOOK_VOUCH=yes labeler_trusted 8 2>/dev/null; then t_fail "labeler hook: an u
 expect "labeler hook: ...and it was not asked" "$(cat "${TMP}/hook-calls")" ""
 unset -f agent_hook_labeler_trusted
 expect "fast track: a read-only collaborator's later agent:ready does not undo it" \
-  "$(FT_VIEW="$(ft_view owner-login)" labeler_case "$(jq -s . <(ev labeled agent:ready 'repo-agent[bot]' "${T0}") <(ev labeled agent:ready outsider "${T1}"))" read)" yes
+  "$(FT_VIEW="$(ft_view owner-login)" labeler_case "$(jq -s . <(ev labeled agent:ready 'gatehand[bot]' "${T0}") <(ev labeled agent:ready outsider "${T1}"))" read)" yes
 # end to end: the higher-priority issue was labelled by a read-only collaborator, so the next one wins
 stub_gh_reset_rules
 AGENT_TRUST_CACHE=()
@@ -372,7 +372,7 @@ expect "snapshot (auto-pick): untouched since the trusted label passes" "$(snap_
 expect "snapshot (named): an outsider's edit after the owner's label fails it, though it predates the run" \
   "$(snap_case "${T2}" "$(by owner-login)" "${T1}|outsider")" no
 expect "snapshot (named): with only the bot's label, an outsider's edit at any time refuses (window from creation)" \
-  "$(snap_case "${T2}" "$(by 'repo-agent[bot]')" "${T1}|outsider")" no
+  "$(snap_case "${T2}" "$(by 'gatehand[bot]')" "${T1}|outsider")" no
 expect "snapshot (named): with no label at all, the same" "$(snap_case "${T2}" '[]' "${T1}|outsider")" no
 expect "snapshot (named): with no label and only writers' edits, it passes" "$(snap_case "${T2}" '[]' "${T1}|owner-login")" yes
 expect "snapshot (named): a person's label after the run started does not shrink the window" \
@@ -678,11 +678,11 @@ if stub_gh_last_body 'issue comment 44 *' | grep -Fq "<!-- agent-review-dispatch
 else
   t_fail "request_review: recorded '$(stub_gh_last_body 'issue comment 44 *')'"
 fi
-rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T11:30:00Z|$(rr_marker)")"
+rr_case "$(rr_comments "gatehand[bot]|2026-11-05T11:30:00Z|$(rr_marker)")"
 expect "request_review: a request 30 minutes old is not repeated" "$(rr_dispatches)" 0
 expect_no_call "request_review: nor recorded again" "issue comment 44"
 if grep -Fq "a review of ${RR_SHA:0:9} was already requested" "${TMP}/rr.out"; then t_pass "request_review: and says it was already requested"; else t_fail "request_review: said '$(cat "${TMP}/rr.out")'"; fi
-rr_case "$(rr_comments "claude[bot]|2026-11-05T09:00:00Z|<!-- verify-pr-review -->" "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
+rr_case "$(rr_comments "claude[bot]|2026-11-05T09:00:00Z|<!-- verify-pr-review -->" "gatehand[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
 expect "request_review: a request an hour old with no review since: requested again" "$(rr_dispatches)" 1
 if stub_gh_last_body 'issue comment 44 *' | grep -Fq "<!-- agent-review-dispatched sha=${RR_SHA} -->" \
   && stub_gh_last_body 'issue comment 44 *' | grep -Fq "requested at 2026-11-05T11:00:00Z posted nothing" \
@@ -692,16 +692,16 @@ else
   t_fail "request_review: recorded '$(stub_gh_last_body 'issue comment 44 *')'"
 fi
 expect "request_review: and the retry succeeds" "$(cat "${TMP}/rr.rc")" 0
-rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T10:00:00Z|$(rr_marker)" "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
+rr_case "$(rr_comments "gatehand[bot]|2026-11-05T10:00:00Z|$(rr_marker)" "gatehand[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
 expect "request_review: two stale requests: a third, the last allowed" "$(rr_dispatches)" 1
 if stub_gh_last_body 'issue comment 44 *' | grep -Fq "(request 3 of 3)"; then t_pass "request_review: recorded as 3 of 3"; else t_fail "request_review: recorded '$(stub_gh_last_body 'issue comment 44 *')'"; fi
-RR_STALE="$(rr_comments "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
+RR_STALE="$(rr_comments "gatehand[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
 RR_AGAIN= rr_case "${RR_STALE}"
 expect "request_review: the fixer's call never repeats a request, however old" "$(rr_dispatches)" 0
 # Whether a review posted after the request answers it: the review bot's must come from a job that
 # started after the request (review_attribution) and be unedited; a writer's counts as it is.
 RR_RUN70='{"workflow_runs":[{"id":70,"display_title":"Claude review of PR #44","created_at":"2026-11-05T11:00:01Z","status":"completed"}]}'
-RR_ANSWER="$(rr_comments "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)" "claude[bot]|2026-11-05T11:10:00Z|<!-- verify-pr-review -->")"
+RR_ANSWER="$(rr_comments "gatehand[bot]|2026-11-05T11:00:00Z|$(rr_marker)" "claude[bot]|2026-11-05T11:10:00Z|<!-- verify-pr-review -->")"
 RR_RUNS="${RR_RUN70}" RR_JOB="2026-11-05T11:01:00Z 2026-11-05T11:12:00Z" rr_case "${RR_ANSWER}"
 expect "request_review: a review its own job posted after the request: answered, not requested again" "$(rr_dispatches)" 0
 RR_RUNS="${RR_RUN70}" RR_JOB="2026-11-05T10:50:00Z 2026-11-05T11:12:00Z" rr_case "${RR_ANSWER}"
@@ -711,22 +711,22 @@ expect "request_review: a review no job of the PR wrote: no answer, requested ag
 RR_RUNS="${RR_RUN70}" RR_JOB="2026-11-05T11:01:00Z 2026-11-05T11:12:00Z" \
   rr_case "$(jq -c '(.[] | select(.user.login == "claude[bot]") | .updated_at) = "2026-11-05T11:20:00Z"' <<<"${RR_ANSWER}")"
 expect "request_review: the review bot's review edited after it posted: no answer, requested again" "$(rr_dispatches)" 1
-rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)" "owner-login|2026-11-05T11:10:00Z|<!-- verify-pr-review -->")"
+rr_case "$(rr_comments "gatehand[bot]|2026-11-05T11:00:00Z|$(rr_marker)" "owner-login|2026-11-05T11:10:00Z|<!-- verify-pr-review -->")"
 expect "request_review: a writer's review after the request: answered" "$(rr_dispatches)" 0
-rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)" "outsider|2026-11-05T11:10:00Z|<!-- verify-pr-review -->")"
+rr_case "$(rr_comments "gatehand[bot]|2026-11-05T11:00:00Z|$(rr_marker)" "outsider|2026-11-05T11:10:00Z|<!-- verify-pr-review -->")"
 expect "request_review: an outsider's review after the request: no answer, requested again" "$(rr_dispatches)" 1
 RR_RUNS='{"workflow_runs":[{"id":70,"display_title":"Claude review of PR #44","created_at":"2026-11-05T11:00:01Z","status":"queued"}]}' \
-  rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
+  rr_case "$(rr_comments "gatehand[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
 expect "request_review: a stale request whose run is still queued: not requested again" "$(rr_dispatches)" 0
 RR_RUNS='{"workflow_runs":[{"id":70,"display_title":"Claude review of PR #45","created_at":"2026-11-05T11:00:01Z","status":"in_progress"}]}' \
-  rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
+  rr_case "$(rr_comments "gatehand[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
 expect "request_review: another PR's running review does not hold this one back" "$(rr_dispatches)" 1
 rr_case "$(rr_comments "outsider|2026-11-05T11:30:00Z|$(rr_marker)")"
 expect "request_review: a marker someone else pasted is no request" "$(rr_dispatches)" 1
-rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T11:30:00Z|$(rr_marker x 2222222222222222222222222222222222222222)")"
+rr_case "$(rr_comments "gatehand[bot]|2026-11-05T11:30:00Z|$(rr_marker x 2222222222222222222222222222222222222222)")"
 expect "request_review: a request for another head is no request for this one" "$(rr_dispatches)" 1
 # The cap: three requests that all went nowhere, and the head goes to a person, once.
-RR_THREE="$(rr_comments "repo-agent[bot]|2026-11-05T10:00:00Z|$(rr_marker)" "repo-agent[bot]|2026-11-05T10:30:00Z|$(rr_marker)" "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
+RR_THREE="$(rr_comments "gatehand[bot]|2026-11-05T10:00:00Z|$(rr_marker)" "gatehand[bot]|2026-11-05T10:30:00Z|$(rr_marker)" "gatehand[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
 rr_case "${RR_THREE}"
 expect "request_review: the cap reached: no fourth request" "$(rr_dispatches)" 0
 if stub_gh_last_body 'issue comment 99 *' | grep -Fq "<!-- agent-review-ask pr=44 sha=${RR_SHA} -->" \
@@ -746,20 +746,20 @@ if stub_gh_calls | grep -q '^issue comment 99 ' && [[ "$(rr_dispatches)" == 0 ]]
 else
   t_fail "request_review: cap with an older job's review: $(cat "${TMP}/rr.out")"
 fi
-RR_INBOX="$(jq -cn --arg b "<!-- agent-review-ask pr=44 sha=${RR_SHA} -->" '[{user: {login: "repo-agent[bot]"}, body: $b}]')" rr_case "${RR_THREE}"
+RR_INBOX="$(jq -cn --arg b "<!-- agent-review-ask pr=44 sha=${RR_SHA} -->" '[{user: {login: "gatehand[bot]"}, body: $b}]')" rr_case "${RR_THREE}"
 expect_no_call "request_review: a head already in the inbox: not asked twice" "issue comment 99"
 expect "request_review: nor requested" "$(rr_dispatches)" 0
 RR_INBOX="$(jq -cn --arg b "<!-- agent-review-ask pr=44 sha=${RR_SHA} -->" '[{user: {login: "outsider"}, body: $b}]')" rr_case "${RR_THREE}"
 if stub_gh_calls | grep -q '^issue comment 99 '; then t_pass "request_review: an ask marker someone else pasted does not count"; else t_fail "request_review: a pasted ask marker suppressed the inbox request"; fi
 RR_FAIL='issue comment 99 *' rr_case "${RR_THREE}"
 expect "request_review: an inbox request that failed fails, so the next run asks again" "$(cat "${TMP}/rr.rc")" 1
-rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T10:00:00Z|$(rr_marker)" "repo-agent[bot]|2026-11-05T10:30:00Z|$(rr_marker)" "repo-agent[bot]|2026-11-05T11:30:00Z|$(rr_marker)")"
+rr_case "$(rr_comments "gatehand[bot]|2026-11-05T10:00:00Z|$(rr_marker)" "gatehand[bot]|2026-11-05T10:30:00Z|$(rr_marker)" "gatehand[bot]|2026-11-05T11:30:00Z|$(rr_marker)")"
 expect "request_review: three requests, the last one recent: it still has time" "$(rr_dispatches)" 0
 expect_no_call "request_review: and nobody is asked yet" "issue comment 99"
 RR_FAIL='api --paginate repos/o/r/issues/44/comments*' rr_case '[]'
 expect "request_review: unreadable comments fail" "$(cat "${TMP}/rr.rc")" 1
 expect "request_review: and request nothing" "$(rr_dispatches)" 0
-RR_FAIL='api --paginate repos/o/r/actions/workflows/claude-code-review.yml/runs*' rr_case "$(rr_comments "repo-agent[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
+RR_FAIL='api --paginate repos/o/r/actions/workflows/claude-code-review.yml/runs*' rr_case "$(rr_comments "gatehand[bot]|2026-11-05T11:00:00Z|$(rr_marker)")"
 expect "request_review: unreadable review runs on a stale request fail" "$(cat "${TMP}/rr.rc")" 1
 expect "request_review: and request nothing" "$(rr_dispatches)" 0
 

@@ -1,9 +1,9 @@
 ---
 name: install
-description: Install the repo-agents autonomous coding agents (coder, fixer, Claude review, merge gate) into the current GitHub repository. Use when the user asks to install, set up or add the autonomous agents / repo-agents to a repo.
+description: Install the Gatehand autonomous coding agents (coder, fixer, Claude review, merge gate) into the current GitHub repository. Use when the user asks to install, set up or add the autonomous agents / Gatehand to a repo.
 ---
 
-# Install repo-agents into this repository
+# Install Gatehand into this repository
 
 The package root is two directories above this file (this file is `<root>/skills/install/SKILL.md`).
 `<root>/bin/render.sh` does the file work; your job is to fill in the repo's settings well, and to
@@ -37,7 +37,7 @@ Find, without changing anything:
 ## 3. Decide with the user
 
 Ask (AskUserQuestion), recommending defaults:
-- The GitHub App's name (its slug becomes `botLogin`, `<slug>[bot]`). Default: `<repo>-agent`.
+- The GitHub App's name (its slug becomes `botLogin`, `<slug>[bot]`). Default: `<repo>-gatehand`.
 - The owner login whose inbox commands count. Default: `gh api user --jq .login`.
 - Claude auth: `oauth` (a `claude setup-token` subscription token) or `api-key` (an Anthropic
   Console key, which can be spend-capped; recommended for teams).
@@ -47,7 +47,7 @@ Ask (AskUserQuestion), recommending defaults:
 
 ## 4. Render
 
-On a new branch `chore/install-repo-agents`:
+On a new branch `chore/install-gatehand`:
 
 ```bash
 bash <root>/bin/render.sh .
@@ -71,7 +71,7 @@ If the repo lints workflows with actionlint, add the ignore rules from
 `<root>/tests/lint/actionlint.yaml` (and any self-hosted labels) to its `.github/actionlint.yaml`.
 
 Show the user a summary of the diff and the settings you chose, then commit on their go-ahead
-(`chore: install repo-agents <version>`) and, on a second go-ahead, push and open the PR.
+(`chore: install Gatehand <version>`) and, on a second go-ahead, push and open the PR.
 
 ## 5. The steps only the user can do
 

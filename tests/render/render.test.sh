@@ -68,9 +68,9 @@ for bad in '.botLogin = "Evil Bot[bot]"' '.botLogin = "nobot"' '.roles.coder.mod
 done
 fresh
 "${R}" "${TMP}/r" >/dev/null
-pol '.runners.agent = ["self-hosted", "repo-agent"] | .tools.allow = ["Bash(npm test:*)"] | .claude.auth = "api-key" | .ci.workflowName = "Build and test"'
+pol '.runners.agent = ["self-hosted", "gatehand"] | .tools.allow = ["Bash(npm test:*)"] | .claude.auth = "api-key" | .ci.workflowName = "Build and test"'
 "${R}" "${TMP}/r" >/dev/null
-check "a runner array renders as a flow sequence" grep -qx '    runs-on: \["self-hosted", "repo-agent"\]' "${WF}/agent-coder.yml"
+check "a runner array renders as a flow sequence" grep -qx '    runs-on: \["self-hosted", "gatehand"\]' "${WF}/agent-coder.yml"
 check "tools.allow reaches the workflow" grep -q 'Bash(npm test:\*)' "${WF}/agent-coder.yml"
 check "and the command's frontmatter" grep -q '^allowed-tools: .*Bash(npm test:\*)' "${TMP}/r/.claude/commands/agent-implement.md"
 check "api-key auth" grep -q 'anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}' "${WF}/agent-coder.yml"

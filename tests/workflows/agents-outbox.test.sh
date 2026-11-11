@@ -32,9 +32,9 @@ expect() { if [[ "$2" == "$3" ]]; then t_pass "$1"; else t_fail "$1: expected '$
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}" "${STUB_DIR:-}"' EXIT
-export AGENT_BOT_EMAIL='123+repo-agent[bot]@users.noreply.github.com'
-export GIT_AUTHOR_NAME='repo-agent[bot]' GIT_AUTHOR_EMAIL="${AGENT_BOT_EMAIL}" \
-  GIT_COMMITTER_NAME='repo-agent[bot]' GIT_COMMITTER_EMAIL="${AGENT_BOT_EMAIL}"
+export AGENT_BOT_EMAIL='123+gatehand[bot]@users.noreply.github.com'
+export GIT_AUTHOR_NAME='gatehand[bot]' GIT_AUTHOR_EMAIL="${AGENT_BOT_EMAIL}" \
+  GIT_COMMITTER_NAME='gatehand[bot]' GIT_COMMITTER_EMAIL="${AGENT_BOT_EMAIL}"
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 stub_gh_init
 labels_all="$(printf '%s\n' "${AGENT_LABELS[@]}" | cut -d'|' -f1)"
@@ -346,7 +346,7 @@ publish_fix() {
   if [[ -n "${LABELS_FAIL:-}" ]]; then stub_gh_on 'api repos/o/r/issues/44/labels*' '' 1 'gh: HTTP 502'; fi
   stub_gh_json 'api repos/o/r/issues/44/labels*' "${PR_LABELS:-[{\"name\":\"agent:pr\"}]}"
   stub_gh_json 'api --paginate repos/o/r/issues/44/timeline*' \
-    "[{\"event\":\"labeled\",\"label\":{\"name\":\"agent:allow-protected\"},\"actor\":{\"login\":\"${APPLIER:-repo-agent[bot]}\"}}]"
+    "[{\"event\":\"labeled\",\"label\":{\"name\":\"agent:allow-protected\"},\"actor\":{\"login\":\"${APPLIER:-gatehand[bot]}\"}}]"
   stub_gh_on 'api -X POST markdown --input -' ''
   local pr_view='{"state":"OPEN","isDraft":false,"labels":[{"name":"agent:pr"},{"name":"agent:fixing"}]}'
   stub_gh_json 'pr view 44 --json state,isDraft,labels *' "${PR_VIEW:-${pr_view}}"
@@ -422,13 +422,13 @@ fix_case fixbodybot
 agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
 fix_bundle
 printf 'Prints an empty table for nil.\n\nRefs #7\n' >"${OUT}/pr-body.md"
-EDITOR_JSON='{"__typename":"Bot","login":"repo-agent"}' publish_fix
+EDITOR_JSON='{"__typename":"Bot","login":"gatehand"}' publish_fix
 expect "fix+body: the bot's own earlier edit does not count as a person's" "$(edits)" 1
 fix_case fixbodyimpostor
 agent_commit cli/table.go $'fix(cli): print an empty table for nil\n\nRefs #7'
 fix_bundle
 printf 'Prints an empty table for nil.\n\nRefs #7\n' >"${OUT}/pr-body.md"
-EDITOR_JSON='{"__typename":"User","login":"repo-agent"}' publish_fix
+EDITOR_JSON='{"__typename":"User","login":"gatehand"}' publish_fix
 expect "fix+body: (that case's fix went out)" "$(outv outcome)" "fix-pushed"
 expect "...but a User who took the bot's name is a person" "$(edits)" 0
 
