@@ -523,6 +523,37 @@ else
   t_fail "preflight: a read-only labeller's issue reached the task"
 fi
 unset -f pre_extra issue_rules
+# Protected paths: the task opens them only on the bot's own agent:allow-protected, the rule
+# publish-fix applies, and above the first tag, where nothing from the PR or the logs can reach.
+pre_extra() {
+  stub_gh_json 'api --paginate repos/o/r/issues/44/timeline*' \
+    "[{\"event\":\"labeled\",\"label\":{\"name\":\"agent:allow-protected\"},\"actor\":{\"login\":\"${APPLIER}\"}}]"
+}
+task_opens() { # task_opens: exit 0 when the OPEN line is in the task, before its first tag
+  local open tag
+  open="$(grep -n -m1 '^Protected paths: OPEN\.' "${TMP}/task.md" | cut -d: -f1)"
+  tag="$(grep -n -m1 '^<untrusted' "${TMP}/task.md" | cut -d: -f1)"
+  [[ -n "${open}" && -n "${tag}" && "${open}" -lt "${tag}" ]]
+}
+rm -f "${TMP}/task.md"
+APPLIER='gatehand[bot]' pre_case "$(prjson 'agent:pr,agent:allow-protected')" '[]' ci 901
+label="preflight: the bot's agent:allow-protected opens protected paths in the task, above the data"; check task_opens
+expect "preflight: ...and the run still goes" "$(outv go)" true
+rm -f "${TMP}/task.md"
+APPLIER=owner-login pre_case "$(prjson 'agent:pr,agent:allow-protected')" '[]' ci 901
+label="preflight: a person's agent:allow-protected on the PR opens nothing"; if task_opens; then t_fail "${label}"; else t_pass "${label}"; fi
+expect "preflight: ...and the run still goes" "$(outv go)" true
+unset -f pre_extra
+rm -f "${TMP}/task.md"
+pre_case "$(prjson)" '[]' ci 901
+label="preflight: without the label the task opens nothing"; if [[ -s "${TMP}/task.md" ]] && ! task_opens; then t_pass "${label}"; else t_fail "${label}"; fi
+rm -f "${TMP}/task.md"
+PR_LABELS_FAIL=1 pre_case "$(prjson 'agent:pr,agent:allow-protected')" '[]' ci 901
+expect "preflight: an unreadable label is no go" "$(outv go)" false
+expect "preflight: ...saying so" "$(outv reason)" "#44's labels unreadable"
+label="preflight: ...and the PR is not blocked"; if pr_label_added agent:blocked; then t_fail "${label}"; else t_pass "${label}"; fi
+label="preflight: ...nor locked"; if pr_label_added agent:fixing; then t_fail "${label}"; else t_pass "${label}"; fi
+label="preflight: ...and no task is written"; if [[ -e "${TMP}/task.md" ]]; then t_fail "${label}"; else t_pass "${label}"; fi
 COMMENT_FAILS=1 pre_case "$(prjson)" '[]' ci 901
 expect "preflight: a lock whose comment fails is no go" "$(outv go)" false
 label="and the label comes off again (no publish job would free it)"; check pr_label_removed agent:fixing

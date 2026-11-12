@@ -91,7 +91,7 @@ got_timeout="$(awk '/^  fix:/ {on = 1} on && /^    timeout-minutes:/ {print $2; 
 body="$(awk 'NR==1 && $0=="---" {fm=1; next} fm==1 && $0=="---" {fm=2; next} fm!=1' "${CMD}")"
 for needle in 'Refs #N' 'Never write `Closes`' 'blocked.md' 'summary.md' 'fast-forward' \
   '<untrusted-fix-input>' 'CANNOT push' 'protected-paths.txt' 'Never weaken' \
-  'AGENT_DIR/outbox/pr-body.md' 'Leave out the footer'; do
+  'AGENT_DIR/outbox/pr-body.md' 'Leave out the footer' 'Protected paths: OPEN.'; do
   grep -Fq -- "${needle}" <<<"${body}" && t_pass "the command says: ${needle}" || t_fail "the command no longer says: ${needle}"
 done
 
