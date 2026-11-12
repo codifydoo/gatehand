@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.3 (2026-11-12)
+
+- Security: a review dispatched by hand for a fork's PR is refused before the PR is checked out. The
+  review job checks out the PR's head and then runs that tree's `.github/actions/install-gh` and
+  reads its `.claude/` with a PR-write token and an OIDC token, the Claude credential in later
+  steps' reach. An automatic run skips a fork's PR, but a dispatch had no such check, and the
+  workflow's own comment suggested dispatching one "after reading the PR". Its new first step asks
+  the API for the PR's head repository and stops unless it is this one; the `pr` input must be a
+  number. To review a fork's PR, push its head to a branch of the repository and open a PR from that
+  branch. The automatic run's skip is not a control (a fork's PR runs its own copy of the workflow;
+  GitHub gives it no secrets and a read-only token, unless a private repository's fork settings send
+  them), and the comments and the runbook now say so: a public repository with a self-hosted review
+  runner should require approval for all external contributors' workflows. Found by installing
+  Gatehand into a fresh repository with `/gatehand:install`.
+- The install skill and the default `toolchain/action.yml` no longer say `cache: false` for every
+  setup action: `setup-node` and `setup-python` take a package manager's name there and reject
+  `false`. Leave `cache` out on both, and on `setup-node` v5 or later set
+  `package-manager-cache: false` (that cache is on by default).
+- The update changes `claude-code-review.yml`, the install skill and the default
+  `toolchain/action.yml`, not `agent-coder.yml` or `agent-fixup.yml`, so no runner-ref
+  fast-forward is needed.
+
 ## 0.3.2 (2026-11-12)
 
 - The fixer can now fix a PR that touches protected paths. Before, `/agent-fix` told it never to

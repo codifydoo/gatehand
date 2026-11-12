@@ -18,10 +18,17 @@ run-name: 'Claude review of PR #${{ inputs.pr || github.event.pull_request.numbe
 # deterministic and costs no tokens. A DISPATCH is exempt on purpose: it is a person (or the agents)
 # asking for a fresh review.
 #
-# On a FORK PR this job fails rather than posting: GITHUB_TOKEN is read-only there and secrets are
-# not exposed.
+# A FORK's PR is not reviewed here. A dispatch refuses it before anything from the PR is on disk (the
+# fork guard step): the review runs the PR's own .github/actions and .claude/ with this job's write
+# token and the Claude credential in reach. The automatic run skips it too, but only as a courtesy:
+# on `pull_request` GitHub runs the PR's own copy of this file, which a fork can edit. What keeps
+# that run harmless is GitHub's fork downgrade (no secrets, a read-only GITHUB_TOKEN), not this
+# file, and only while a private repository's "Fork pull request workflows" settings send neither
+# write tokens nor secrets. Fork code still runs on the review runner, so a public repository with
+# a self-hosted review runner should choose "Require approval for all external contributors"
+# (Settings, Actions, General); the default asks only for first-time contributors.
 #
-# Dispatch by hand: gh workflow run "Claude Code Review" -f pr=<number>
+# Dispatch by hand, for a PR from a branch of this repository: gh workflow run "Claude Code Review" -f pr=<number>
 on:
   pull_request:
     # NOT `synchronize` — see the header. `opened` and `ready_for_review` are the two moments a
@@ -49,8 +56,8 @@ jobs:
     # code-review plugin's own step 1, which this workflow no longer uses — so the guard has to be
     # here. Better placed anyway: the skip is visible in the workflow instead of being emergent
     # behaviour of a third-party command.
-    # A fork's PR gets no secrets, so a review of it could only fail: it is skipped instead, and a
-    # person dispatches one after reading the PR if they want it.
+    # A fork's PR gets no secrets, so a review of it could only fail: it is skipped instead. A
+    # dispatch has no pull_request payload for this to read; the fork guard step refuses it there.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository)
@@ -66,13 +73,42 @@ jobs:
       id-token: write
 
     steps:
+      # THE FORK GUARD: a dispatch for a fork's PR stops here, before the checkout below puts the
+      # PR's head on disk. The steps after it run that tree's ./.github/actions/install-gh and read
+      # its .claude/ (settings, /verify-pr) with this job's PR-write token and OIDC token, and with
+      # the Claude credential in later steps' reach. From a branch of this repository that is code
+      # from someone who could push here anyway; from a fork it is anyone's. To review a fork's PR,
+      # read it, push its head to a branch here, and open a PR from that branch.
+      # curl and jq, not gh: gh comes from install-gh, which needs the checkout this step guards.
+      - name: refuse a fork's PR
+        id: fork_guard
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          PR: ${{ inputs.pr }}
+          REPO: ${{ github.repository }}
+          TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "${PR}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::pr must be a PR number, not '${PR}'"; exit 1; }
+          # The token goes to curl as config on stdin, never in argv.
+          head="$(printf 'header = "Authorization: Bearer %s"\n' "${TOKEN}" \
+            | curl -K - -fsSL --retry 3 --retry-all-errors --retry-delay 5 \
+              -H 'Accept: application/vnd.github+json' "${GITHUB_API_URL}/repos/${REPO}/pulls/${PR}" \
+            | jq -r '.head.repo.full_name // ""')"
+          if [[ "${head}" != "${REPO}" ]]; then
+            echo "::error::PR #${PR} comes from ${head:-a deleted fork}, not ${REPO}. A review runs the PR's own .github/actions and .claude/ with this job's tokens, so a fork's PR is not reviewed. Read it, push its head to a branch of ${REPO}, and review the PR from that branch."
+            exit 1
+          fi
+          echo "PR #${PR} is from a branch of ${REPO}"
+
       # On a dispatch, check out the PR being reviewed. Without `ref:` a dispatch checks out the
       # ref it was run on (main), so the agent judged the PR's diff while every file it opened for
       # context was main's older copy ("checked against the code on the base branch"). The PR's HEAD, not its merge ref: refs/pull/N/merge is missing while
       # the PR conflicts, and the dispatch is the button pressed to re-review exactly then.
       # An automatic run passes '' here and keeps checkout's default, refs/pull/N/merge.
       # This runs the PR's own .github/actions/install-gh on a dispatch too, which the automatic
-      # run has always done; .github/agents/protected-paths.txt is what keeps agent PRs out of it.
+      # run has always done; .github/agents/protected-paths.txt is what keeps agent PRs out of it,
+      # and the fork guard above is what keeps a fork's PR from reaching it.
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
@@ -228,8 +264,10 @@ jobs:
           # routing it through a file would put a second, divergent copy of "always post" outside
           # verify-pr.md — the exact duplication the --append-system-prompt note above explains why
           # we removed. The residual risk is bounded rather than absent:
-          #   - a fork PR gets no secrets and fails before the review runs, so an attacker needs push
-          #     access to the repo (a branch PR) before any of this is reachable;
+          #   - a fork's PR is refused on a dispatch, and its automatic run gets no secrets and a
+          #     read-only token from GitHub (unless a private repository's fork settings send them),
+          #     so an attacker needs push access to the repo (a branch PR) before any of this is
+          #     reachable;
           #   - the worst outcome inside that blast radius is a comment on the wrong PR of the same
           #     repo — GITHUB_TOKEN is repo-scoped, so it cannot reach another repository;
           #   - a comment posted by GITHUB_TOKEN does not trigger workflows, so a misdirected
