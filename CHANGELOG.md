@@ -7,6 +7,9 @@
   `agent:allow-protected`, so on exactly those PRs the fixer blocked where it could have fixed.
   Preflight now opens protected paths in the task file (`Protected paths: OPEN.`, above the data)
   when publish-fix would accept them, and `/agent-fix` follows that line; `!` paths stay closed.
+  The fixer reads `/agent-fix` from the PR's own branch, so this reaches agent PRs opened after the
+  update merges; older ones keep blocking as before. A PR whose labels cannot be read now stops
+  preflight (no attempt spent) instead of running with protected paths closed.
   The update changes `agent-fixup.sh` and `agent-fix.md`, not the workflows, so no runner-ref
   fast-forward is needed.
 

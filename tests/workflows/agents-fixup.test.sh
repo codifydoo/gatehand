@@ -542,12 +542,17 @@ expect "preflight: ...and the run still goes" "$(outv go)" true
 rm -f "${TMP}/task.md"
 APPLIER=owner-login pre_case "$(prjson 'agent:pr,agent:allow-protected')" '[]' ci 901
 label="preflight: a person's agent:allow-protected on the PR opens nothing"; if task_opens; then t_fail "${label}"; else t_pass "${label}"; fi
+expect "preflight: ...and the run still goes" "$(outv go)" true
 unset -f pre_extra
 rm -f "${TMP}/task.md"
 pre_case "$(prjson)" '[]' ci 901
 label="preflight: without the label the task opens nothing"; if [[ -s "${TMP}/task.md" ]] && ! task_opens; then t_pass "${label}"; else t_fail "${label}"; fi
+rm -f "${TMP}/task.md"
 PR_LABELS_FAIL=1 pre_case "$(prjson 'agent:pr,agent:allow-protected')" '[]' ci 901
-label="preflight: an unreadable label opens nothing"; if [[ -s "${TMP}/task.md" ]] && ! task_opens; then t_pass "${label}"; else t_fail "${label}"; fi
+expect "preflight: an unreadable label is no go" "$(outv go)" false
+expect "preflight: ...saying so" "$(outv reason)" "#44's labels unreadable"
+label="preflight: ...and the PR is not blocked"; if pr_label_added agent:blocked; then t_fail "${label}"; else t_pass "${label}"; fi
+label="preflight: ...nor locked"; if pr_label_added agent:fixing; then t_fail "${label}"; else t_pass "${label}"; fi
 COMMENT_FAILS=1 pre_case "$(prjson)" '[]' ci 901
 expect "preflight: a lock whose comment fails is no go" "$(outv go)" false
 label="and the label comes off again (no publish job would free it)"; check pr_label_removed agent:fixing
