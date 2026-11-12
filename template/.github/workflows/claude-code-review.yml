@@ -23,8 +23,10 @@ run-name: 'Claude review of PR #${{ inputs.pr || github.event.pull_request.numbe
 # token and the Claude credential in reach. The automatic run skips it too, but only as a courtesy:
 # on `pull_request` GitHub runs the PR's own copy of this file, which a fork can edit. What keeps
 # that run harmless is GitHub's fork downgrade (no secrets, a read-only GITHUB_TOKEN), not this
-# file. Fork code still runs on the review runner, so a public repository with a self-hosted review
-# runner should require approval for workflows from fork PRs (Settings, Actions, General).
+# file, and only while a private repository's "Fork pull request workflows" settings send neither
+# write tokens nor secrets. Fork code still runs on the review runner, so a public repository with
+# a self-hosted review runner should choose "Require approval for all external contributors"
+# (Settings, Actions, General); the default asks only for first-time contributors.
 #
 # Dispatch by hand, for a PR from a branch of this repository: gh workflow run "Claude Code Review" -f pr=<number>
 on:
@@ -263,8 +265,9 @@ jobs:
           # verify-pr.md — the exact duplication the --append-system-prompt note above explains why
           # we removed. The residual risk is bounded rather than absent:
           #   - a fork's PR is refused on a dispatch, and its automatic run gets no secrets and a
-          #     read-only token from GitHub, so an attacker needs push access to the repo (a branch
-          #     PR) before any of this is reachable;
+          #     read-only token from GitHub (unless a private repository's fork settings send them),
+          #     so an attacker needs push access to the repo (a branch PR) before any of this is
+          #     reachable;
           #   - the worst outcome inside that blast radius is a comment on the wrong PR of the same
           #     repo — GITHUB_TOKEN is repo-scoped, so it cannot reach another repository;
           #   - a comment posted by GITHUB_TOKEN does not trigger workflows, so a misdirected

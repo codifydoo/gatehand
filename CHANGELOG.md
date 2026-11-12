@@ -10,9 +10,9 @@
   asks the API for the PR's head repository and stops unless it is this one; the `pr` input must
   be a number. To review a fork's PR, push its head to a branch of the repository and open a PR
   from that branch. The automatic run's skip is not a control (a fork's PR runs its own copy of
-  the workflow; GitHub gives it no secrets and a read-only token), and the comments and the
-  runbook now say so: a public repository with a self-hosted review runner should require approval
-  for workflows from fork PRs. Found by installing Gatehand into a fresh repository with
+  the workflow; GitHub gives it no secrets and a read-only token, unless a private repository's
+  fork settings send them), and the comments and the runbook now say so: a public repository with
+  a self-hosted review runner should require approval for all external contributors' workflows. Found by installing Gatehand into a fresh repository with
   `/gatehand:install`.
 - The install skill and the default `toolchain/action.yml` no longer say `cache: false` for every
   setup action: `setup-node` and `setup-python` take a package manager's name there and reject

@@ -145,7 +145,7 @@ for s in "      - name: Checkout repository" "      - uses: ./.github/actions/in
   blk="$(step_block "${WORKFLOW}" "${s}")"
   if [[ -z "${blk}" ]]; then
     t_fail "8: no step '${s# *- }'"
-  elif grep -qE '^        if: .*(always|failure|cancelled)\(\)' <<<"${blk}"; then
+  elif grep -qE '(always|failure|cancelled)\(\)' <<<"${blk}"; then
     t_fail "8: '${s#      - }' runs after a failed guard"
   else
     t_pass "8: '${s#      - }' does not run after a failed guard"
