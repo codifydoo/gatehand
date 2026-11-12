@@ -4,8 +4,10 @@
 # Runs from the DEFAULT BRANCH's copy, before the model, WITHOUT sudo in the fixer (put system
 # packages in .github/agents/system). In the fixer the workspace is the agent PR's head: setup-*
 # actions may read a version file from it, but never run workspace code here. Installing
-# dependencies is .github/agents/dependencies. NO CACHES (cache: false on setup-*
-# actions): the agent runs code it wrote in the same job, so it could poison anything it saves.
+# dependencies is .github/agents/dependencies. NO CACHES (`cache: false` where a setup-* action
+# caches by default, as setup-go does; setup-python rejects `false` and caches only when `cache:` is
+# set, so leave it out there): the agent runs code it wrote in the same job, so it could poison
+# anything it saves.
 #
 # Build-time variables the project needs (dummy DATABASE_URL and the like) go to $GITHUB_ENV here.
 name: project toolchain

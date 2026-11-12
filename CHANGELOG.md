@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.2 (2026-11-12)
+
+- Security: a review dispatched by hand for a fork's PR is refused before the PR is checked out.
+  The review job checks out the PR's head and then runs that tree's `.github/actions/install-gh`
+  and reads its `.claude/` with a PR-write token and an OIDC token, the Claude credential in later
+  steps' reach. An automatic run already skipped a fork's PR, but a dispatch had no such check, and
+  the workflow's own comment suggested dispatching one "after reading the PR". Its new first step
+  asks the API for the PR's head repository and stops unless it is this one; the `pr` input must
+  be a number. To review a fork's PR, push its head to a branch of the repository and open a PR
+  from that branch. Found by installing Gatehand into a fresh repository with `/gatehand:install`.
+- The install skill and the default `toolchain/action.yml` no longer say `cache: false` for every
+  setup action: `setup-python` rejects `false` and caches only when `cache:` is set.
+
 ## 0.3.1 (2026-11-11)
 
 - The fixer's job restores main's copy of the setup actions for its post steps from the commit its

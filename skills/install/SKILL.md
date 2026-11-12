@@ -64,7 +64,9 @@ Then edit those to fit what you found:
 - `protected-paths.txt`: add the release and deploy tooling you found as normal (label-unlockable)
   lines. Never remove a `!` line.
 - `system/action.yml` (sudo, fixed packages only), `toolchain/action.yml` (setup-* actions with
-  `cache: false`), `dependencies/action.yml` (lockfile-exact install): mirror what CI does.
+  every cache off: `cache: false` where the action caches by default, as setup-go does; setup-python
+  rejects `false` and caches only when `cache:` is set, so leave it out there),
+  `dependencies/action.yml` (lockfile-exact install): mirror what CI does.
 
 Re-render (`bash <root>/bin/render.sh .`) and confirm `bash <root>/bin/render.sh --check .` passes.
 If the repo lints workflows with actionlint, add the ignore rules from
