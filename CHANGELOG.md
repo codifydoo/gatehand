@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2 (2026-11-12)
+
+- The fixer can now fix a PR that touches protected paths. Before, `/agent-fix` told it never to
+  touch them, while preflight and publish-fix let a fix through on a PR carrying the bot's
+  `agent:allow-protected`, so on exactly those PRs the fixer blocked where it could have fixed.
+  Preflight now opens protected paths in the task file (`Protected paths: OPEN.`, above the data)
+  when publish-fix would accept them, and `/agent-fix` follows that line; `!` paths stay closed.
+  The update changes `agent-fixup.sh` and `agent-fix.md`, not the workflows, so no runner-ref
+  fast-forward is needed.
+
 ## 0.3.1 (2026-11-11)
 
 - The fixer's job restores main's copy of the setup actions for its post steps from the commit its
