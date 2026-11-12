@@ -69,10 +69,13 @@ The model never shares a job with a write-capable token, and nothing it wrote is
   later steps hold, so it could write cache entries. Runs are dispatched on `agent-runner`, whose
   cache scope the default branch and PRs never read, and the code job restores no caches.
 - **The review runs the PR's code.** `claude-code-review.yml` checks out the PR and runs its
-  `.github/actions/install-gh` and `.claude/` with a PR-write and an OIDC token, so it reviews only
-  PRs from branches of this repository: an automatic run skips a fork's PR, and a dispatch refuses
-  one before the checkout. To review a fork's PR, read it, push its head to a branch here, and open
-  a PR from that branch.
+  `.github/actions/install-gh` and `.claude/` with a PR-write and an OIDC token. A dispatch refuses
+  a fork's PR before the checkout. An automatic run skips one too, but that is not a control: on
+  `pull_request` GitHub runs the PR's own copy of the workflow, which a fork can edit, and GitHub
+  gives that run no secrets and a read-only token. Fork code still runs on the review runner, so a
+  public repository with a self-hosted review runner should require approval for workflows from
+  fork PRs. To review a fork's PR, read it, push its head to a branch here, and open a PR from
+  that branch.
 - **Untrusted text.** Issue text is framed as data, stripped of invisible format characters, and
   only writers' comments reach the model. Text the bot posts has `@mentions` and `<!--` neutralised.
 - **Trust anchored on a person.** The coder takes an issue only if the latest `agent:ready` a person

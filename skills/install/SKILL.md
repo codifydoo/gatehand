@@ -64,8 +64,9 @@ Then edit those to fit what you found:
 - `protected-paths.txt`: add the release and deploy tooling you found as normal (label-unlockable)
   lines. Never remove a `!` line.
 - `system/action.yml` (sudo, fixed packages only), `toolchain/action.yml` (setup-* actions with
-  every cache off: `cache: false` where the action caches by default, as setup-go does; setup-python
-  rejects `false` and caches only when `cache:` is set, so leave it out there),
+  every cache off: setup-go takes `cache: false`; setup-node and setup-python take a package
+  manager's name in `cache:` and reject `false`, so leave it out, and on setup-node v5 or later set
+  `package-manager-cache: false`),
   `dependencies/action.yml` (lockfile-exact install): mirror what CI does.
 
 Re-render (`bash <root>/bin/render.sh .`) and confirm `bash <root>/bin/render.sh --check .` passes.

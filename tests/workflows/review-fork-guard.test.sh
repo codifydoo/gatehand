@@ -12,6 +12,8 @@
 #   5. a pr input that is not a number is refused before any call
 #   6. the token reaches curl on stdin, never in its argv, and the URL is the PR's
 #   7. the guard runs on a dispatch only, and comes before the checkout and install-gh
+#   8. a refused PR stops the job: no continue-on-error on the guard, and neither the checkout nor
+#      install-gh runs after a failure
 set -uo pipefail
 
 REPO_ROOT="${AGENTS_ROOT:?run through tests/run.sh, which renders the package into a scratch repo}"
@@ -67,6 +69,8 @@ mk() { printf '%s\n' "$1" >"${TMP}/$2.json"; }
 mk '{"number":7,"head":{"repo":{"full_name":"acme/repo"}}}' branch
 mk '{"number":7,"head":{"repo":{"full_name":"mallory/repo"}}}' fork
 mk '{"number":7,"head":{"repo":null}}' deleted_fork
+mk '{"number":7,"head":{"repo":{"full_name":"acme/repo-fork"}}}' prefix_fork
+mk '{"number":7,"head":{"repo":{"full_name":"acme/other"}}}' same_owner_fork
 
 run_guard branch 7
 [[ "${rc}" -eq 0 ]] && t_pass "1: a PR from a branch of the repository passes" \
@@ -75,6 +79,14 @@ run_guard branch 7
 run_guard fork 7
 [[ "${rc}" -ne 0 && "${out}" == *"mallory/repo"* ]] && t_pass "2: a fork's PR is refused and the fork is named" \
   || t_fail "2: a fork's PR was not refused (rc=${rc}): ${out}"
+
+run_guard prefix_fork 7
+[[ "${rc}" -ne 0 ]] && t_pass "2: a fork whose name starts with the repository's is refused" \
+  || t_fail "2: acme/repo-fork passed as acme/repo: ${out}"
+
+run_guard same_owner_fork 7
+[[ "${rc}" -ne 0 ]] && t_pass "2: a fork under the same owner is refused" \
+  || t_fail "2: acme/other passed as acme/repo: ${out}"
 
 run_guard deleted_fork 7
 [[ "${rc}" -ne 0 ]] && t_pass "3: a PR whose fork is gone is refused" \
@@ -117,6 +129,28 @@ if [[ -n "${guard_at}" && -n "${checkout_at}" && -n "${gh_at}" && "${guard_at}" 
 else
   t_fail "7: guard line ${guard_at:-?}, checkout ${checkout_at:-?}, install-gh ${gh_at:-?}"
 fi
+
+# 8: a refusal must stop the job. A continue-on-error on the guard, or an if: on the checkout or
+# install-gh that runs after a failure, would let a fork's PR through a red guard.
+step_block() { # <file> <first line of the step, exact>
+  awk -v want="$2" '$0 == want { f = 1; print; next } f && /^      - / { exit } f { print }' "$1"
+}
+guard_block="$(step_block "${WORKFLOW}" "      - name: refuse a fork's PR")"
+if grep -q 'continue-on-error' <<<"${guard_block}"; then
+  t_fail "8: the fork guard has continue-on-error"
+else
+  t_pass "8: a failed guard fails the job"
+fi
+for s in "      - name: Checkout repository" "      - uses: ./.github/actions/install-gh"; do
+  blk="$(step_block "${WORKFLOW}" "${s}")"
+  if [[ -z "${blk}" ]]; then
+    t_fail "8: no step '${s# *- }'"
+  elif grep -qE '^        if: .*(always|failure|cancelled)\(\)' <<<"${blk}"; then
+    t_fail "8: '${s#      - }' runs after a failed guard"
+  else
+    t_pass "8: '${s#      - }' does not run after a failed guard"
+  fi
+done
 
 printf '\n[review-fork-guard] %d passed, %d failed\n' "${pass}" "${fail}"
 [[ "${fail}" -eq 0 ]]

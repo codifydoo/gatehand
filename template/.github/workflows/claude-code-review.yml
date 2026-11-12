@@ -18,9 +18,13 @@ run-name: 'Claude review of PR #${{ inputs.pr || github.event.pull_request.numbe
 # deterministic and costs no tokens. A DISPATCH is exempt on purpose: it is a person (or the agents)
 # asking for a fresh review.
 #
-# A FORK's PR is never reviewed here. The automatic run skips it (it gets no secrets), and a dispatch
-# refuses it before anything from the PR is on disk (the fork guard step): the review runs the PR's
-# own .github/actions and .claude/ with this job's write token and the Claude credential in reach.
+# A FORK's PR is not reviewed here. A dispatch refuses it before anything from the PR is on disk (the
+# fork guard step): the review runs the PR's own .github/actions and .claude/ with this job's write
+# token and the Claude credential in reach. The automatic run skips it too, but only as a courtesy:
+# on `pull_request` GitHub runs the PR's own copy of this file, which a fork can edit. What keeps
+# that run harmless is GitHub's fork downgrade (no secrets, a read-only GITHUB_TOKEN), not this
+# file. Fork code still runs on the review runner, so a public repository with a self-hosted review
+# runner should require approval for workflows from fork PRs (Settings, Actions, General).
 #
 # Dispatch by hand, for a PR from a branch of this repository: gh workflow run "Claude Code Review" -f pr=<number>
 on:
@@ -258,8 +262,9 @@ jobs:
           # routing it through a file would put a second, divergent copy of "always post" outside
           # verify-pr.md — the exact duplication the --append-system-prompt note above explains why
           # we removed. The residual risk is bounded rather than absent:
-          #   - a fork's PR is skipped (automatic) or refused (dispatch) before the review runs, so an
-          #     attacker needs push access to the repo (a branch PR) before any of this is reachable;
+          #   - a fork's PR is refused on a dispatch, and its automatic run gets no secrets and a
+          #     read-only token from GitHub, so an attacker needs push access to the repo (a branch
+          #     PR) before any of this is reachable;
           #   - the worst outcome inside that blast radius is a comment on the wrong PR of the same
           #     repo — GITHUB_TOKEN is repo-scoped, so it cannot reach another repository;
           #   - a comment posted by GITHUB_TOKEN does not trigger workflows, so a misdirected
