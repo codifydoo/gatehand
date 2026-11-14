@@ -70,7 +70,7 @@ fi
 stub_gh_reset_calls
 
 # --- the pure readers: 2 (ledger), 3, 4, 5 -------------------------------------------------------------
-REQ_COMMENT="${TMP}/req-comment" python3 - "${PKG}/bin/dashboard.py" <<'PY' >"${TMP}/py.out" 2>&1
+REQ_COMMENT="${TMP}/req-comment" CFG_DIR="${TMP}/pycfg" python3 - "${PKG}/bin/dashboard.py" <<'PY' >"${TMP}/py.out" 2>&1
 import importlib.util, json, os, sys
 spec = importlib.util.spec_from_file_location("dashboard", sys.argv[1])
 d = importlib.util.module_from_spec(spec)
@@ -265,17 +265,21 @@ def unreadable(args, stdin=None):
 d._rate["at"], d.gh_json = None, unreadable
 check("rate limited, and the limits unreadable: no time", d.rate_reset("core"), None)
 check("any other cause carries no time", d.cause_of(d.GhError(["api", "x"], 1, "gh: Not Found (HTTP 404)")), {"cause": "not_found"})
-import tempfile
-cfg = os.path.join(tempfile.mkdtemp(), "dashboard.json")
+os.makedirs(os.environ["CFG_DIR"])
+cfg = os.path.join(os.environ["CFG_DIR"], "dashboard.json")
 json.dump({"scan_notes": ["n1"], "scan_unreadable": [
     {"cause": "sso", "error": "n1"}, {"cause": "rate_limited", "error": "n2", "resets_at": "2026-11-14T13:00:00Z"},
     {"cause": "<b>made up</b>", "error": "x"}, {"cause": "sso", "error": 5}, "z",
     {"cause": "sso", "error": "y", "resets_at": "2026-11-14T13:00:00Z"}, {"cause": "rate_limited", "error": "r1"},
-    {"cause": "rate_limited", "error": "r2", "resets_at": "not a time"}]}, open(cfg, "w"))
+    {"cause": "rate_limited", "error": "r2", "resets_at": "not a time"},
+    {"cause": "rate_limited", "error": "r3", "resets_at": "2026-99-99T99:99:99Z"},
+    {"cause": "rate_limited", "error": "r4", "resets_at": "\uff12\uff10\uff12\uff16-11-14T13:00:00Z"},
+    {"cause": "unknown", "error": "e" * 400}]}, open(cfg, "w"))
 check("scan causes are kept across a restart, only in the fixed shape", d.Config(cfg).data["scan_unreadable"],
       [{"cause": "sso", "error": "n1"}, {"cause": "rate_limited", "error": "n2", "resets_at": "2026-11-14T13:00:00Z"},
        {"cause": "sso", "error": "y"}, {"cause": "rate_limited", "error": "r1", "resets_at": None},
-       {"cause": "rate_limited", "error": "r2", "resets_at": None}])
+       {"cause": "rate_limited", "error": "r2", "resets_at": None}, {"cause": "rate_limited", "error": "r3", "resets_at": None},
+       {"cause": "rate_limited", "error": "r4", "resets_at": None}, {"cause": "unknown", "error": "e" * 300}])
 # A long note and its cause still match after a restart; the notes that are not failed reads have none.
 long = "Although you appear to have the correct authorization credentials, the o organization has enabled OAuth App access restrictions. " * 3
 pages = iter([({"viewer": {"repositories": {"nodes": [], "pageInfo": {"hasNextPage": False}}}}, [{"message": long, "type": "FORBIDDEN"}])])

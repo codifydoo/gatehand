@@ -1456,7 +1456,10 @@ def scan_entry(x):
     c = {"cause": x["cause"], "error": x["error"][:300]}
     if x["cause"] == "rate_limited":
         r = x.get("resets_at")
-        c["resets_at"] = r if isinstance(r, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", r) else None
+        try:  # only a real UTC time in iso()'s form: a hand-edited file never yields a guessed time
+            c["resets_at"] = iso(datetime.strptime(r, "%Y-%m-%dT%H:%M:%SZ")) if r.isascii() else None
+        except (TypeError, ValueError, AttributeError):
+            c["resets_at"] = None
     return c
 
 
