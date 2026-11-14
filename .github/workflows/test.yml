@@ -5,10 +5,25 @@ on:
     branches: [main]
 permissions:
   contents: read
+# A new push to a pull request cancels the run for the push before it; runs on main all finish.
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   test:
+    name: test (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The default policy: hosted runners.
+          - name: hosted runners
+            policy_jq: ""
+          # A self-hosted runner policy, so nothing passes only because every runner is ubuntu-latest.
+          - name: self-hosted runners
+            policy_jq: '.runners.agent = ["self-hosted", "x-agent"] | .runners.ci = ["self-hosted", "x-ci"]'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -17,9 +32,7 @@ jobs:
           cache: false
       - name: install actionlint
         run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
-      - name: hosted runners (the default policy)
-        run: bash tests/run.sh
-      - name: a self-hosted agent runner
+      - name: run the suites
         env:
-          AGENTS_TEST_POLICY_JQ: '.runners.agent = ["self-hosted", "x-agent"] | .runners.ci = ["self-hosted", "x-ci"]'
+          AGENTS_TEST_POLICY_JQ: ${{ matrix.policy_jq }}
         run: bash tests/run.sh
