@@ -85,10 +85,81 @@ GH_TIMEOUT = 60
 
 
 class GhError(Exception):
-    def __init__(self, args, rc, err):
+    def __init__(self, args, rc, err, types=()):
         self.not_found = "HTTP 404" in err
         self.forbidden = "HTTP 403" in err
+        self.rc, self.err = rc, err
+        self.cause = read_cause(rc, err, types)
+        self.resource = "graphql" if list(args[:2]) == ["api", "graphql"] else "core"  # which rate limit
         super().__init__("gh %s: %s" % (" ".join(args[:3]), (err.strip() or "exit %d" % rc)[:300]))
+
+
+# Why a read failed, for the page to offer the one thing that helps. Matched on what gh prints:
+# `gh api` writes "gh: <GitHub's message> (HTTP <status>)", or "gh: HTTP <status>" for a body with
+# no message, then "Authorize in your web browser: <url>" when GitHub answered with a SAML SSO
+# challenge (its X-GitHub-SSO header); a gh with no login prints "To get started with GitHub CLI,
+# please run:  gh auth login" and exits 4. A GraphQL error carries a type. Anything else is
+# "unknown": a cause is never guessed. docs/dashboard.md lists what each one means.
+CAUSES = ("sso", "signed_out", "rate_limited", "not_found", "no_access", "unknown")
+CAUSE_RULES = (  # first match wins: a SAML 403 is not "no access", a rate-limited 403 neither
+    ("signed_out", re.compile(r"\bHTTP 401\b|\bgh auth login\b")),
+    ("sso", re.compile(r"Authorize in your web browser:|\bSAML enforcement\b")),
+    ("rate_limited", re.compile(r"\bHTTP 429\b|\bAPI rate limit (?:already )?exceeded\b|\bsecondary rate limit\b"
+                                r"|\babuse detection mechanism\b", re.I)),  # the last: GitHub's older name for a secondary limit
+    ("not_found", re.compile(r"\bHTTP 404\b")),
+    ("no_access", re.compile(r"\bHTTP 403\b")),
+)
+CAUSE_TYPES = {"RATE_LIMITED": "rate_limited", "NOT_FOUND": "not_found", "FORBIDDEN": "no_access"}
+
+
+def read_cause(rc, err, types=()):
+    if rc == 4:  # gh's own exit code for "not logged in"
+        return "signed_out"
+    for cause, pattern in CAUSE_RULES[:3]:  # these beat a GraphQL type: a SAML refusal is typed FORBIDDEN
+        if pattern.search(err):
+            return cause
+    for t in types:
+        if t in CAUSE_TYPES:
+            return CAUSE_TYPES[t]
+    return next((c for c, p in CAUSE_RULES[3:] if p.search(err)), "unknown")
+
+
+RATE_TTL = 30
+_rate = {"at": None, "resources": None}
+_rate_lock = threading.Lock()
+
+
+def rate_reset(resource):
+    """When the exhausted rate limit (core or graphql) resets, from GET /rate_limit (which does not
+    count against it), read at most every RATE_TTL seconds. None when that limit is not exhausted (a
+    secondary limit, whose end GitHub does not say) or cannot be read: never a guessed time."""
+    with _rate_lock:
+        if _rate["at"] is None or time.monotonic() - _rate["at"] > RATE_TTL:
+            try:
+                got = gh_json(["api", "rate_limit"])
+                _rate["resources"] = got.get("resources") if isinstance(got, dict) else None
+            except GhError:
+                _rate["resources"] = None
+            _rate["at"] = time.monotonic()
+        res = _rate["resources"]
+        r = res.get(resource) if isinstance(res, dict) else None
+    if not isinstance(r, dict) or r.get("remaining") != 0 or not isinstance(r.get("reset"), int):
+        return None
+    if r["reset"] <= now_utc().timestamp():  # a reading from before that limit reset
+        return None
+    try:
+        return iso(datetime.fromtimestamp(r["reset"], timezone.utc))
+    except (OverflowError, OSError, ValueError):  # a time no clock can hold: unknown, not a crash
+        return None
+
+
+def cause_of(e):
+    """A failed read's cause as the page gets it: {"cause": one of CAUSES}, and for "rate_limited"
+    also "resets_at" (ISO time, or null when unknown)."""
+    c = {"cause": e.cause}
+    if e.cause == "rate_limited":
+        c["resets_at"] = rate_reset(e.resource)
+    return c
 
 
 GH_SLOTS = threading.BoundedSemaphore(8)
@@ -127,6 +198,12 @@ def gh_or_404(args):
         raise
 
 
+def gql_types(data):
+    """The `type` of each error in a GraphQL response (NOT_FOUND, FORBIDDEN, RATE_LIMITED, ...)."""
+    errs = data.get("errors") if isinstance(data, dict) else None
+    return [str(x.get("type")) for x in errs if isinstance(x, dict) and x.get("type")] if isinstance(errs, list) else []
+
+
 def graphql(query, partial=False, **variables):
     """The response's data. Any GraphQL error raises, unless partial: then (data, [messages]) for a
     response that still carries data (one node a SAML-protected organisation hides, say)."""
@@ -146,10 +223,13 @@ def graphql(query, partial=False, **variables):
         except ValueError:
             data = None
         if not (partial and isinstance(data, dict) and data.get("data")):
+            types = gql_types(data)
+            if types:  # gh printed only the messages; the response's types say more
+                e.cause = read_cause(e.rc, e.err, types)
             raise
     errors = [str(x.get("message")) for x in data.get("errors") or [] if isinstance(x, dict)]
     if errors and not (partial and data.get("data")):
-        raise GhError(args, 0, "; ".join(errors))
+        raise GhError(args, 0, "; ".join(errors), gql_types(data))
     return (data.get("data") or {}, errors) if partial else (data.get("data") or {})
 
 
@@ -488,7 +568,13 @@ def item_issue(i):
 
 def read_repo(repo):
     owner, name = repo.split("/", 1)
-    d = {"repo": repo, "url": "https://github.com/" + repo, "errors": [], "fetched_at": iso(now_utc())}
+    d = {"repo": repo, "url": "https://github.com/" + repo, "errors": [], "unreadable": [], "fetched_at": iso(now_utc())}
+
+    def fail(part, text, e=None):
+        """An entry under errors; for a failed gh read also one under unreadable, with its cause."""
+        d["errors"].append(text)
+        if isinstance(e, GhError):
+            d["unreadable"].append(dict(cause_of(e), part=part, error=text))
     now = now_utc()
     since = iso(now - timedelta(days=7))
     today = now.strftime("%Y-%m-%d")
@@ -497,11 +583,12 @@ def read_repo(repo):
     try:
         r = (graphql(REPO_Q1, owner=owner, name=name) or {}).get("repository")
     except GhError as e:
-        d["errors"].append("repository: %s" % e)
+        fail("repository", "repository: %s" % e, e)
         r = None
     if not r:
-        if not d["errors"]:
+        if not d["errors"]:  # GitHub answered, with no repository: what it says for both
             d["errors"].append("repository: not found, or your gh login cannot see it")
+            d["unreadable"].append({"cause": "not_found", "part": "repository", "error": d["errors"][-1]})
         # Nothing else can be read either: everything that could wait for you is unknown.
         d["waiting"] = [{"kind": "unknown", "text": "Could not read this repository, so nothing in it is listed.", "url": d["url"]}]
         return d
@@ -520,13 +607,13 @@ def read_repo(repo):
             raise ValueError("not an object")
         policy_ok = True
     except (GhError, ValueError) as e:
-        d["errors"].append("policy.json: %s; the defaults are assumed, and the inbox is not looked for" % e)
+        fail("policy.json", "policy.json: %s; the defaults are assumed, and the inbox is not looked for" % e, e)
         policy = {}
     try:
         lock = json.loads(blob_text(repo, r.get("lock"), default, LOCK_PATH) or "null")
         d["version"] = lock.get("version") if isinstance(lock, dict) else None
     except (GhError, ValueError) as e:
-        d["errors"].append("install.lock.json: %s" % e)
+        fail("install.lock.json", "install.lock.json: %s" % e, e)
         d["version"] = None
     if r.get("lock") is None:
         d["errors"].append("no %s on %s: Gatehand is not installed here" % (LOCK_PATH, default))
@@ -587,7 +674,7 @@ def read_repo(repo):
                      wfRunner="%s:.github/workflows/agent-coder.yml" % runner,
                      wfMain="%s:.github/workflows/agent-coder.yml" % default) or {}).get("repository") or {}
     except GhError as e:
-        d["errors"].append("ledger: %s" % e)
+        fail("ledger", "ledger: %s" % e, e)
         q = None
     d["runs"] = d["stats"] = d["breakers"] = d["runner_ref"] = None
     if q is not None:
@@ -600,7 +687,7 @@ def read_repo(repo):
             d["runs"] = rows
             d["stats"] = role_stats(rows, roles, today)
         except GhError as e:
-            d["errors"].append("ledger runs: %s" % e)
+            fail("ledger runs", "ledger runs: %s" % e, e)
         try:  # read apart from the runs, as the digest does: one unreadable file costs only its own part
             btext = blob_text(repo, q.get("breaker"), ledger, "state/breaker.json")
             b = json.loads(btext) if btext and btext.strip() else {}
@@ -608,7 +695,7 @@ def read_repo(repo):
                 raise ValueError("not an object")
             d["breakers"] = b
         except (GhError, ValueError) as e:
-            d["errors"].append("ledger breaker.json: %s" % e)
+            fail("ledger breaker.json", "ledger breaker.json: %s" % e, e)
         wr, wm = q.get("wfRunner"), q.get("wfMain")
         d["runner_ref"] = "missing" if wr is None else ("ok" if wm and wr.get("oid") == wm.get("oid") else "stale")
 
@@ -619,8 +706,8 @@ def read_repo(repo):
         d["vars"] = {k: have.get(k) for k in VARIABLES}
     except GhError as e:
         d["vars"] = None
-        d["errors"].append("variables: %s" % ("your login cannot read this repository's Actions variables"
-                                              if e.forbidden or e.not_found else e))
+        fail("variables", "variables: %s" % ("your login cannot read this repository's Actions variables"
+                                             if e.cause in ("no_access", "not_found") else e), e)
     owner_login = (d["vars"] or {}).get("AGENT_OWNER_LOGIN") or ""
     d["owner_login"] = owner_login if d["vars"] is not None else None
 
@@ -666,7 +753,7 @@ def read_repo(repo):
             "number": inbox["number"], "url": inbox.get("html_url"), "checklist": inbox_checklist(inbox.get("body")),
         }
     except GhError as e:
-        d["errors"].append("issues: %s" % e)
+        fail("issues", "issues: %s" % e, e)
         d["issues"] = d["prs"] = d["inbox"] = None
         d["inbox_state"] = "unknown"
 
@@ -686,7 +773,7 @@ def read_repo(repo):
         d["active_runs"] = sorted({x["id"]: x for x in active}.values(), key=lambda x: x["created_at"] or "", reverse=True)
         d["recent_runs"] = [x for x in mine("completed", 50) if x["conclusion"] != "skipped"][:15]
     except GhError as e:
-        d["errors"].append("runs: %s" % e)
+        fail("runs", "runs: %s" % e, e)
         d["active_runs"] = d["recent_runs"] = None
 
     d["waiting"] = waiting_items(d)
@@ -1512,8 +1599,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             fn()
         except ApiError as e:
             self.send(e.status, {"error": str(e)})
-        except GhError as e:
-            self.send(502, {"error": str(e)})
+        except GhError as e:  # a failed read: the page's d.failed, the inbox's and the gate's error
+            self.send(502, dict(cause_of(e), error=str(e)))
         except Exception as e:  # never a traceback to the page
             sys.stderr.write("dashboard: %s: %r\n" % (self.path.split("?")[0], e))
             self.send(500, {"error": "internal error, see the dashboard's terminal"})
@@ -1559,16 +1646,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(200, {"ok": True})
         if path == "/api/session":
             cfg = self.server.config
-            scan_error = None
+            scan_error = scan_cause = None
             if cfg.data["scanned_at"] is None:
                 try:
                     self.rescan()
                 except GhError as e:  # the page still loads, with the list it has and why
-                    scan_error = str(e)
+                    scan_error, scan_cause = str(e), cause_of(e)
             user = cache.get("user", lambda: gh_json(["api", "user"]) or {}, ttl=3600)
             rate = cache.get("rate", lambda: ((gh_json(["api", "rate_limit"]) or {}).get("resources") or {}), fresh=fresh)
             return self.send(200, dict(self.repo_list(), viewer=user.get("login"), scan_error=scan_error,
-                                       rate={k: rate.get(k) for k in ("core", "graphql")}, now=iso(now_utc())))
+                                       scan_cause=scan_cause, rate={k: rate.get(k) for k in ("core", "graphql")}, now=iso(now_utc())))
         m = re.fullmatch(r"/api/repo/([^/]+)/([^/]+)(/inbox|/gate)?", path)
         if not m:
             raise ApiError(404, "not found")

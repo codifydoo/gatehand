@@ -28,6 +28,11 @@
 #      schedules come from the workflow files on the default branch, not policy.json; no `schedule:`
 #      (or no file) is null; a file, or a shape of `on:`, that cannot be read is "unknown" and listed
 #      under the errors, never "no schedule". The next run is POSIX cron's, in UTC.
+#  10. A failed read says why, from a fixed set (SSO not authorized, signed out, rate limited with
+#      the time the exhausted limit resets, not found, too little access), beside its text: in each
+#      `unreadable` entry of a repository and in a failed request's 502. Each cause is matched on
+#      one sample in the shape gh prints; a message that matches nothing, and a reset time that
+#      cannot be read, stay unknown: the page acts on a cause, so a guess would send you the wrong way.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -42,7 +47,8 @@ expect() { if [[ "$2" == "$3" ]]; then t_pass "$1"; else t_fail "$1: expected '$
 
 TMP="$(mktemp -d)"
 SRV=""
-trap '[[ -n "${SRV}" ]] && kill "${SRV}" 2>/dev/null; rm -rf "${TMP}" "${STUB_DIR:-}"' EXIT
+SRV2=""
+trap '[[ -n "${SRV}" ]] && kill "${SRV}" 2>/dev/null; [[ -n "${SRV2}" ]] && kill "${SRV2}" 2>/dev/null; rm -rf "${TMP}" "${STUB_DIR:-}"' EXIT
 export AGENT_NOW_EPOCH=1794657600 # 2026-11-14T12:00:00Z
 stub_gh_init
 
@@ -206,6 +212,56 @@ for r in ("o/r", "my-org/repo.name", "o/r_1"):
     check("repo name ok: %r" % r, d.valid_repo(r), True)
 for r in ("o/..", "o/.", "../r", "o/r/x", "o", "-o/r", "o/r?x", "o/r%2F", "", "o/r\n", "o\n/r"):
     check("repo name refused: %r" % r, d.valid_repo(r), False)
+
+# 10. Why a read failed. Each sample is in the shape gh prints (pkg/cmd/api/api.go: "gh: <message>
+# (HTTP <status>)", the SSO line; pkg/cmd/root: the signed-out text and exit 4); the messages inside
+# are GitHub's.
+causes = [
+    ("SAML: gh's SSO line", 1, "gh: Resource protected by organization SAML enforcement. You must grant your Personal Access token access to this organization. (HTTP 403)\nAuthorize in your web browser: https://github.com/orgs/o/sso?authorization_request=x", [], "sso"),
+    ("SAML over GraphQL: the message beats its FORBIDDEN type", 1, "gh: Resource protected by organization SAML enforcement. You must grant your OAuth token access to this organization.", ["FORBIDDEN"], "sso"),
+    ("signed out: no login at all", 4, "To get started with GitHub CLI, please run:  gh auth login\nAlternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.", [], "signed_out"),
+    ("signed out: gh's exit code alone", 4, "", [], "signed_out"),
+    ("signed out: a revoked token", 1, "gh: Bad credentials (HTTP 401)", [], "signed_out"),
+    ("rate limited: the primary limit", 1, "gh: API rate limit exceeded for user ID 1. If you reach out to GitHub Support for help, please include the request ID A:B. (HTTP 403)", [], "rate_limited"),
+    ("rate limited: a secondary limit", 1, "gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)", [], "rate_limited"),
+    ("rate limited: a secondary limit's older name", 1, "gh: You have triggered an abuse detection mechanism. Please wait a few minutes before you try again. (HTTP 403)", [], "rate_limited"),
+    ("rate limited: a GraphQL RATE_LIMITED type", 1, "gh: something new", ["RATE_LIMITED"], "rate_limited"),
+    ("not found: REST", 1, "gh: Not Found (HTTP 404)", [], "not_found"),
+    ("not found: a GraphQL NOT_FOUND type", 1, "gh: Could not resolve to a Repository with the name 'o/r'.", ["NOT_FOUND"], "not_found"),
+    ("no access: REST", 1, "gh: Must have admin rights to Repository. (HTTP 403)", [], "no_access"),
+    ("no access: an App token", 1, "gh: Resource not accessible by integration (HTTP 403)", [], "no_access"),
+    ("unknown: a server error", 1, "gh: Bad Gateway (HTTP 502)", [], "unknown"),
+    ("unknown: a timeout", -1, "Command '['gh', 'api', 'user']' timed out after 60 seconds", [], "unknown"),
+    ("unknown: an unrecognised message and type", 1, "gh: the forbidden word, not found anywhere", ["INTERNAL"], "unknown"),
+    ("unknown: nothing printed", 1, "", [], "unknown"),
+]
+for name, rc, err, types, want in causes:
+    check("cause: " + name, d.read_cause(rc, err, types), want)
+check("every cause is one of the fixed set", {d.read_cause(rc, err, t) for _, rc, err, t, _ in causes} <= set(d.CAUSES), True)
+check("a GraphQL call counts against the graphql limit", d.GhError(["api", "graphql", "-f", "q"], 1, "x").resource, "graphql")
+check("a REST call against core", d.GhError(["api", "repos/o/r"], 1, "x").resource, "core")
+
+d._rate["at"] = None
+d.gh_json = lambda args, stdin=None: {"resources": {"core": {"remaining": 0, "reset": 1794661200}, "graphql": {"remaining": 9, "reset": 1794661200}}}
+check("rate limited: when the exhausted limit resets", d.cause_of(d.GhError(["api", "repos/o/r"], 1, "gh: API rate limit exceeded for user ID 1. (HTTP 403)")),
+      {"cause": "rate_limited", "resets_at": "2026-11-14T13:00:00Z"})
+check("rate limited, but not that limit (a secondary one): no time is guessed",
+      d.cause_of(d.GhError(["api", "graphql"], 1, "gh: You have exceeded a secondary rate limit. (HTTP 403)")),
+      {"cause": "rate_limited", "resets_at": None})
+d._rate["at"] = None
+d.gh_json = lambda args, stdin=None: {"resources": {"core": {"remaining": 0, "reset": 1794657600}}}
+check("rate limited, but the limit read as exhausted has reset since: no stale time", d.rate_reset("core"), None)
+d._rate["at"] = None
+d.gh_json = lambda args, stdin=None: ["not", "an object"]
+check("rate limited, and /rate_limit answered nonsense: no time, no crash", d.rate_reset("core"), None)
+d._rate["at"] = None
+d.gh_json = lambda args, stdin=None: {"resources": {"core": {"remaining": 0, "reset": 10 ** 20}}}
+check("rate limited, and a reset time no clock can hold: no time, no crash", d.rate_reset("core"), None)
+def unreadable(args, stdin=None):
+    raise d.GhError(args, 1, "gh: HTTP 500")
+d._rate["at"], d.gh_json = None, unreadable
+check("rate limited, and the limits unreadable: no time", d.rate_reset("core"), None)
+check("any other cause carries no time", d.cause_of(d.GhError(["api", "x"], 1, "gh: Not Found (HTTP 404)")), {"cause": "not_found"})
 PY
 while IFS= read -r line; do
   case "${line}" in
@@ -231,13 +287,14 @@ q1() { jq -nc --arg p "${POLICY}" --arg perm "${PERM:-ADMIN}" --argjson wf "${WF
 q2() { # q2 <cur-blob-json> <breaker-blob-json>
   jq -nc --argjson c "$1" --argjson b "$2" '{data: {repository: {cur: $c, prev: $c, breaker: $b, wfRunner: {oid: "a"}, wfMain: {oid: "a"}}}}'
 }
+RATE_OK='{"resources":{"core":{"remaining":4999,"limit":5000}}}'
 rules() {
   stub_gh_reset_rules
   stub_gh_on "api graphql -f query=query(\$cursor*" '{"data":{"viewer":{"repositories":{"pageInfo":{"hasNextPage":false},"nodes":[
     {"nameWithOwner":"o/r","isArchived":false,"lock":{"oid":"1"}},{"nameWithOwner":"o/plain","isArchived":false,"lock":null},
     {"nameWithOwner":"o/old","isArchived":true,"lock":{"oid":"2"}}]}}}}'
   stub_gh_on "api user" '{"login":"owner-login"}'
-  stub_gh_on "api rate_limit" '{"resources":{"core":{"remaining":4999,"limit":5000}}}'
+  stub_gh_on "api rate_limit" "${RATE_OUT:-${RATE_OK}}"
   stub_gh_on "${Q1}" "$(q1)"
   stub_gh_on "${Q2}" "${Q2_OUT}" "${Q2_RC:-0}" "${Q2_ERR:-}"
   stub_gh_on "api -H Accept: application/vnd.github.raw repos/o/r/contents/runs/2026-11.jsonl?ref=agent-ledger" "${RAW_LEDGER:-}"
@@ -367,6 +424,11 @@ VARS_OUT="" VARS_RC=1 VARS_ERR="HTTP 403: Must have admin rights to Repository."
 rules
 r="$(get '/api/repo/o/r?fresh=1')"
 expect "unreadable variables: unknown, not off" "$(jq -c '[.vars, .owner_login, .inbox, .inbox_state]' <<<"${r}")" '[null,null,null,"unknown"]'
+expect "10. and why, beside the text: too little access" "$(jq -c '[.unreadable[] | [.part, .cause, .error == "variables: your login cannot read this repository'"'"'s Actions variables"]]' <<<"${r}")" '[["variables","no_access",true]]'
+VARS_ERR=$'gh: Resource protected by organization SAML enforcement. You must grant your Personal Access token access to this organization. (HTTP 403)\nAuthorize in your web browser: https://github.com/orgs/o/sso?authorization_request=x'
+rules
+r="$(get '/api/repo/o/r?fresh=1')"
+expect "10. a SAML 403 on the variables: sso, and its own text, not \"cannot read\"" "$(jq -c '[[.unreadable[] | [.part, .cause]], (.errors | map(select(startswith("variables:"))) | .[0] | contains("SAML"))]' <<<"${r}")" '[[["variables","sso"]],true]'
 expect "and the inbox's requests are an unknown, waiting" "$(jq -r '[.waiting[] | select(.kind == "unknown")] | length' <<<"${r}")" 1
 VARS_OUT="${VARS_OK}" VARS_RC=0 VARS_ERR=""
 # Issues unreadable: no queue, no PRs, no inbox, and it says so where blocked issues would be.
@@ -374,6 +436,7 @@ ISSUES_OUT="" ISSUES_RC=1 ISSUES_ERR="HTTP 502: Bad Gateway"
 rules
 r="$(get '/api/repo/o/r?fresh=1')"
 expect "unreadable issues: unknown, not empty" "$(jq -c '[.issues, .prs, .inbox]' <<<"${r}")" "[null,null,null]"
+expect "10. a failure it does not recognise: unknown, never a guess" "$(jq -c '[.unreadable[] | [.part, .cause]]' <<<"${r}")" '[["issues","unknown"]]'
 expect "and two unknowns wait (issues, inbox)" "$(jq -r '[.waiting[] | select(.kind == "unknown")] | length' <<<"${r}")" 2
 ISSUES_OUT="${ISSUES_OK}" ISSUES_RC=0 ISSUES_ERR=""
 
@@ -405,6 +468,46 @@ stub_gh_reset_rules
 stub_gh_on "${Q1}" "" 1 "HTTP 502: Bad Gateway"
 r="$(get '/api/repo/o/r?fresh=1')"
 expect "an unreadable repository waits as unknown" "$(jq -c '[.waiting[].kind]' <<<"${r}")" '["unknown"]'
+
+# 10. Why: each failed read carries its cause. A SAML refusal on the whole repository:
+stub_gh_reset_rules
+stub_gh_on "${Q1}" "" 1 $'gh: Resource protected by organization SAML enforcement. You must grant your Personal Access token access to this organization. (HTTP 403)\nAuthorize in your web browser: https://github.com/orgs/o/sso?authorization_request=x'
+r="$(get '/api/repo/o/r?fresh=1')"
+expect "a SAML-protected repository: sso" "$(jq -c '[.unreadable[] | [.part, .cause]]' <<<"${r}")" '[["repository","sso"]]'
+expect "and the text is still there" "$(jq -r '.errors[0][:11]' <<<"${r}")" "repository:"
+stub_gh_reset_rules
+stub_gh_on "${Q1}" '{"data":{"repository":null}}'
+r="$(get '/api/repo/o/r?fresh=1')"
+expect "a repository GitHub returns as null: not_found" "$(jq -c '[.unreadable[] | [.part, .cause]]' <<<"${r}")" '[["repository","not_found"]]'
+# The ledger rate-limited: when the exhausted (GraphQL) limit resets, read from /rate_limit.
+Q2_OUT="" Q2_RC=1 Q2_ERR="gh: API rate limit exceeded for user ID 1. (HTTP 403)"
+RATE_OUT='{"resources":{"core":{"remaining":4999,"limit":5000,"reset":1794661200},"graphql":{"remaining":0,"limit":5000,"reset":1794661200}}}'
+rules
+r="$(get '/api/repo/o/r?fresh=1')"
+expect "a rate-limited ledger: rate_limited, with the reset time" "$(jq -c '[.unreadable[] | [.part, .cause, .resets_at]]' <<<"${r}")" '[["ledger","rate_limited","2026-11-14T13:00:00Z"]]'
+unset Q2_RC Q2_ERR RATE_OUT
+# A failed request as a whole (the page's d.failed, the gate's and the inbox's error): the 502 says why.
+# The repository is read (and cached) first: the inbox endpoint needs its inbox issue.
+rules
+get '/api/repo/o/r?fresh=1' >/dev/null
+stub_gh_reset_rules
+stub_gh_on "api repos/o/r/actions/workflows/agent-merge.yml/runs?status=completed&per_page=30" "" 4 $'To get started with GitHub CLI, please run:  gh auth login\nAlternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.'
+stub_gh_on "api graphql -f name=r -F number=7 -f owner=o -f query=query(\$owner*" '{"data":null,"errors":[{"type":"NOT_FOUND","message":"Could not resolve to an Issue with the number of 7."}]}' 1 "gh: Could not resolve to an Issue with the number of 7."
+c="$(curl -s -o "${TMP}/gate.json" -w '%{http_code}' -H "X-Gatehand-Token: ${TOKEN}" "${B}/api/repo/o/r/gate?fresh=1")"
+expect "a signed-out gh: the gate's 502 says signed_out" "${c} $(jq -r .cause "${TMP}/gate.json")" "502 signed_out"
+expect "an inbox GraphQL can no longer resolve: not_found, from the error's type" "$(get '/api/repo/o/r/inbox?fresh=1' | jq -c '[.cause, (.error | startswith("gh api graphql"))]')" '["not_found",true]'
+rules
+# A first scan that fails: the session still loads, with the scan's cause (a second server, never scanned).
+stub_gh_reset_rules
+stub_gh_on "api graphql -f query=query(\$cursor*" "" 1 "gh: Bad credentials (HTTP 401)"
+stub_gh_on "api user" '{"login":"owner-login"}'
+stub_gh_on "api rate_limit" "${RATE_OK}"
+python3 "${PKG}/bin/dashboard.py" --no-open --idle-minutes 0 --config "${TMP}/cfg2/dashboard.json" --ready-file "${TMP}/ready2" >"${TMP}/srv2.log" 2>&1 &
+SRV2=$!
+for _ in $(seq 1 50); do jq -e .port "${TMP}/ready2" >/dev/null 2>&1 && break; sleep 0.1; done
+s2="$(curl -s -H "X-Gatehand-Token: $(jq -r .token "${TMP}/ready2")" "http://127.0.0.1:$(jq -r .port "${TMP}/ready2")/api/session")"
+kill "${SRV2}" 2>/dev/null
+expect "a first scan that fails: scan_cause beside scan_error" "$(jq -c '[.scan_cause.cause, (.scan_error | test("HTTP 401"))]' <<<"${s2}")" '["signed_out",true]'
 rules
 
 # 6. read only. An allowlist of read shapes, not a list of write ones: a GraphQL call must be a
