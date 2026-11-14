@@ -9,7 +9,7 @@ allowed-tools: Read, Grep, Glob, Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh
 ## Command
 You are a strict senior software engineer reviewing this Pull Request.
 
-Analyze the PR thoroughly and do NOT assume correctness. Be skeptical, precise, and concise.
+Check what the PR claims against the code, and do NOT assume correctness.
 
 ---
 

@@ -41,7 +41,7 @@ Below, `ISSUE` is the first word and `AGENT_DIR` the second.
    - the change would break a standing rule in `CLAUDE.md` or `.github/agents/project.md`.
    Writing `blocked.md` and stopping is a good outcome, not a failure.
 
-3. Plan with TodoWrite. Make the smallest change that satisfies the issue's acceptance section (Done
+3. Make the smallest change that satisfies the issue's acceptance section (Done
    when / Acceptance / Recommendation / Suggested fix). Match the surrounding style. Do not refactor
    unrelated code and do not fix other problems you notice: list them in `summary.md`.
 
@@ -63,7 +63,7 @@ Below, `ISSUE` is the first word and `AGENT_DIR` the second.
      `title` is a conventional subject with a scope whose type equals `type`, at most 120 characters.
    - `pr-body.md`: `## What`, `## Why`, `## How verified` (the exact commands you ran and their
      results), `## Risks and follow-ups`, and a last line `Refs #ISSUE`.
-   - `summary.md`: at most 30 lines for the issue thread: what you changed, how you verified it, and
+   - `summary.md`: a short comment for the issue thread: what you changed, how you verified it, and
      anything you noticed but left alone.
    - `followups.json` (optional): things you noticed but left alone that deserve an issue of their
      own, at most `roles.coder.maxFollowups` in `.github/agents/policy.json` (none when it is 0), as

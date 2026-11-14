@@ -17,9 +17,8 @@ The package root is two directories above this file (`<root>/skills/dashboard/SK
    If no browser opened, tell the user to run the command themselves in a terminal, where it can
    print the address with `--print-url`.
 4. Tell the user it is open, and that "Find repositories" rescans their repositories for
-   `.github/agents/install.lock.json`. Its buttons (answer an inbox request, rerun, pause or resume
-   a role, unqueue, hold, hand a PR back) act as the user with their own login after they confirm
-   each one in the page; never drive them yourself.
+   `.github/agents/install.lock.json`. Its buttons act as the user with their own
+   login after they confirm each one in the page; never drive them yourself.
 
 Its list of repositories is kept in `${XDG_CONFIG_HOME:-~/.config}/gatehand/dashboard.json`. The
 security model is in `<root>/docs/dashboard.md`.

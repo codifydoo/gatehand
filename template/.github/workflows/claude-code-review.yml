@@ -274,7 +274,7 @@ jobs:
           #     comment cannot start another review (GitHub's recursion guard).
           # A repo that runs this on fork PRs through pull_request_target loses the first; split
           # the post into a separate job there rather than narrowing the wildcard.
-          # MODEL, set explicitly (policy.json roles.review.model, rendered here): without --model
+          # MODEL, set explicitly (policy.json review.model, rendered here): without --model
           # the CLI default applies, which can be a smaller model than the one the merge gate is
           # meant to trust. Gatehand's tests/commands/verify-pr.test.sh pins it. claude-code-action installs its
           # own pinned CLI, so after changing the model, dispatch a review and check that the agent
