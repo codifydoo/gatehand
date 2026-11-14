@@ -244,6 +244,8 @@ get() { curl -s -H "X-Gatehand-Token: ${TOKEN}" "${B}$1"; }
 # 1. who may talk to it
 expect "the page itself loads" "$(code "${B}/")" 200
 expect "the page carries the CSP" "$(curl -sI "${B}/" | grep -ci "^content-security-policy: default-src 'none'; script-src 'self'")" 1
+# A browser that suppresses native dialogs answers them "Cancel" unseen: the page asks in its own.
+expect "the page never uses a native dialog" "$(curl -s "${B}/app.js" | grep -cE '\b(window\.)?(confirm|prompt|alert)\(')" 0
 expect "no secret: refused" "$(code "${B}/api/session")" 401
 expect "a wrong secret: refused" "$(code -H "X-Gatehand-Token: nope" "${B}/api/session")" 401
 expect "a foreign Host (DNS rebinding): refused" "$(code -H "X-Gatehand-Token: ${TOKEN}" -H "Host: evil.example:${PORT}" "${B}/api/session")" 421

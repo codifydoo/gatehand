@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.1 (2026-11-14)
+
+- The runbook installed in each repository (`.github/agents/README.md`) now has a section on the
+  dashboard: how to open it, what its buttons do, and what stays on GitHub.
+- Fixed: the dashboard's buttons did nothing in a browser that suppresses native dialogs (an app's
+  or an editor's built-in browser answers `confirm()` with "Cancel" without showing it). The page
+  now asks in a dialog of its own: OK, Cancel or Esc, and a text field for a reject reason.
+- The update changes only the runbook in your repositories (the dashboard runs from the plugin),
+  not `agent-coder.yml` or `agent-fixup.yml`, so no runner-ref fast-forward is needed.
+
 ## 0.6.0 (2026-11-14)
 
 - The dashboard can now start and stop the agents' work. Start the coder (an auto pick, with every
