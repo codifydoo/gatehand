@@ -26,7 +26,7 @@ number of things waiting for you is also in the tab's title.
 |---|---|---|
 | Needs you | one row per thing you act on, newest first: open inbox requests, stopped roles, agent PRs held for a person, blocked issues with no open request; folded below them, agent PRs that passed the merge gate while auto-merge is a dry run ("to merge"), and merged issues to close once live ("to close") | the inbox issue's "Open requests" list and, when it lists any, the request comments themselves (only they say what kind a request is, and whether it was answered; when they cannot be read, or a line's comment is older than the newest 1,000, the kind is told from the line's text); `state/breaker.json` on the ledger branch; labels; and, for a repository in dry run with agent PRs, the merge gate's report |
 | Activity | Gatehand's runs that are running or waiting to start, in every repository | the running and queued Actions runs of Gatehand's nine workflows |
-| Week | each repository's runs over seven days per role: outcomes, runs today against `runsPerDay`, turns, time, cost | the ledger |
+| Week | the last seven days (today partial): the cost, as a floor, against your weekly budget with a warning line; cost by day against the budget's daily pace; runs, cost and runs with no cost by repository; runs, outcomes, turns, time and cost by role; PRs the merge gate merged and coder runs that opened a PR | the ledger, the budget in the config file |
 | Repositories | version, `AGENTS_ENABLED`, `AGENT_AUTO_MERGE`, runs today against each role's `runsPerDay`, seven-day cost, breakers, health | `install.lock.json`, the repository's Actions variables, the ledger, the runner ref's copy of `agent-coder.yml` against the default branch's |
 | A repository, Pipeline | its inbox requests in full, agent PRs with the merge gate's last word on each, the queue by priority, in progress, blocked, candidates, on hold, merged to close | the inbox issue's newest 1,000 comments (the agent bot's only), the job logs of the newest three `Agent merge` runs that ran (a PR's newest line wins, so a run dispatched for one PR does not hide the others), labels |
 | A repository, Agents | each role's breaker, runs running now | the ledger, Actions runs |
@@ -263,7 +263,18 @@ The server keeps a weekly budget in US dollars, and a warning line as a share of
 set another). It is a personal setting on the machine the dashboard runs on, kept in the same config
 file as the repository list (`budget_usd`, `budget_warn`): nothing is written to GitHub,
 `policy.json` does not hold it, and no agent reads it. It is for warning only and stops nothing; to
-stop the agents, turn them off. The page does not show or set it yet.
+stop the agents, turn them off. Week sets, changes and clears it ("Set a budget…", then "Edit
+budget…"), and shows the seven-day cost against it: a bar with the warning line, the share spent,
+and, over the budget, the repository that spent most. Over the warning line the sidebar's Week
+figure turns amber. With no budget it shows the cost and no bar. With no runs it says so, with the
+budget and the last run it knows of; a ledger that could not be read is named, and the total is "?".
+
+That cost is a floor, never a total: a ledger row with no `cost_usd` adds nothing and is counted and
+listed beside it, Claude review runs are not in the ledger, and a repository that cannot be read is
+named and adds nothing, never $0. The merge gate's rows are merges, not model runs, and count only
+in "PRs merged by the gate"; a PR merged by hand leaves no row. Week counts seven calendar days on
+your computer's clock, today the last; the cost columns on Repositories and Runs and spend count
+the server's last 168 hours, so they can differ from it by part of a day.
 
 `POST /api/budget` takes exactly `{"weekly_usd": <number of 0 or more, or null to clear>,
 "warn_at": <share from 0 to 1, or null for the default>}` (`warn_at` may be left out to keep it);

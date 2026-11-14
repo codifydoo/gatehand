@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Week shows the last seven days' cost as a floor against a weekly budget you set on the page (kept
+  on this machine, #28), with its warning line; cost by day against the budget's pace, by repository
+  and outcomes by role; PRs merged by the gate and coder runs that opened a PR. Runs with no cost
+  recorded are counted and listed, and an unreadable repository is named, never $0. Over the
+  warning line the sidebar's Week figure turns amber; nothing is paused.
 - The dashboard is laid out as a sidebar and views instead of one long page: Needs you, Activity,
   Week, a Repositories list, and per repository four tabs (Pipeline, Agents, Runs and spend,
   Settings). The view is in the address, so a reload or a link keeps it, and the number waiting for
@@ -34,8 +39,7 @@
 - Dashboard: a weekly budget in US dollars and a warning line (a share of it, 80% by default), kept
   in the dashboard's local config file, set through `POST /api/budget` and returned by
   `/api/session`. A setting on this machine only: nothing is written to GitHub, no agent reads it,
-  and it stops nothing. A config file from before loads unchanged. The page does not show or set it
-  yet (#28).
+  and it stops nothing. A config file from before loads unchanged (#28).
 - Nothing installed into repositories changes: no update is needed.
 
 ## 0.7.0 (2026-11-14)

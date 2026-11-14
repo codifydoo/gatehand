@@ -374,16 +374,17 @@ function counts() {
     if (x.unknown) { c.needsUnknown = true; c.unread.push(repo); }
     const d = state.repos[repo];
     if (!d || d.loading) { c.loading = true; continue; }
-    if (d.failed) { c.runningUnknown = c.costFloor = true; continue; }
+    if (d.failed) { c.runningUnknown = true; continue; }
     const t = totals(d);
     c.running += t.active;
     if (t.unknown.has("active")) c.runningUnknown = true;
-    if (d.stats) {
-      c.costSeen = true;
-      c.cost += t.cost;
-      if ((d.runs || []).some((r) => typeof r.cost_usd !== "number")) c.costFloor = true;
-    } else c.costFloor = true;
   }
+  // The same seven days, and the same floor, as the Week view; amber from the budget's warning line.
+  const w = week();
+  c.cost = w.cost;
+  c.costSeen = w.read > 0;
+  c.costFloor = w.noCost.length > 0 || w.unread.length > 0;
+  c.costKind = w.level && (w.level.warned || w.level.over) ? "warn" : "";
   const n = (v, unknown, loading) => (unknown && !v && !loading ? "?" : `${v}${loading || unknown ? "+" : ""}`);
   c.needsText = n(c.needs, c.needsUnknown, c.needsLoading);
   c.runningText = c.loading || c.running || c.runningUnknown ? `${n(c.running, c.runningUnknown, c.loading)} running` : "none running";
@@ -413,7 +414,7 @@ function renderSide() {
   replace($("side"),
     item("/needs", r.view === "needs", "Needs you", c.needsText, c.needs ? "attn" : (c.needsUnknown ? "warn" : "")),
     item("/activity", r.view === "activity", "Activity", c.runningText),
-    item("/week", r.view === "week", "Week", c.costText),
+    item("/week", r.view === "week", "Week", c.costText, c.costKind),
     item("/repos", r.view === "repos", `Repositories · ${repos.length}`, null, null, "side-head"),
     repos.map((repo) => {
       const [badge, kind] = repoBadge(repo);
@@ -1143,17 +1144,264 @@ function activityView() {
     blocks.length ? blocks : empty(c.loading ? "Loading…" : "Nothing is running.")];
 }
 
-function weekView() {
-  const c = counts();
-  const blocks = (state.session ? state.session.repos : []).map((repo) => {
+// --- Week: seven days of cost against the weekly budget kept on this machine ---------------------------
+// Seven calendar days on this computer's clock, today the last and partial. The server keeps 168
+// hours of ledger rows, which covers the first day but for up to an hour in the week after clocks go
+// back: a floor still, never more than was spent. The cost is a floor: a run with no cost
+// recorded adds nothing and is counted and named, Claude review runs are not in the ledger, and a
+// repository that could not be read is named, never counted as $0. The merge gate's rows are not
+// model runs: they cost nothing and count only as merges.
+const num = (v) => typeof v === "number" && isFinite(v);
+function week() {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - 6);
+  const days = [];
+  for (let i = 0; i < 7; i++) { const d = new Date(start); d.setDate(start.getDate() + i); days.push({ date: d, cost: 0, runs: 0 }); }
+  // Keyed by text from the ledger: no prototype, so a role named "constructor" is just a role.
+  const w = { days, repos: [], roles: Object.create(null), cost: 0, runs: 0, noCost: [], merged: 0, read: 0, unread: [], loading: [] };
+  for (const repo of state.session ? state.session.repos : []) {
     const d = state.repos[repo];
-    if (!d || d.loading) return null;
-    if (d.failed) return h("div", { class: "group" }, repoHeading(repo), empty(`Could not read this repository: ${d.failed}`));
-    return h("div", { class: "group" }, repoHeading(repo), ledgerTables(d));
-  }).filter(Boolean);
-  return [viewHead("Week", `${c.costText} over the last seven days`,
-    c.costFloor ? " · at least: runs with no cost recorded count for nothing, and Claude review runs are not in the ledger" : ""),
-    blocks.length ? blocks : empty(c.loading ? "Loading…" : "No repositories.")];
+    if (!d || d.loading) { w.loading.push(repo); w.repos.push({ repo, loading: true }); continue; }
+    if (d.failed || !Array.isArray(d.runs)) {
+      w.unread.push(repo);
+      w.repos.push({ repo, unread: d.failed || "could not read the ledger branch" });
+      continue;
+    }
+    w.read += 1;
+    const r = { repo, runs: 0, cost: 0, noCost: 0 };
+    for (const x of d.runs) {
+      const at = Date.parse(x.started_at || x.ended_at || "");
+      if (!(at >= start.getTime())) continue;
+      if (x.role === "merger") { if (x.outcome === "merged") w.merged += 1; continue; }
+      const role = String(x.role || "?");
+      const s = w.roles[role] || (w.roles[role] = { runs: 0, outcomes: Object.create(null), turns: null, ms: null, cost: 0, noCost: 0 });
+      let day = days[0];
+      for (const dd of days) if (dd.date.getTime() <= at) day = dd;
+      s.runs += 1; r.runs += 1; w.runs += 1; day.runs += 1;
+      const o = String(x.outcome || "none");
+      s.outcomes[o] = (s.outcomes[o] || 0) + 1;
+      if (num(x.turns)) s.turns = (s.turns || 0) + x.turns;
+      if (num(x.duration_ms)) s.ms = (s.ms || 0) + x.duration_ms;
+      if (num(x.cost_usd)) { s.cost += x.cost_usd; r.cost += x.cost_usd; w.cost += x.cost_usd; day.cost += x.cost_usd; }
+      else { s.noCost += 1; r.noCost += 1; w.noCost.push(Object.assign({ repo }, x)); }
+    }
+    w.repos.push(r);
+  }
+  w.floor = w.noCost.length > 0 || w.unread.length > 0 || w.loading.length > 0;
+  w.level = budgetLevel(w.cost);
+  return w;
+}
+// Where the cost stands against the budget, or null with no budget set. Over the warning line, and
+// over the budget, are each a floor reached: the cost can only be higher.
+function budgetLevel(cost) {
+  const b = state.session && state.session.budget;
+  if (!b || !num(b.weekly_usd)) return null;
+  const usd = b.weekly_usd;
+  const warn = num(b.warn_at) ? b.warn_at : 0.8;
+  return { usd, warn, warnUsd: usd * warn, pct: usd > 0 ? cost / usd : null,
+    warned: cost > 0 && cost >= usd * warn, over: cost > usd };
+}
+const money = (n) => (Math.round(n * 100) % 100 ? usd(n) : `$${Math.round(n).toLocaleString("en-US")}`);
+const pctText = (p) => `${Math.round(p * 100)}%`;
+const hoursText = (ms) => { const m = Math.round(ms / 60000); return num(ms) ? `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")}` : "–"; };
+const sized = (el, prop, value) => { el.style[prop] = value; return el; }; // CSSOM, which the CSP allows; a style attribute it does not
+
+function budgetForm(w) {
+  const b = state.session.budget || {};
+  const e = state.budgetEdit;
+  const set = num(b.weekly_usd);
+  const save = async (body) => {
+    e.busy = true; e.error = ""; renderView();
+    try {
+      const got = await api("/api/budget", { method: "POST", body });
+      state.session.budget = got.budget;
+      state.budgetEdit = null;
+      state.focusId = "budget-edit";
+    } catch (err) {
+      e.error = `Not saved: ${err.message}`;
+      state.focusId = "budget-usd";
+    } finally {
+      if (state.budgetEdit) state.budgetEdit.busy = false;
+      renderAll();
+    }
+  };
+  const submit = (ev) => {
+    ev.preventDefault();
+    const usdText = e.usd.trim();
+    const warnText = e.warn.trim();
+    const v = Number(usdText);
+    const p = Number(warnText);
+    if (!usdText || !isFinite(v) || v < 0) { e.error = "The budget is a number of dollars, 0 or more (Clear removes it)."; state.focusId = "budget-usd"; return renderView(); }
+    if (!warnText || !isFinite(p) || p < 0 || p > 100) { e.error = "The warning line is a percentage from 0 to 100."; state.focusId = "budget-warn"; return renderView(); }
+    save({ weekly_usd: v, warn_at: p / 100 });
+  };
+  const field = (id, label, key, attrs) => h("label", { for: id }, label,
+    h("input", Object.assign({ id, type: "number", inputmode: "decimal", autocomplete: "off", disabled: e.busy,
+      oninput: (ev) => { e[key] = ev.currentTarget.value; } }, attrs)));
+  const form = h("form", { class: "budget-form", novalidate: true, onsubmit: submit }, // its own messages, not the browser's
+    field("budget-usd", "Weekly budget, US dollars", "usd", { min: "0", step: "any" }),
+    field("budget-warn", "Warn at, % of it", "warn", { min: "0", max: "100", step: "any" }),
+    h("div", { class: "actions" },
+      h("button", { type: "submit", disabled: e.busy }, "Save"),
+      set ? h("button", { type: "button", class: "quiet", disabled: e.busy, onclick: () => save({ weekly_usd: null }) }, "Clear the budget") : null,
+      h("button", { type: "button", class: "quiet", disabled: e.busy, onclick: () => { state.budgetEdit = null; state.focusId = "budget-edit"; renderView(); } }, "Cancel")),
+    e.error ? h("div", { class: "state refused", role: "alert" }, e.error) : null,
+    h("p", { class: "muted small" }, "Kept in the dashboard's config file on this machine, for you only. Nothing is written to GitHub, the agents do not read it, and it stops nothing: it only warns."));
+  // The values typed so far: a re-render (data arriving) draws the form again from them.
+  form.querySelector("#budget-usd").value = e.usd;
+  form.querySelector("#budget-warn").value = e.warn;
+  return form;
+}
+function openBudget() {
+  const b = state.session.budget || {};
+  state.budgetEdit = { usd: num(b.weekly_usd) ? String(b.weekly_usd) : "", warn: String(Math.round((num(b.warn_at) ? b.warn_at : 0.8) * 1000) / 10), busy: false, error: "" };
+  state.focusId = "budget-usd";
+  renderView();
+}
+
+const budgetControls = (w) => (state.budgetEdit ? budgetForm(w)
+  : h("div", { class: "actions" }, h("button", { id: "budget-edit", type: "button", class: "quiet", onclick: openBudget }, w.level ? "Edit budget…" : "Set a budget…")));
+
+// No runs this week in any repository read (3e): the budget line, and the last run when a ledger row
+// older than this week is still in the server's seven days. A ledger that could not be read is said,
+// and makes the total "?", never $0.00.
+function weekEmpty(w) {
+  const repos = state.session.repos;
+  const name = (repo) => (repos.filter((x) => short(x) === short(repo)).length > 1 ? repo : short(repo));
+  let last = null;
+  for (const repo of repos) {
+    const d = state.repos[repo];
+    for (const x of (d && Array.isArray(d.runs) ? d.runs : [])) {
+      const at = Date.parse(x.started_at || x.ended_at || "");
+      if (x.role !== "merger" && at && (!last || at > last.at)) last = { at, repo };
+    }
+  }
+  const failed = w.unread.filter((r) => state.repos[r] && state.repos[r].failed);
+  const noLedger = w.unread.filter((r) => !failed.includes(r));
+  const line = [w.level ? `${w.unread.length ? "?" : usd(0)} of a ${money(w.level.usd)} budget.` : "",
+    last ? `The last run was ${new Date(last.at).toLocaleDateString("en-US", { month: "short", day: "numeric" })} in ${name(last.repo)}.` : ""].filter(Boolean).join(" ");
+  return h("div", { class: "week-total" },
+    w.read ? h("p", {}, `No runs in the last seven days${w.unread.length ? " in the repositories read" : ""}.`) : null,
+    noLedger.length ? h("p", { class: "warn" }, `Could not read the ledger branch of ${noLedger.map(name).join(", ")}.`) : null,
+    failed.length ? h("p", { class: "warn" }, `Could not read ${failed.map(name).join(", ")}.`) : null,
+    line ? h("p", { class: "muted" }, line) : null,
+    budgetControls(w));
+}
+
+function weekTotal(w) {
+  const repos = state.session.repos;
+  const name = (repo) => (repos.filter((x) => short(x) === short(repo)).length > 1 ? repo : short(repo));
+  const L = w.level;
+  const kind = L && L.over ? "bad" : (L && L.warned ? "warn" : "");
+  const shownCost = w.read ? usd(w.cost) : "?";
+  const lines = [];
+  lines.push(h("div", { class: `week-fig ${kind}` }, shownCost,
+    h("span", { class: "muted" }, [w.floor && w.read ? " at least" : "", L ? `${w.floor && w.read ? "," : ""} of a ${money(L.usd)} weekly budget` : ""].join(""))));
+  if (L && w.read) {
+    const where = L.over ? "over the budget" : `${L.warned ? "over" : "under"} the ${pctText(L.warn)} line`;
+    lines.push(h("div", { class: kind || "muted" }, L.pct === null ? where : `${pctText(L.pct)} · ${where}`));
+    // The bar is the budget: over it, the bar is full.
+    const filled = L.usd > 0 ? Math.min(100, (w.cost / L.usd) * 100) : (w.cost > 0 ? 100 : 0);
+    const meter = h("div", { class: "meter", role: "img", "aria-label": `${usd(w.cost)} of ${money(L.usd)}, the warning line at ${money(L.warnUsd)}` },
+      sized(h("div", { class: `fill ${kind}` }), "width", `${filled}%`),
+      sized(h("div", { class: "mark warn-mark" }), "left", `${L.warn * 100}%`));
+    lines.push(meter, h("div", { class: "meter-scale muted" }, h("span", {}, "$0"), h("span", {}, `warn at ${money(L.warnUsd)}`), h("span", {}, money(L.usd))));
+    if (L.over) {
+      const top = w.repos.filter((r) => num(r.cost)).sort((a, b) => b.cost - a.cost)[0];
+      if (top && top.cost > 0) lines.push(h("div", {}, routeLink(repoRoute(top.repo, "agents"), {}, name(top.repo)), ` spent ${money(top.cost)} of it.`));
+    }
+    if (L.warned || L.over) lines.push(h("div", { class: "muted" }, "Nothing is paused: the page only tells you."));
+  } else if (!L) {
+    lines.push(h("div", { class: "muted" }, "No weekly budget set. Set one to get a line and a warning."));
+  }
+  lines.push(budgetControls(w));
+  const floor = [];
+  floor.push(w.noCost.length ? `${w.noCost.length} of ${w.runs} runs have no cost recorded, and Claude review runs are not in the ledger.`
+    : "Claude review runs are not in the ledger.");
+  if (w.unread.length) floor.push(`${w.unread.map(name).join(", ")} could not be read and ${w.unread.length === 1 ? "adds" : "add"} nothing.`);
+  if (w.loading.length) floor.push(`${w.loading.length} still loading.`);
+  lines.push(h("p", { class: "muted" }, `A floor, not a total: ${floor.join(" ")}`));
+  if (w.noCost.length) {
+    lines.push(h("details", fold("nocost"), h("summary", { class: "muted" }, `The ${w.noCost.length} ${w.noCost.length === 1 ? "run" : "runs"} with no cost recorded`),
+      h("ul", { class: "items" }, w.noCost.map((x) => {
+        const text = `${name(x.repo)} · ${x.role || "?"}${x.pr ? ` · PR #${x.pr}` : (x.issue ? ` · #${x.issue}` : "")} · ${x.outcome || "?"}`;
+        const at = new Date(x.started_at || x.ended_at || "");
+        return h("li", {}, h("span", { class: "muted" }, isNaN(at) ? "? " : `${at.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${hhmm(at)} `),
+          x.run_url ? link(x.run_url, `${text} ↗`) : text);
+      }))));
+  }
+  return h("div", { class: "week-total" }, lines);
+}
+
+function weekDaysBlock(w) {
+  const L = w.level;
+  const pace = L ? L.usd / 7 : null;
+  const scale = Math.max(pace || 0, ...w.days.map((d) => d.cost)) || 1;
+  const today = w.days[6];
+  const col = (d) => {
+    const over = pace !== null && d.cost > pace;
+    return h("div", { class: `day${over ? " over" : ""}` },
+      h("div", { class: "col" }, sized(h("div", { class: "fill" }), "height", `${(d.cost / scale) * 100}%`),
+        pace !== null ? sized(h("div", { class: "pace" }), "bottom", `${(pace / scale) * 100}%`) : null),
+      h("div", { class: "day-cost" }, w.read ? usd(d.cost) : "?"),
+      h("div", { class: "muted" }, d.date.toLocaleDateString("en-US", { weekday: "short" }), h("br"), String(d.date.getDate()), d === today ? "*" : ""));
+  };
+  return [h("h3", {}, "By day", pace !== null ? h("span", { class: "muted" }, ` · pace line ${usd(pace)}, the budget over seven days`) : null),
+    h("div", { class: "days" }, w.days.map(col)),
+    h("p", { class: "muted small" }, `* Today is partial.${pace !== null ? " A day over the pace is darker, its figure bold." : ""}`)];
+}
+
+function weekReposBlock(w) {
+  const rows = w.repos.slice().sort((a, b) => (num(b.cost) ? b.cost : -1) - (num(a.cost) ? a.cost : -1));
+  return [h("h3", {}, "By repository"), h("div", { class: "scroll" }, h("table", { class: "grid" },
+    h("thead", {}, h("tr", {}, ["Repository", "Runs", "Cost", "No cost"].map((c, i) => h("th", { class: i ? "n" : null }, c)))),
+    h("tbody", {}, rows.map((r) => {
+      const name = routeLink(repoRoute(r.repo, "runs"), { title: r.repo }, short(r.repo));
+      if (r.loading) return h("tr", {}, h("td", {}, name), h("td", { class: "n muted", colspan: "3" }, "loading…"));
+      if (r.unread) return h("tr", { title: r.unread }, h("td", { class: "wrap" }, name, h("span", { class: "muted" }, " · could not be read")),
+        h("td", { class: "n" }, "?"), h("td", { class: "n" }, "?"), h("td", { class: "n" }, "?"));
+      return h("tr", {}, h("td", {}, name), h("td", { class: "n" }, r.runs), h("td", { class: "n" }, usd(r.cost)),
+        h("td", { class: "n" }, r.noCost ? `${r.noCost} ${r.noCost === 1 ? "run" : "runs"}` : "–"));
+    }))))];
+}
+
+function weekRolesBlock(w) {
+  const order = (r) => (r === "coder" ? 0 : r === "fixer" ? 1 : 2);
+  const roles = Object.entries(w.roles).sort(([a], [b]) => order(a) - order(b) || (a < b ? -1 : 1));
+  const coder = w.roles.coder;
+  const opened = coder ? coder.outcomes["pr-opened"] || 0 : 0;
+  const summary = [`${w.merged} ${w.merged === 1 ? "PR" : "PRs"} merged by the gate`,
+    coder ? `${opened} of ${coder.runs} coder runs opened a PR` : "no coder runs",
+    "PRs merged by hand are not in the ledger"];
+  return [h("h3", {}, "Outcomes by role"), h("div", { class: "scroll" }, h("table", { class: "grid week-roles" },
+    h("thead", {}, h("tr", {}, ["Role", "Runs", "Outcomes", "Turns", "Time", "Cost"].map((c, i) => h("th", { class: [1, 3, 4, 5].includes(i) ? "n" : null }, c)))),
+    h("tbody", {}, roles.map(([role, s]) => h("tr", {},
+      h("td", {}, role), h("td", { class: "n" }, s.runs),
+      h("td", {}, Object.entries(s.outcomes).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([o, n]) => `${n} ${o.replace(/-/g, " ")}`).join(" · ")),
+      h("td", { class: "n" }, num(s.turns) ? s.turns.toLocaleString("en-US") : "–"), h("td", { class: "n" }, hoursText(s.ms)),
+      h("td", { class: "n", title: s.noCost ? `${s.noCost} with no cost recorded` : null }, `${usd(s.cost)}${s.noCost ? "+" : ""}`))),
+    h("tr", { class: "muted" }, h("td", {}, "review"), h("td", { class: "n" }, "–"), h("td", {}, "not in the ledger"),
+      h("td", { class: "n" }, "–"), h("td", { class: "n" }, "–"), h("td", { class: "n" }, "not recorded"))))),
+    h("p", { class: "muted" }, summary.join(" · "), w.unread.length || w.loading.length ? " (from the repositories read)" : "")];
+}
+
+function weekView() {
+  const repos = state.session ? state.session.repos : [];
+  if (!state.session) return [viewHead("Week"), empty("Loading…")];
+  const w = week();
+  const first = w.days[0].date;
+  const last = w.days[6].date;
+  const range = `${first.toLocaleDateString("en-US", { month: "short", day: "numeric" })} – ${first.getMonth() === last.getMonth()
+    ? last.getDate() : last.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
+  const name = (repo) => (repos.filter((x) => short(x) === short(repo)).length > 1 ? repo : short(repo));
+  const head = viewHead("Week", `${range} · ${w.read} of ${repos.length} ${repos.length === 1 ? "repository" : "repositories"}`,
+    w.unread.length ? ` · ${w.unread.map(name).join(", ")} unread` : "", w.loading.length ? ` · ${w.loading.length} loading` : "");
+  if (!repos.length) return [head, empty("No repositories.")];
+  if (!w.read && w.loading.length) return [head, weekTotal(w), empty("Loading…")];
+  // Nothing ran in what was read; while a repository is still loading that is not yet known.
+  if (!w.runs && !w.merged && !w.loading.length) return [head, weekEmpty(w), w.read ? weekReposBlock(w) : null];
+  return [head, weekTotal(w), weekDaysBlock(w), weekReposBlock(w), weekRolesBlock(w)];
 }
 
 function reposView() {
