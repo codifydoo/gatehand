@@ -246,7 +246,15 @@ run_post "${REVIEW}" POST_DROP=1
 run_post "${REVIEW}" EXISTING="[{\"id\":5,\"user\":{\"login\":\"claude[bot]\"},\"body\":\"${MARKER} old\"}]" POST_DROP=1
 [[ "${rc}" -ne 0 ]] && t_pass "post 7: an older review below the baseline does not satisfy it" || t_fail "post 7b: rc=${rc}"
 run_post "${REVIEW}" EXCHANGE_STATUS=500 EXCHANGE_BODY='{"message":"internal"}'
-[[ "${rc}" -ne 0 && "$(posted_by app)$(posted_by job)" == "" ]] && t_pass "post 8: a failed exchange posts nothing and reddens the job" || t_fail "post 8: rc=${rc}, calls $(calls)"
+[[ "${rc}" -ne 0 && "$(posted_by app)$(posted_by job)" == "" && "${out}" == *"answered 500 (internal); nothing"* ]] && t_pass "post 8: a failed exchange posts nothing, reddens the job and says what the server said" || t_fail "post 8: rc=${rc}, calls $(calls): ${out}"
+run_post "${REVIEW}" EXCHANGE_STATUS=401 EXCHANGE_BODY='{"error":{"message":"Custom permissions must include '"'"'contents'"'"' (read or write) for workflow validation."}}'
+[[ "${rc}" -ne 0 && "$(posted_by app)$(posted_by job)" == "" && "${out}" == *"answered 401 (Custom permissions must include 'contents' (read or write) for workflow validation.); nothing"* ]] \
+  && t_pass "post 8b: a permissions refusal is an error, not a skip" || t_fail "post 8b: rc=${rc}, calls $(calls): ${out}"
+for b in '{"error":"invalid_request"}' '{"error":{"message":""}}' '<html>'; do
+  run_post "${REVIEW}" EXCHANGE_STATUS=400 EXCHANGE_BODY="${b}"
+  case "${b}" in '{"error":"invalid_request"}') want='answered 400 (invalid_request); nothing' ;; *) want='answered 400 (no message); nothing' ;; esac
+  [[ "${rc}" -ne 0 && "${out}" == *"${want}"* ]] && t_pass "post 8c: body ${b} prints '${want}'" || t_fail "post 8c: body ${b}: rc=${rc}: ${out}"
+done
 run_post "${REVIEW}" EXCHANGE_STATUS=401 EXCHANGE_BODY='{"message":"Workflow validation failed. The workflow file must exist and have identical content to the version on the repository default branch."}'
 [[ "${rc}" -eq 0 && "$(posted_by app)" == "" && "$(posted_by job)" == *'<!-- verify-pr-skipped -->'* && "$(posted_by job)" != *"${MARKER}"* ]] \
   && t_pass "post 9: a workflow that differs from the default branch's gets the not-reviewed note, never a review" || t_fail "post 9: rc=${rc}, calls $(calls): ${out}"

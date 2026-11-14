@@ -481,7 +481,7 @@ jobs:
               exit 0
             fi
             # The server's own message (a refusal carries no token), on one line and cut short.
-            said="$(jq -r '.error.message // .message // empty' <<<"${json}" 2>/dev/null | tr -d '\r' | tr '\n' ' ' | cut -c1-300 || true)"
+            said="$(jq -j '[(.error | objects | .message), .message, (.error | strings)] | map(strings | select(length > 0)) | first // empty' <<<"${json}" 2>/dev/null | tr -d '\r' | tr '\n' ' ' | cut -c1-300 || true)"
             echo "::error::the Claude App token exchange answered ${status} (${said:-no message}); nothing was posted"
             exit 1
           fi
