@@ -666,9 +666,15 @@ review_attribution() {
     # claude-review job has ended, so an attempt's window runs from claude-review's start (what the
     # review read is as fresh as that) to the later of the two jobs' ends.
     w="$(gh api "repos/${GH_REPO}/actions/runs/${run}/jobs?filter=all&per_page=100" \
-      --jq '[.jobs[] | select(.name == "claude-review" or .name == "post-review")] | group_by(.run_attempt) | .[]
-        | ([.[] | select(.name == "claude-review")] | first) as $r | select($r != null)
-        | "\($r.started_at // "") \(([.[] | .completed_at // ""] | max) // "")"')" || return 1
+      --jq '[.jobs[] | select(.name == "claude-review" or .name == "post-review")] | group_by(.run_attempt)
+        | reduce .[] as $g ({start: null, out: []};
+            # "Re-run failed jobs" on a failed post-review makes an attempt with no claude-review
+            # job: it posts the earlier attempt'"'"'s saved review, so its window starts where that
+            # review did, never at the re-run.
+            (([$g[] | select(.name == "claude-review")] | first // null) as $r
+             | .start = (if $r == null then .start else ($r.started_at // "") end)
+             | if .start == null then . else .out += ["\(.start) \(([$g[] | .completed_at // ""] | max) // "")"] end))
+        | .out[]')" || return 1
     while read -r js je; do
       [[ -n "${js}" && -n "${je}" ]] || continue
       if [[ ! "${at}" < "${js}" && ! "${at}" > "${je}" ]]; then

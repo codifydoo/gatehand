@@ -660,6 +660,8 @@ rr_case() {
   stub_gh_json 'api --paginate repos/o/r/issues/44/comments*' "$1"
   stub_gh_json 'api --paginate repos/o/r/actions/workflows/claude-code-review.yml/runs*' "${RR_RUNS:-${RR_RUNS_NONE}}"
   # RR_POST: "<started> <completed>" of the same attempt's post-review job, which posts the comment.
+  # RR_JOBS: the jobs list as it stands, in place of RR_JOB and RR_POST.
+  [[ -z "${RR_JOBS:-}" ]] || stub_gh_json 'api repos/o/r/actions/runs/70/jobs*' "{\"jobs\":${RR_JOBS}}"
   stub_gh_json 'api repos/o/r/actions/runs/70/jobs*' "$(jq -cn --arg w "${RR_JOB:-}" --arg p "${RR_POST:-}" '($w | split(" ")) as $j | ($p | split(" ")) as $q
     | {jobs: ((if $w == "" then [] else [{name: "claude-review", run_attempt: 1, started_at: $j[0], completed_at: $j[1]}] end)
       + (if $p == "" then [] else [{name: "post-review", run_attempt: 1, started_at: $q[0], completed_at: $q[1]}] end))}')"
@@ -715,6 +717,13 @@ RR_RUNS="${RR_RUN70}" RR_JOB="2026-11-05T11:01:00Z 2026-11-05T11:05:00Z" RR_POST
 expect "request_review: a review the post job posted, after a review job that started after the request: answered" "$(rr_dispatches)" 0
 RR_RUNS="${RR_RUN70}" RR_JOB="2026-11-05T10:50:00Z 2026-11-05T10:58:00Z" RR_POST="2026-11-05T10:59:00Z 2026-11-05T11:12:00Z" rr_case "${RR_ANSWER}"
 expect "request_review: a review the post job posted, whose review job started before the request: requested again" "$(rr_dispatches)" 1
+# "Re-run failed jobs" on a failed post-review: attempt 2 has only post-review, and posts attempt 1's
+# review of the old head. Its window starts where attempt 1's review did, so it is stale even while
+# a later full attempt's window also holds the comment.
+RR_RUNS="${RR_RUN70}" RR_JOBS='[{"name":"claude-review","run_attempt":1,"started_at":"2026-11-05T10:50:00Z","completed_at":"2026-11-05T10:58:00Z"},
+  {"name":"post-review","run_attempt":2,"started_at":"2026-11-05T11:09:00Z","completed_at":"2026-11-05T11:11:00Z"},
+  {"name":"claude-review","run_attempt":3,"started_at":"2026-11-05T11:01:00Z","completed_at":"2026-11-05T11:20:00Z"}]' rr_case "${RR_ANSWER}"
+expect "request_review: a re-run post job's comment is as old as the review it posts: requested again" "$(rr_dispatches)" 1
 RR_RUNS="${RR_RUN70}" RR_JOB="2026-11-05T11:01:00Z 2026-11-05T11:12:00Z" \
   rr_case "$(jq -c '(.[] | select(.user.login == "claude[bot]") | .updated_at) = "2026-11-05T11:20:00Z"' <<<"${RR_ANSWER}")"
 expect "request_review: the review bot's review edited after it posted: no answer, requested again" "$(rr_dispatches)" 1

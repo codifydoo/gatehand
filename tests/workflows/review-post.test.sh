@@ -107,9 +107,10 @@ refused "pr review" pr review 7 --approve
 refused "api" api /user
 refused "auth token" auth token
 refused "search repos" search repos x
-refused "--jq" pr view 7 --json title --jq '$ENV'
-refused "--jq=" pr view 7 --json title '--jq=$ENV'
-refused "-q" pr view 7 --json title -q '$ENV'
+# Values the value check would pass, so only the flag check can refuse these.
+refused "--jq" pr view 7 --json title --jq title
+refused "--jq=" pr view 7 --json title '--jq=title'
+refused "-q" pr view 7 --json title -q title
 refused "--template" pr view 7 --json title --template '{{env}}'
 refused "-t" pr view 7 --json title -t x
 refused "--repo" pr view 7 --repo other/repo
@@ -121,7 +122,7 @@ refused "a host path" pr view 'evil.example/acme/repo/pull/7'
 refused "a URL on github.com too" pr view 'https://github.com/other/repo/pull/7'
 refused "an ssh remote" pr view 'git@evil.example:acme/repo'
 refused "a flag before the subcommand" --repo other/repo pr view 7
-refused "combined short flags (-cq is --jq)" pr view 7 --json title -cq '$ENV'
+refused "combined short flags (-cq is --jq)" pr view 7 --json title -cq title
 refused "combined short flags (-cw is --web)" pr view 7 -cw
 refused "an attached short value" pr list -L5
 refused "--" pr view 7 -- --jq x
@@ -144,14 +145,16 @@ cat >"${TMP}/bin/curl" <<'STUB'
 cfg="$(cat)"
 printf '%s\n' "$@" >>"${CURL_ARGV}"
 printf '%s\n' "${cfg}" >>"${CURL_STDIN}"
-method=GET url="" data="" wfmt="" fail=0
+method=GET url="" data="" wfmt="" fail=0 out="" retry=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -X) method="$2"; shift 2 ;;
     --data) data="$2"; shift 2 ;;
     --data-binary) data="$(cat "${2#@}")"; shift 2 ;;
     -w) wfmt="$2"; shift 2 ;;
-    -o|-H|-K|--retry|--retry-delay) shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    --retry) retry=1; shift 2 ;;
+    -H|-K|--retry-delay) shift 2 ;;
     -fsS|-f) fail=1; shift ;;
     http*) url="$1"; shift ;;
     *) shift ;;
@@ -163,11 +166,13 @@ grep -qF 'ghs_jobTokenForTheTest' <<<"${cfg}" && who=job
 grep -qF 'ghs_appTokenForTheReviewPostTest01' <<<"${cfg}" && who=app
 printf '%s %s %s\n' "${method}" "${url}" "${who}" >>"${CURL_LOG}"
 answer() { # <status> <body>
-  printf '%s' "$2"
-  [[ -n "${wfmt}" ]] && printf '\n%s' "$1"
+  if [[ -n "${out}" && "${out}" != - ]]; then printf '%s' "$2" >"${out}"; else printf '%s' "$2"; fi
+  [[ -n "${wfmt}" ]] && printf '%s' "${wfmt//%\{http_code\}/$1}"
   [[ "${fail}" == 1 && "$1" -ge 400 ]] && exit 22
   exit 0
 }
+# A comment POST that retries could post the review twice.
+[[ "${method} ${retry}" == "POST 1" && "${url}" == */comments ]] && { echo "stub curl: a comment POST with --retry" >&2; exit 98; }
 case "${method} ${url}" in
   *audience=claude-code-github-action*) answer 200 '{"value":"oidc-jwt-for-the-test"}' ;;
   *github-app-token-exchange*) printf '%s\n' "${data}" >"${EXCHANGE_DATA}"
@@ -176,7 +181,8 @@ case "${method} ${url}" in
   "POST "*/comments) [[ "${POST_FAIL:-0}" == 1 ]] && answer 500 '{"message":"boom"}'
     [[ "${POST_DROP:-0}" == 1 ]] || jq --argjson b "${data}" --arg who "${who}" '. + [{id: (900 + length), user: {login: $who}, body: $b.body}]' "${POSTED}" >"${POSTED}.n" && mv "${POSTED}.n" "${POSTED}"
     answer 201 '{"id":1}' ;;
-  "GET "*/comments*) answer 200 "$(jq -c --argjson e "${EXISTING:-[]}" '$e + .' "${POSTED}")" ;;
+  "GET "*/comments*) [[ "${GET_FAIL:-0}" == 1 ]] && answer 502 '<html>bad gateway</html>'
+    answer 200 "$(jq -c --argjson e "${EXISTING:-[]}" '$e + .' "${POSTED}")" ;;
   *) echo "stub curl: unexpected ${method} ${url}" >&2; exit 7 ;;
 esac
 STUB
@@ -246,6 +252,10 @@ run_post '' CLAUDE_RAN=false
 [[ "$(posted_by job)" != *"${MARKER}"* ]] && t_pass "note 1: the note never carries the review marker" || t_fail "note 1: the note carries the review marker"
 run_post '' CLAUDE_RAN=false EXISTING='[{"id":3,"user":{"login":"github-actions[bot]"},"body":"<!-- verify-pr-skipped -->\nold"}]'
 [[ "${rc}" -eq 0 && "$(grep -c '^POST' "${TMP}/log")" -eq 0 ]] && t_pass "note 2: once per PR" || t_fail "note 2: calls $(calls)"
+run_post '' CLAUDE_RAN=false GET_FAIL=1
+[[ "${rc}" -ne 0 && "$(grep -c '^POST' "${TMP}/log")" -eq 0 ]] && t_pass "note 2: a failed read posts no second note and reddens the job" || t_fail "note 2b: rc=${rc}, calls $(calls)"
+run_post "${REVIEW}" GET_FAIL=1
+[[ "${rc}" -ne 0 && "${out}" == *"could not be read"* && "${out}" != *"posted nothing"* ]] && t_pass "post 10: a failed check after the post says so, not that nothing was posted" || t_fail "post 10: rc=${rc}: ${out}"
 run_post '' CLAUDE_RAN=false EVENT=workflow_dispatch
 [[ "${rc}" -eq 0 && ! -s "${TMP}/log" ]] && t_pass "note 3: a dispatch posts no note" || t_fail "note 3: calls $(calls)"
 
@@ -265,8 +275,10 @@ nc() { grep -v '^[[:space:]]*#' <<<"$1"; }
   && t_pass "job: the post job runs no model and nothing from any checkout" || t_fail "job: the post job checks out code or runs a model"
 grep -qx "    needs: claude-review" <<<"${post_job}" && grep -q 'uses: actions/download-artifact@' <<<"${post_job}" \
   && t_pass "job: the post job takes the review job's saved final message" || t_fail "job: the post job does not download the review"
-order="$(grep -oE '^        id: (review_gh|claude-review|save)$' <<<"${review_job}" | sed 's/^        id: //' | tr '\n' '|')"
-[[ "${order}" == "review_gh|claude-review|save|" ]] && t_pass "job: the wrapper, the review, then the save" || t_fail "job: the steps run as ${order}"
+order="$(grep -oE '^        id: (review_gh|drop_settings|claude-review|save)$' <<<"${review_job}" | sed 's/^        id: //' | tr '\n' '|')"
+[[ "${order}" == "review_gh|drop_settings|claude-review|save|" ]] && t_pass "job: the wrapper, the dropped settings, the review, then the save" || t_fail "job: the steps run as ${order}"
+grep -qx '        run: rm -f .claude/settings.json .claude/settings.local.json .mcp.json' <<<"$(awk '/^        id: drop_settings$/ {on = 1} on && /^      - / {exit} on' <<<"${review_job}")" \
+  && t_pass "job: the checkout's Claude settings and .mcp.json are gone before the model starts" || t_fail "job: the drop step does not remove the checkout's settings"
 [[ "$(grep -c 'uses: anthropics/claude-code-action' "${WORKFLOW}")" -eq 1 ]] && ! nc "$(cat "${WORKFLOW}")" | grep -q 'always()' \
   && t_pass "job: one model step, and nothing runs regardless of the steps before it" || t_fail "job: a second model step or an always()"
 grep -q 'name: verify-pr-review' <<<"${review_job}" && t_pass "job: the review job uploads the final message" || t_fail "job: no upload of the review"

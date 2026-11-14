@@ -76,7 +76,8 @@ The model never shares a job with a write-capable token, and nothing it wrote is
   it mints from its own OIDC token and revokes, and refuses one that carries text shaped like a
   credential. `/verify-pr` frames everything in the PR as data.
 - **The review runs the PR's code.** `claude-code-review.yml` checks out the PR and runs its
-  `.github/actions/install-gh` and `.claude/` with an OIDC token in reach. A dispatch refuses
+  `.github/actions/install-gh` and `.claude/` with the Claude credential in reach (the job drops
+  the checkout's Claude settings and `.mcp.json` before the model starts). A dispatch refuses
   a fork's PR before the checkout. An automatic run skips one too, but that is not a control: on
   `pull_request` GitHub runs the PR's own copy of the workflow, which a fork can edit, and GitHub
   gives that run no secrets and a read-only token (keep a private repository's "Fork pull request

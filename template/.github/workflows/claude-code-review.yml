@@ -223,7 +223,7 @@ jobs:
               [[ "${a}" == *=* ]] && val="${a#*=}"
               hit=""
               for f in ${flags}; do [[ "${f%:v}" == "${name}" ]] && hit="${f}"; done
-              [[ -n "${hit}" ]] || die "${name} is not allowed here"
+              [[ -n "${hit}" ]] || die "a flag that is not on this verb's list is not allowed"
               if [[ "${hit}" == *:v ]]; then
                 if [[ "${a}" == *=* ]]; then
                   [[ "${name}" == --* ]] && value_ok "${name}" "${val}" || die "that value for ${name} is not allowed"
@@ -236,7 +236,7 @@ jobs:
               continue
             fi
             case "${pos}" in
-              num) [[ "${a}" =~ ^[1-9][0-9]{0,8}$ ]] || die "only a PR or issue number is allowed, not '${a}'" ;;
+              num) [[ "${a}" =~ ^[1-9][0-9]{0,8}$ ]] || die "only a PR or issue number is allowed" ;;
               text) value_ok query "${a}" || die "that search text is not allowed" ;;
               *) die "no argument is allowed here but flags" ;;
             esac
@@ -251,6 +251,17 @@ jobs:
           } >"$RUNNER_TEMP/review-bin/review-gh"
           chmod 0755 "$RUNNER_TEMP/review-bin/review-gh"
           echo "$RUNNER_TEMP/review-bin" >>"$GITHUB_PATH"
+
+      # The checkout's own Claude Code settings go before the model starts. Claude Code loads them
+      # with the command: their `permissions.allow` widens the grant (an adopter's
+      # `Bash(./scripts/check.sh *)` would let the review run code the PR wrote), and their `hooks`
+      # run commands with no permission check at all. On a dispatch they are the PR head's copy. The
+      # flags and the action's own settings are all this review needs; .mcp.json goes for the same
+      # reason. The PR's copies are still in its diff, which is what the review reads.
+      - name: drop the checkout's Claude settings
+        id: drop_settings
+        if: github.event_name == 'workflow_dispatch' || steps.baseline.outputs.already_reviewed != 'true'
+        run: rm -f .claude/settings.json .claude/settings.local.json .mcp.json
 
       - name: Run Claude Code Review
         id: claude-review
@@ -393,7 +404,7 @@ jobs:
           comment_ids() {
             local page=1 got
             while :; do
-              got="$(ghapi "${GH_API_TOKEN}" GET "/repos/${REPO}/issues/${PR}/comments?per_page=100&page=${page}")"
+              got="$(ghapi "${GH_API_TOKEN}" GET "/repos/${REPO}/issues/${PR}/comments?per_page=100&page=${page}")" || return 1
               jq -r ".[] | select($1) | .id" <<<"${got}"
               [[ "$(jq length <<<"${got}")" -eq 100 ]] || break
               page=$((page + 1))
@@ -404,8 +415,10 @@ jobs:
           # merge gate would then count it as a review.
           skip_note() { # <why>
             [[ "${EVENT}" == pull_request ]] || return 0
-            local skip_marker='<!-- verify-pr-skipped -->' note
-            [[ -z "$(comment_ids "(.body // \"\") | contains(\"${skip_marker}\")")" ]] || return 0
+            local skip_marker='<!-- verify-pr-skipped -->' note ids
+            # A failed read is not "no note yet": it would post a second one.
+            ids="$(comment_ids "(.body // \"\") | contains(\"${skip_marker}\")")" || { echo "::error::could not read the PR's comments"; return 1; }
+            [[ -z "${ids}" ]] || return 0
             note="$(mktemp)"
             # The backticks below are markdown for the comment, not command substitution.
             # shellcheck disable=SC2016
@@ -444,14 +457,16 @@ jobs:
             | curl -K - -fsS --retry 3 --retry-all-errors --retry-delay 5 | jq -r '.value // empty')"
           [[ -n "${oidc}" ]] || { echo "::error::no OIDC token from the runner"; exit 1; }
           echo "::add-mask::${oidc}"
+          # The answer goes to a file, which curl starts afresh on each retry: on stdout a failed
+          # attempt's body would run into the next one's, and the token in it would not parse.
           code=0
-          resp="$(printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "${oidc}" \
-            | curl -K - -sS --retry 3 --retry-delay 5 -o - -w '\n%{http_code}' -X POST \
+          answer="$(mktemp)"
+          status="$(printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "${oidc}" \
+            | curl -K - -sS --retry 3 --retry-delay 5 -o "${answer}" -w '%{http_code}' -X POST \
               --data '{"permissions":{"pull_requests":"write"}}' \
               'https://api.anthropic.com/api/github/github-app-token-exchange')" || code=$?
           [[ "${code}" -eq 0 ]] || { echo "::error::the Claude App token exchange could not be reached (curl ${code})"; exit 1; }
-          status="${resp##*$'\n'}"
-          json="${resp%$'\n'*}"
+          json="$(cat "${answer}")"
           if [[ "${status}" != 200 ]]; then
             err="$(jq -r '(.error.details.error_code // "") + " " + (.error.message // "") + " " + (.message // "")' <<<"${json}" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
             if [[ "${err}" == *workflow_not_found_on_default_branch* || ( "${status}" == 401 && "${err}" == *"workflow validation failed"* ) ]]; then
@@ -464,7 +479,7 @@ jobs:
             echo "::error::the Claude App token exchange answered ${status}; nothing was posted"
             exit 1
           fi
-          tok="$(jq -r '.token // .app_token // empty' <<<"${json}")"
+          tok="$(jq -r '.token // .app_token // empty' <<<"${json}" 2>/dev/null || true)"
           [[ -n "${tok}" ]] || { echo "::error::the token exchange answered 200 with no token"; exit 1; }
           echo "::add-mask::${tok}"
           revoke() { ghapi "${tok}" DELETE /installation/token >/dev/null 2>&1 || true; }
@@ -479,7 +494,9 @@ jobs:
           # satisfied by the previous run's comment) AND marked (the marker identifies the artifact,
           # not the account: `github-actions[bot]` is not unique to this job). A post that returned
           # 2xx and left nothing behind reddens the job instead of ending green with no review.
-          if [[ -n "$(comment_ids ".id > ${BASELINE} and ((.body // \"\") | contains(\"${REVIEW_MARKER}\"))")" ]]; then
+          ids="$(comment_ids ".id > ${BASELINE} and ((.body // \"\") | contains(\"${REVIEW_MARKER}\"))")" \
+            || { echo "::error title=Review not checked::the review was posted, but the PR's comments could not be read to check it landed."; exit 1; }
+          if [[ -n "${ids}" ]]; then
             echo "posted the review on PR #${PR}"
             exit 0
           fi
