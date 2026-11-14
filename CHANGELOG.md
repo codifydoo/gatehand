@@ -40,6 +40,9 @@
   is on, after one confirm that lists every repository with its preview; the bar then says "Agents
   off in n of m" on every screen, names what was refused, and offers "Resume n…", which turns on
   only what Pause all turned off.
+- Project site: `site/` holds five static pages (home, how it works, security, the dashboard, get
+  started), published to GitHub Pages by `.github/workflows/pages.yml` on a push to `main`. Not
+  part of the package: nothing changes in installed repositories.
 - Nothing installed into repositories changes: no update is needed.
 
 ## 0.7.0 (2026-11-14)
