@@ -103,6 +103,24 @@ server plans the action again from fresh state and does it only if the plan is t
 whose head moved, a variable someone changed or a coder run that started waiting in between all
 refuse, and you preview again.
 
+### Pause all
+
+Pause all is the "Turn agents off" switch once per repository: one preview each, each planned again
+on its own when confirmed and refused on its own, so the result is per repository. It adds no kind of
+write to GitHub. (The page does not offer it yet.) The preview and the confirm carry
+one more field, `pause_all`, which is `true` or `false` and nothing else; it is part of the plan the
+token stands for, and it is accepted only for setting `AGENTS_ENABLED` to `false` in a repository
+where it is `true` now.
+
+What is new is a record on this machine: once a repository's own write succeeds, the server adds it
+to `paused` in the dashboard's config file (the one that holds the repository list, below), and
+`/api/session` returns that list. Resume is meant to offer only the repositories on the list that are still off, so a repository that was already off
+before Pause all (unset counts as off), or was turned off in its own Settings, stays off. A
+repository leaves the list when the page turns its agents on, Resume or the switch alike, and when a
+read that began after the pause finds `AGENTS_ENABLED` is `true` (someone turned it on elsewhere);
+that is the one local write a read can make, and it only ever takes a repository off. A repository whose variables
+cannot be read is refused, so it is never counted as paused.
+
 It refuses early what the workflow would skip or refuse: a coder or fixer run while `AGENTS_ENABLED`
 is not `true` or while the runner ref's copy of the workflow is not main's; the fixer on a PR its
 `pr_refusal` turns down (not the bot's, a draft, a fork, another base, not an agent branch, held,
@@ -154,7 +172,8 @@ nothing may be retried).
 On first start it lists every repository your login can see, through GraphQL, and keeps the
 non-archived ones whose default branch has `.github/agents/install.lock.json`. "Find repositories"
 scans again. Add one by hand by `owner/name`; "Hide" keeps one out of later scans too. The list
-lives in `${XDG_CONFIG_HOME:-~/.config}/gatehand/dashboard.json` (mode 0600; `--config` to move it).
+lives in `${XDG_CONFIG_HOME:-~/.config}/gatehand/dashboard.json` (mode 0600; `--config` to move it),
+with the Pause all record. Neither is ever sent to GitHub.
 A scan that cannot see everything (an organisation that requires SAML authorisation for your token,
 more than 3,000 repositories) keeps what it found and says what it missed.
 
@@ -189,7 +208,7 @@ tab it opened can talk to it.
 - It writes to GitHub only through the actions above: a comment on the inbox issue, one of five
   label changes, a dispatch of four workflows, a cancel of a Gatehand run, a verdict comment on an
   agent PR, two variables set to `true` or `false`. Each is a fixed shape the server builds; no
-  request from the page is passed through. Reading writes nothing. `tests/dashboard/dashboard.test.sh`
+  request from the page is passed through. Reading writes nothing to GitHub. `tests/dashboard/dashboard.test.sh`
   pins each point above, runs every command the page can post through the real `parse_commands`, and
   every verdict through the real `review_verdict`.
 
