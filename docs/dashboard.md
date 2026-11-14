@@ -140,22 +140,23 @@ merge gate… (every agent PR) on the Agents tab's schedules, Cancel… on a run
 actions on an agent PR nobody holds, and a request with no row: one the inbox's checklist missed, or
 an older breaker request of a role that has a newer one.
 
-The Agents tab says when a role runs next by the run gate's rules, in its order: not while the agents
-are off, not while the runner branch's `agent-coder.yml` differs from the default branch's (the
-coder), not until its breaker is reset, not today once its runs are used up, not while the open agent
-PRs are at the coder's `maxOpenPrs`; else the coder's next scheduled run. If a part one of these rules
-needs could not be read (`policy.json` included), or `runnerRef` is the default branch itself (the
-gate refuses that), it says nothing. It does not read `AGENT_BOT_ID` or the fixer's own
+The Agents tab says when a role runs next by the run gate's rules, in its order: not while the
+agents are off, not while the runner branch's `agent-coder.yml` differs from the default branch's
+(the coder), not until its breaker is reset, not today once its runs are used up, not while the open
+agent PRs are at the coder's `maxOpenPrs`; else the coder's next scheduled run. If a part one of
+these rules needs could not be read (`policy.json` included), or `runnerRef` is the default branch
+itself (the gate refuses that), it says nothing. It does not read `AGENT_BOT_ID` or the fixer's own
 workflow on the runner branch, so for the fixer it gives only reasons it will not run, never a time.
+A figure is "n of m" only where `policy.json` sets m, and a next run is shown only where the server
+read one: where either is null or unknown the page shows nothing in its place, never a default.
+Times are on this machine's clock; crons are as written, in UTC. A run row that never reached the
+model is marked "not counted".
 
-With the agents off, the Pipeline says so above its rows (which stay): what skips its runs, how
-many queued issues (not held) and open PRs wait (each only if it was read and not zero), that inbox answers still work, and
-a link to the switch in Settings; each queued issue reads "Waiting on: agents off". With nothing
-queued, it says the page never queues work and links to the suggested (`agent:candidate`) issues on
-GitHub when there are any. A figure is "n of m" only where `policy.json` sets m, and a next run is
-shown only where the server read one: where either is null or unknown the page shows nothing in its
-place, never a default. Times are on this machine's clock; crons are as written, in UTC. A run row
-that never reached the model is marked "not counted".
+With the agents off, the Pipeline says so above its rows (which stay): what skips its runs, how many
+queued issues (not held) and open PRs wait (each only if it was read and not zero), that inbox
+answers still work, and a link to the switch in Settings; each queued issue reads "Waiting on:
+agents off". With nothing queued, it says the page never queues work and links to the suggested
+(`agent:candidate`) issues on GitHub when there are any.
 
 ### Limits and schedules
 
