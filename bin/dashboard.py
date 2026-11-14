@@ -156,9 +156,13 @@ def rate_reset(resource):
 def cause_of(e):
     """A failed read's cause as the page gets it: {"cause": one of CAUSES}, and for "rate_limited"
     also "resets_at" (ISO time, or null when unknown)."""
-    c = {"cause": e.cause}
-    if e.cause == "rate_limited":
-        c["resets_at"] = rate_reset(e.resource)
+    return cause_entry(e.cause, e.resource)
+
+
+def cause_entry(cause, resource):
+    c = {"cause": cause}
+    if cause == "rate_limited":
+        c["resets_at"] = rate_reset(resource)
     return c
 
 
@@ -205,8 +209,8 @@ def gql_types(data):
 
 
 def graphql(query, partial=False, **variables):
-    """The response's data. Any GraphQL error raises, unless partial: then (data, [messages]) for a
-    response that still carries data (one node a SAML-protected organisation hides, say)."""
+    """The response's data. Any GraphQL error raises, unless partial: then (data, [{message, type}])
+    for a response that still carries data (one node a SAML-protected organisation hides, say)."""
     # Variables first, then the query: the order the test stub's globs expect. -f only: -F would
     # read a value starting with @ as a file.
     # An int goes as -F (typed): digits cannot start with @.
@@ -230,7 +234,10 @@ def graphql(query, partial=False, **variables):
     errors = [str(x.get("message")) for x in data.get("errors") or [] if isinstance(x, dict)]
     if errors and not (partial and data.get("data")):
         raise GhError(args, 0, "; ".join(errors), gql_types(data))
-    return (data.get("data") or {}, errors) if partial else (data.get("data") or {})
+    if partial:
+        return data.get("data") or {}, [{"message": str(x.get("message")), "type": x.get("type")}
+                                        for x in data.get("errors") or [] if isinstance(x, dict)]
+    return data.get("data") or {}
 
 
 def rest_pages(path, max_pages):
@@ -1406,14 +1413,19 @@ nodes{nameWithOwner isArchived lock:object(expression:"HEAD:.github/agents/insta
 
 
 def discover():
-    """Every repository your login can see that has Gatehand's lock file on its default branch, and
-    notes on what the scan could not see (an organisation that hides its repositories from this token,
-    a scan cut short)."""
-    found, notes, cursor = [], [], None
+    """Every repository your login can see that has Gatehand's lock file on its default branch, notes
+    on what the scan could not see (an organisation that hides its repositories from this token, a scan
+    cut short), and for each note that is a failed read, its cause: {"cause", "error": the note}."""
+    found, notes, unreadable, cursor = [], [], [], None
     for page_no in range(MAX_DISCOVERY_PAGES):
         kw = {"cursor": cursor} if cursor else {}
         data, errors = graphql(DISCOVER_Q, partial=True, **kw)
-        notes += [e for e in errors[:3] if e not in notes]
+        for e in errors[:3]:
+            msg = e["message"][:300]  # as Config loads a note: the note and its entry stay equal
+            if msg not in notes:
+                notes.append(msg)
+                cause = read_cause(0, e["message"], [str(e["type"])] if e["type"] else [])
+                unreadable.append(dict(cause_entry(cause, "graphql"), error=msg))
         page = (data.get("viewer") or {}).get("repositories") or {}
         found += [n["nameWithOwner"] for n in page.get("nodes") or []
                   if n and n.get("lock") and not n.get("isArchived") and valid_repo(n.get("nameWithOwner", ""))]
@@ -1423,7 +1435,7 @@ def discover():
         cursor = info.get("endCursor")
         if page_no == MAX_DISCOVERY_PAGES - 1:
             notes.append("stopped after %d repositories; add the others by hand" % (MAX_DISCOVERY_PAGES * 100))
-    return sorted(set(found), key=str.lower), notes
+    return sorted(set(found), key=str.lower), notes, unreadable
 
 
 def valid_repo(s):
@@ -1437,6 +1449,15 @@ def valid_repo(s):
 def config_path():
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
     return os.path.join(base, "gatehand", "dashboard.json")
+
+
+def scan_entry(x):
+    """A kept scan cause in cause_entry's shape, whatever the file held."""
+    c = {"cause": x["cause"], "error": x["error"][:300]}
+    if x["cause"] == "rate_limited":
+        r = x.get("resets_at")
+        c["resets_at"] = r if isinstance(r, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", r) else None
+    return c
 
 
 class Config:
@@ -1455,6 +1476,10 @@ class Config:
             self.data["scanned_at"] = got.get("scanned_at") if isinstance(got.get("scanned_at"), str) else None
             notes = got.get("scan_notes")
             self.data["scan_notes"] = [str(n)[:300] for n in notes] if isinstance(notes, list) else []
+            causes = got.get("scan_unreadable")
+            self.data["scan_unreadable"] = [scan_entry(x) for x in causes if isinstance(x, dict)
+                                            and x.get("cause") in CAUSES and isinstance(x.get("error"), str)
+                                            ] if isinstance(causes, list) else []
         except (OSError, ValueError, AttributeError):
             pass
 
@@ -1738,10 +1763,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def repo_list(self):
         c = self.server.config
         return {"repos": c.repos(), "excluded": list(c.data["excluded"]), "scanned_at": c.data["scanned_at"],
-                "scan_notes": list(c.data.get("scan_notes") or [])}
+                "scan_notes": list(c.data.get("scan_notes") or []),
+                "scan_unreadable": list(c.data.get("scan_unreadable") or [])}
 
     def rescan(self):
-        found, notes = discover()
+        found, notes, unreadable = discover()
         def apply(c):
             if notes:  # a scan that could not see everything keeps what earlier scans found
                 found_l = {r.lower() for r in found}
@@ -1752,6 +1778,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 c["discovered"] = found
             c["scan_notes"] = notes
+            c["scan_unreadable"] = unreadable  # resets_at is a time, so it still reads right later
             c["scanned_at"] = iso(now_utc())
         self.server.config.update(apply)
 

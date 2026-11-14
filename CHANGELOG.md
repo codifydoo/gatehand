@@ -4,7 +4,8 @@
 
 - Dashboard: a failed read says why, as one cause from a fixed set (`sso`, `signed_out`,
   `rate_limited` with the time the limit resets, `not_found`, `no_access`, `unknown`), in each
-  repository's new `unreadable` list and beside `error` in a failed request's answer. The page does
+  repository's new `unreadable` list, beside `error` in a failed request's answer, and for a scan
+  that could not see everything in `scan_unreadable` beside its notes. The page does
   not show it yet. Installed repositories need no update: the dashboard runs from the package.
 - Dashboard: the repository payload carries each role's `maxAttemptsPerIssue`, `maxCiFixes`,
   `breakerThreshold` and `timeoutMinutes` (null when `policy.json` does not set one), and each

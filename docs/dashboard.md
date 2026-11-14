@@ -43,7 +43,13 @@ that helps instead of Refresh. The server sends it:
   Gatehand not installed, no inbox issue, more than 500 open issues) has no entry;
 - on a request that failed as a whole (the repository, its inbox, the merge gate's report, the
   session), in the 502 answer beside `error`; and a first scan that failed, as `scan_cause` beside
-  `scan_error`.
+  `scan_error`;
+- for a scan that could not see everything, in `scan_unreadable` beside `scan_notes` (the session
+  and the answer to "Find repositories"): one `{"cause", "error"}` per note that is a failed read
+  (an organisation's SAML enforcement hiding its repositories, say), where `error` is the note. The
+  notes "stopped after 3000 repositories" and "kept N repositories found by an earlier scan" have
+  none. They are kept with the list in `dashboard.json` until the next scan, so a `resets_at` there
+  may be in the past.
 
 | `cause` | Means | Matched on what `gh` prints |
 |---|---|---|
