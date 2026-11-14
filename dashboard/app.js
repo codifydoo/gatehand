@@ -271,8 +271,8 @@ function needRows(repo) {
       route: repoRoute(repo) });
   }
 
-  // Stopped roles, each with its breaker request when there is one. "Reset the breaker" answers the
-  // request and is on the Pipeline tab; Resume, for a role stopped with no request, is on Agents.
+  // Stopped roles, each with its breaker request when there is one. Both answers are in the role's
+  // pane: "Reset the breaker" answers the request; Resume is for a role stopped with no request.
   const known = !!d.breakers; // breaker.json unread: the role's state is not claimed either way
   const breakers = d.breakers || {};
   const roles = new Set([...Object.keys(breakers).filter((r) => breakers[r] && breakers[r].tripped_at), ...Object.keys(roleReq)]);
@@ -281,7 +281,7 @@ function needRows(repo) {
     const r = roleReq[role] || null;
     // /resume resets a breaker without answering its request, so a request can outlive the stop.
     const stopped = !!b.tripped_at;
-    // The Pipeline tab has "Reset the breaker" only for a request whose comment it read.
+    // The role's pane has "Reset the breaker" only for a request whose comment it read.
     const viaReq = !!(r && comments && comments.some((c) => c.id === r.id));
     add({ kind: "role", role, key: `${repo}|role|${role}|${b.tripped_at || (r && r.id)}`, at: b.tripped_at || (r ? r.created_at : "") || "", req: r,
       title: stopped ? `${roleName(role)} stopped` : `${roleName(role)}: breaker request ${known ? "still open" : "open"}`,
@@ -569,7 +569,7 @@ const REQ_PANE = {
     why: (n) => `Someone without write access changed #${n} after the label the run trusts, or its trust check failed, so nothing reached the agent.`,
     next: (n) => `Nothing runs on #${n} until a person with write access vouches for its text.`,
     step: (n, url) => [h("strong", {}, "Read the change, then re-apply agent:ready yourself "), link(url, `on #${n} on GitHub ↗`),
-      h("div", { class: "muted" }, "Only your own label vouches for the text. Then Acknowledge here, which ticks the request and changes nothing, and rerun the coder from the Pipeline tab.")],
+      h("div", { class: "muted" }, "Only your own label vouches for the text. Then Acknowledge here, which ticks the request and changes nothing; the issue then has its own item in Needs you, to rerun the coder from.")],
   },
 };
 const REQUEUE = new Set(["blocked", "failed", "protected"]);
@@ -1043,7 +1043,7 @@ function issuePane(r) {
   const issue = Object.values(d.issues || {}).flat().find((i) => i && i.number === n) || null;
   const got = state.inbox[repo];
   // An `untrusted` request the checklist missed: /rerun re-labels as the bot, which vouches for
-  // nothing, so the run would be refused again (as rerunBtn says on the Pipeline tab).
+  // nothing, so the run would be refused again.
   const untrusted = got && got.requests && got.requests.some((x) => x.kind === "untrusted" && !x.answered && x.issue === n);
   const s = d.stats && d.stats.coder;
   const expect = ["Its reply on the inbox within a minute or two."];
