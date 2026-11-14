@@ -23,6 +23,11 @@
   and not waiting on you, one row per cause per repository with when it moves (agents off, a role
   stopped, a daily or open-PR limit reached, a lock no run holds), and the agent runs that finished
   today. A part that could not be read is named and counts as unknown, never as none.
+- Dashboard: the repository payload carries each role's `maxAttemptsPerIssue`, `maxCiFixes`,
+  `breakerThreshold` and `timeoutMinutes` (null when `policy.json` does not set one), and each
+  scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
+  branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only;
+  the page does not show them yet (#21, #22).
 - Nothing installed into repositories changes: no update is needed.
 
 ## 0.7.0 (2026-11-14)

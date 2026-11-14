@@ -316,7 +316,7 @@ jobs:
           # are SCOPED (`Bash(git:*)`), never a bare `Bash`, which would take review-gh with it.
           #
           # No Task: /verify-pr is a single-pass review.
-          # MODEL, set explicitly (policy.json roles.review.model, rendered here): without --model
+          # MODEL, set explicitly (policy.json review.model, rendered here): without --model
           # the CLI default applies, which can be a smaller model than the one the merge gate is
           # meant to trust. Gatehand's tests/commands/verify-pr.test.sh pins it. claude-code-action installs its
           # own pinned CLI, so after changing the model, dispatch a review and check that the agent

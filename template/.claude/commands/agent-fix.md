@@ -67,7 +67,7 @@ Below, `PR` is the first word and `AGENT_DIR` the second.
    `Refs #N` line. Leave out the footer (the `---` and the "Opened by the coder agent" line under
    it); it is kept. When the description is still true, write no `pr-body.md`.
 
-8. Write `AGENT_DIR/outbox/summary.md` and stop: at most 30 lines for the PR thread, saying what was
+8. Write `AGENT_DIR/outbox/summary.md` and stop: a short comment for the PR thread, saying what was
    wrong, what you changed, and the exact commands you ran with their results. If you made no
    commit, say why there.
 
