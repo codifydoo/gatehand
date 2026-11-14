@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Dashboard: a failed read says why, as one cause from a fixed set (`sso`, `signed_out`,
+  `rate_limited` with the time the limit resets, `not_found`, `no_access`, `unknown`), in each
+  repository's new `unreadable` list and beside `error` in a failed request's answer. The page does
+  not show it yet. Installed repositories need no update: the dashboard runs from the package.
+
 ## 0.7.0 (2026-11-14)
 
 - Security: the Claude review's model no longer holds a token that can write, and can no longer read
