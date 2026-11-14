@@ -34,11 +34,19 @@
   runs next, and each scheduled workflow's cron, last run and next run; Runs and spend links each
   ledger row to its item and its run. The Pipeline says when the agents are off, and what to do
   when nothing is queued. Installed repositories need no update.
+- Activity lists, across every repository, what is running now (with Cancel), what is not moving
+  and not waiting on you, one row per cause per repository with when it moves (agents off, a role
+  stopped, a daily or open-PR limit reached, a lock no run holds), and the agent runs that finished
+  today. A part that could not be read is named and counts as unknown, never as none. With nothing
+  running, it shows the next scheduled runs ("Next: merge gate 18:11 in 3 repositories, coder 18:17
+  in 2"); a repository with the agents off adds only the digest, and a workflow whose time is not
+  known in every repository is left out rather than guessed.
 - Dashboard: the repository payload carries each role's `maxAttemptsPerIssue`, `maxCiFixes`,
   `breakerThreshold` and `timeoutMinutes` (null when `policy.json` does not set one), and each
   scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
   branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only
-  (#21, #22); a repository's Agents tab shows them.
+  (#21, #22); Activity shows the next scheduled runs, and a repository's Agents tab shows the limits
+  and schedules.
 - Project site: `site/` holds five static pages (home, how it works, security, the dashboard, get
   started), published to GitHub Pages by `.github/workflows/pages.yml` on a push to `main`. Not
   part of the package: nothing changes in installed repositories.
