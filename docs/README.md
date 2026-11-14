@@ -177,6 +177,22 @@ Answer with a comment that starts with a command; only `AGENT_OWNER_LOGIN` count
 **Kill switch:** `gh variable set AGENTS_ENABLED --body false` stops every agent job at its next
 start; the inbox still works.
 
+## The dashboard
+
+`/gatehand:dashboard` in Claude Code with the Gatehand plugin installed, or `python3 bin/dashboard.py`
+from a checkout of the package, opens a page on your machine for every repository where Gatehand is
+installed: what waits for you, agent PRs and why the merge gate holds each, the queue, runs, cost
+and breakers. It needs `gh` signed in and Python 3.9 or later. Its buttons do what this page has you
+type: the inbox commands (`/rerun coder #N` and "Requeue and rerun" included), `agent:hold`,
+removing `agent:ready` from a queued issue, handing a fixed PR back to the merge gate, the two
+variables above, starting or cancelling a run, and a review verdict on an agent PR. They act with
+your own `gh` login, so every rule here applies as if you had done it on GitHub. Runs, verdicts and
+the variables are previewed first. The inbox commands re-queue an issue and start the coder on it
+exactly as if you had typed them; apart from those, the page never adds `agent:ready`, and a run it
+dispatches itself is only ever an auto pick. Queueing a new issue stays on GitHub, next to the
+issue's text. Nothing of it is installed in this repository; `docs/dashboard.md` in the package has
+the details.
+
 ## When something is stuck
 
 - **`runner-ref-stale`:** fast-forward `agent-runner` (see Setup).
