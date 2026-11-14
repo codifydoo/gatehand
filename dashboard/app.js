@@ -30,7 +30,11 @@ async function api(path, opts = {}) {
   });
   let data = null;
   try { data = await res.json(); } catch (_) { /* not JSON */ }
-  if (!res.ok) throw new Error((data && data.error) || `HTTP ${res.status}`);
+  if (!res.ok) {
+    const err = new Error((data && data.error) || `HTTP ${res.status}`);
+    err.status = res.status; // 4xx: refused before anything was done; 5xx: it may or may not have been
+    throw err;
+  }
   return data;
 }
 
@@ -150,14 +154,29 @@ function parseRoute() {
   const p = location.hash.replace(/^#/, "");
   const m = /^\/r\/([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+)(?:\/(pipeline|agents|runs|settings))?$/.exec(p);
   if (m) return { view: "repo", repo: `${m[1]}/${m[2]}`, tab: m[3] || "pipeline" };
-  const n = /^\/needs(?:\?kind=(request|role|pr|issue|merge|close))?$/.exec(p);
-  if (n) return { view: "needs", kind: n[1] || "" };
+  // Needs you: an optional chip (kind) and the open item (open, a row's key). A key can hold text the
+  // repository wrote (a role name, a breaker's time); it goes into the address only encoded, after the
+  // "#", and coming back it is only compared with the keys of the rows on screen, never shown.
+  const n = /^\/needs(?:\?(.*))?$/.exec(p);
+  if (n) {
+    let q;
+    try { q = new URLSearchParams(n[1] || ""); } catch (_) { q = new URLSearchParams(); }
+    const kind = q.get("kind") || "";
+    return { view: "needs", kind: /^(request|role|pr|issue|merge|close)$/.test(kind) ? kind : "", open: q.get("open") || "" };
+  }
   const v = /^\/(activity|week|repos)$/.exec(p);
-  return v ? { view: v[1] } : { view: "needs", kind: "" };
+  return v ? { view: v[1] } : { view: "needs", kind: "", open: "" };
 }
 const repoRoute = (repo, tab) => `/r/${repo}${tab && tab !== "pipeline" ? `/${tab}` : ""}`;
+function needsRoute(kind, open) {
+  const q = new URLSearchParams();
+  if (kind) q.set("kind", kind);
+  if (open) q.set("open", open);
+  const s = q.toString();
+  return s ? `/needs?${s}` : "/needs";
+}
 // An in-page link. Its route is built here from fixed names and repository names the server already
-// checked against owner/name, never from text GitHub returned.
+// checked against owner/name; the one exception, a row's key in Needs you, is URL-encoded (needsRoute).
 function routeLink(route, attrs, ...kids) {
   const el = h("a", attrs, ...kids);
   el.setAttribute("href", `#${route}`);
@@ -413,15 +432,15 @@ function repoHeading(repo) {
   return h("h3", {}, routeLink(repoRoute(repo), {}, repo));
 }
 
-// A row of Needs you. Until the item pane exists it opens the repository tab with the row's buttons;
-// a row with nothing to do on the page (to merge, to close) opens it on GitHub.
-function needRow(r, isNew) {
+// A row of Needs you. It opens the item pane beside the list; the address keeps the chip.
+function needRow(r, isNew, on) {
   const kids = [
     h("div", { class: "lmeta" }, h("span", { class: `dot${isNew ? "" : " old"}`, "aria-hidden": "true" }),
       `${short(r.repo)} · ${KIND_LABEL[r.kind]}${r.at ? ` · ${ago(r.at)}` : ""}`, isNew ? h("span", { class: "new" }, "NEW") : null),
     h("div", { class: "ltitle" }, h("strong", {}, r.title), r.text ? ` ${r.text}` : ""),
     h("div", { class: "lhint" }, r.hint)];
-  return r.route ? routeLink(r.route, { class: "lrow", title: r.repo }, kids) : h("a", { href: r.href, class: "lrow", title: r.repo }, kids);
+  return routeLink(needsRoute(state.route.kind, r.key), { class: `lrow${on ? " on" : ""}`, title: r.repo,
+    "aria-current": on ? "true" : null }, kids);
 }
 
 function needsView() {
@@ -435,7 +454,7 @@ function needsView() {
   rememberSeen(kind ? of(kind) : rows); // only what is on screen counts as looked at
   // A kind's count, like the total, is a floor while something is loading or could not be read.
   const more = c.needsLoading || c.needsUnknown ? "+" : "";
-  const chip = (k, label, count) => routeLink(k ? `/needs?kind=${k}` : "/needs",
+  const chip = (k, label, count) => routeLink(needsRoute(k),
     { class: `chip${kind === k ? " on" : ""}`, "aria-current": kind === k ? "page" : null }, `${label} ${count}`);
   const chips = h("div", { class: "chips" }, chip("", "All", c.needsText),
     CHIPS.filter(([k]) => of(k).length || kind === k).map(([k, label]) => chip(k, label, `${of(k).length}${more}`)));
@@ -446,14 +465,28 @@ function needsView() {
     c.needsLoading ? " · still loading" : "",
     c.unread.length ? ` · could not read all of ${c.unread.map(short).join(", ")}` : ""];
 
+  // The open item: the one the address names, else the first row as listed (the landing opens the top
+  // item). Rows in a folded group come after the others, as they are shown.
+  const shownRows = kind ? of(kind) : [...rows.filter((r) => !FOLDED[r.kind]), ...Object.keys(FOLDED).flatMap(of)];
+  const want = state.route.open;
+  const sel = want ? shownRows.find((r) => r.key === want) || null : shownRows[0] || null;
+  // The top row, once open, is pinned in the address: a newer row arriving does not take the pane
+  // from under you, and once it is answered the pane says what happened instead of moving on.
+  // Only while the address itself still says Needs you with nothing open: a navigation not yet handled wins.
+  const said = parseRoute();
+  if (!want && sel && said.view === "needs" && !said.open) {
+    state.route.open = sel.key;
+    history.replaceState(null, "", `${location.pathname}#${needsRoute(kind, sel.key)}`);
+  }
+  const row = (r) => needRow(r, isNew(r), sel === r);
   let list;
   if (kind) {
-    list = of(kind).map((r) => needRow(r, isNew(r)));
+    list = of(kind).map(row);
   } else {
-    list = [rows.filter((r) => !FOLDED[r.kind]).map((r) => needRow(r, isNew(r))),
-      Object.keys(FOLDED).map((k) => (of(k).length ? h("details", { class: "fold" },
+    list = [rows.filter((r) => !FOLDED[r.kind]).map(row),
+      Object.keys(FOLDED).map((k) => (of(k).length ? h("details", { class: "fold", open: of(k).includes(sel) },
         h("summary", {}, FOLDED[k](of(k).length), of(k).some(isNew) ? h("span", { class: "new" }, "NEW") : null),
-        of(k).map((r) => needRow(r, isNew(r)))) : null))];
+        of(k).map(row)) : null))];
   }
   // What could not be read: named, never counted.
   const unread = per.filter(([, x]) => x.notes.length).map(([repo, x]) => h("div", { class: "lrow unread" },
@@ -461,11 +494,236 @@ function needsView() {
     x.notes.map((n) => h("div", {}, n)),
     routeLink(repoRoute(repo), {}, `Open ${repo}`)));
   const any = rows.length && (!kind || of(kind).length);
+  const pane = sel ? itemPane(sel) : (want ? gonePane(want, c) : null);
   return [viewHead("Needs you", ...summary), chips,
-    h("div", { class: "needs-list" }, any ? list
-      : empty(c.needsLoading && !rows.length ? "Loading…"
-        : (kind ? "None of these." : (c.unread.length ? "Nothing that could be read needs you." : "Nothing needs you."))),
-    kind ? null : unread)];
+    h("div", { class: `needs-split${pane ? "" : " no-pane"}` },
+      h("div", { class: "needs-list" }, any ? list
+        : empty(c.needsLoading && !rows.length ? "Loading…"
+          : (kind ? "None of these." : (c.unread.length ? "Nothing that could be read needs you." : "Nothing needs you."))),
+      kind ? null : unread),
+      pane ? h("section", { class: "pane card", id: "pane", "aria-label": "Item" }, pane) : null)];
+}
+
+// --- the item pane: the one place to act on a row ------------------------------------------------------
+// Every pane: a header line and the title; then, as its kind has them, a stage track, why it is stuck
+// and what happens next, the text the agent wrote (as text), a step on GitHub first, one primary action
+// with the last seven days beside it, the confirm opening under the button, a timeline, and GitHub
+// detail folded. What the pane is doing (a confirm open, a command posted) is kept per row in
+// state.pane / state.paneMsg, so a re-render while data arrives leaves it as it was.
+state.pane = { key: "", confirm: "", reason: "" };
+state.paneMsg = {};
+const kv = (label, ...v) => h("div", { class: "kv" }, h("span", { class: "k" }, label), h("span", {}, ...v));
+const hhmm = (t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const cap1 = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+
+function itemPane(r) {
+  if (state.pane.key !== r.key) state.pane = { key: r.key, confirm: "", reason: "" };
+  return r.kind === "request" ? requestPane(r) : framePane(r);
+}
+
+// Rows whose own pane is not built yet (role, PR, issue, to merge, to close): what the row says, and
+// where to act on it today.
+function framePane(r) {
+  const tab = r.route && /\/agents$/.test(r.route) ? "Agents" : "Pipeline";
+  return [h("div", { class: "pane-head" }, [r.repo, KIND_LABEL[r.kind], r.at ? ago(r.at) : ""].filter(Boolean).join(" · ")),
+    h("h2", {}, r.title, r.text ? h("span", { class: "muted" }, ` ${r.text}`) : null),
+    kv("What to do", r.hint),
+    h("p", {}, r.route ? routeLink(r.route, {}, `Act on it on ${short(r.repo)}'s ${tab} tab`) : link(r.href, "Open it on GitHub ↗"))];
+}
+
+// The selected row is gone: answered, or no longer read as waiting. Says what was done here, if
+// anything; if its repository is loading or could not be read, it says that rather than guess.
+function gonePane(key, c) {
+  const msg = state.paneMsg[key];
+  const repo = (state.session ? state.session.repos : []).find((r) => key.startsWith(`${r}|`)) || "";
+  const top = h("p", {}, routeLink(needsRoute(state.route.kind), {}, "Open the top item"));
+  // Still loading what the row is made of (the repository, its inbox, the merge gate's report).
+  if (!msg && (repo ? needRows(repo).loading : c.needsLoading)) return empty("Loading…");
+  if (repo && c.unread.includes(repo)) {
+    return [h("p", {}, `${repo} could not be read just now, so it is not known whether this still waits for you.`), msg ? paneState(msg) : null, top];
+  }
+  return [h("p", {}, "This no longer waits for you."), msg ? paneState(msg) : null, top];
+}
+
+// What each kind of inbox request means, in the words of the request the agent filed
+// (agent-state.sh request_body), and the step on GitHub that comes before answering.
+const REQ_PANE = {
+  blocked: {
+    why: (n) => `The coder stopped on #${n} and needs a decision.`,
+    next: (n) => `Nothing until you answer. The next run on #${n} reads what you wrote there.`,
+    step: (n, url) => [h("strong", {}, "Answer on the issue. "), link(url, `Comment on #${n} on GitHub ↗`),
+      h("div", { class: "muted" }, `On #${n} itself, not the inbox. The next run reads comments from people with write access; others are left out.`)],
+  },
+  failed: {
+    why: (n) => `The coder failed #${n} on its last allowed attempt.`,
+    next: () => "Nothing until you answer.",
+    step: (n, url) => [h("strong", {}, "If the issue was unclear, "), link(url, `edit #${n} on GitHub ↗`), " first.",
+      h("div", { class: "muted" }, "The next run reads the issue again, with comments from people with write access.")],
+  },
+  protected: {
+    why: (n) => `The coder's change for #${n} touches protected paths, so it was not pushed.`,
+    next: () => "Nothing until you answer. Allowing it is for one attempt; the PR says so, and a person merges it.",
+    step: null,
+  },
+  untrusted: {
+    why: (n) => `Someone without write access changed #${n} after the label the run trusts, or its trust check failed, so nothing reached the agent.`,
+    next: (n) => `Nothing runs on #${n} until a person with write access vouches for its text.`,
+    step: (n, url) => [h("strong", {}, "Read the change, then re-apply agent:ready yourself "), link(url, `on #${n} on GitHub ↗`),
+      h("div", { class: "muted" }, "Only your own label vouches for the text. Then Acknowledge here, which ticks the request and changes nothing, and rerun the coder from the Pipeline tab.")],
+  },
+};
+const REQUEUE = new Set(["blocked", "failed", "protected"]);
+
+function requestPane(r) {
+  const repo = r.repo;
+  const d = state.repos[repo];
+  const q = r.req;
+  const got = state.inbox[repo];
+  const full = got && got.requests ? got.requests.find((x) => x.id === q.id) || null : null;
+  const n = q.issue || null;
+  const issueUrl = n ? `${d.url}/issues/${n}` : null;
+  const kindText = REQ_PANE[q.kind];
+  const issue = n ? Object.values(d.issues || {}).flat().find((i) => i && i.number === n) : null;
+  // The ledger rows (the last seven days) about this issue: the timeline, and the runs and cost beside the action.
+  const runs = n && d.runs ? d.runs.filter((x) => x.issue === n) : [];
+  const mine = runs.filter((x) => x.role === q.role && x.counted !== false);
+  const noCost = mine.filter((x) => typeof x.cost_usd !== "number").length;
+  const spent = mine.reduce((a, x) => a + (typeof x.cost_usd === "number" ? x.cost_usd : 0), 0);
+  const beside = !n ? null : (d.runs ? `Last 7 days on #${n}: ${mine.length} ${q.role} ${mine.length === 1 ? "run" : "runs"} · ${usd(spent)}${noCost ? `+ (${noCost} without a cost)` : ""}`
+    : `Last 7 days on #${n}: the ledger could not be read`);
+  const events = [...runs.map((x) => ({ at: x.started_at || x.ended_at || "", text: `${roleName(x.role)} run · ${x.outcome || "?"}${typeof x.cost_usd === "number" ? ` · ${usd(x.cost_usd)}` : ""}`, url: x.run_url })),
+    { at: q.created_at || (full && full.created_at) || "", text: `Request ${q.id} filed`, url: full && full.url }]
+    .filter((e) => e.at).sort((a, b) => (a.at < b.at ? -1 : 1));
+
+  return [
+    h("div", { class: "pane-head" }, [repo, `Inbox request ${q.id}`, q.kind ? `kind ${cap1(q.kind)}` : "kind unknown", q.role, q.created_at ? ago(q.created_at) : ""].filter(Boolean).join(" · ")),
+    h("h2", {}, r.title, r.text ? h("span", { class: "muted" }, ` ${r.text}`) : null),
+    REQUEUE.has(q.kind) || q.kind === "untrusted" ? track(1, `Coder · ${q.kind}`) : null,
+    kv("Why it's stuck", kindText && n ? kindText.why(n) : `The ${q.role} filed ${q.kind ? `a ${q.kind}` : "a"} request${n ? ` on #${n}` : ""}.`),
+    kv("What happens next", kindText && n ? kindText.next(n) : "Nothing until you answer."),
+    h("div", { class: "said" }, h("div", { class: "muted" }, "What the agent wrote (plain text from GitHub)"),
+      h("pre", { class: "body" }, full ? full.body : q.summary)),
+    kindText && kindText.step && n ? h("div", { class: "step" }, h("span", { class: "num" }, "1"), h("div", {}, kindText.step(n, issueUrl))) : null,
+    h("div", { class: "step" }, kindText && kindText.step && n ? h("span", { class: "num" }, "2") : null,
+      h("div", {}, requestAction(r, d, full, beside))),
+    events.length ? h("details", fold("timeline"), h("summary", {}, `Timeline${n ? ` #${n}` : ""} · ${events.length} ${events.length === 1 ? "event" : "events"} (last 7 days)`),
+      h("ul", { class: "items" }, events.map((e) => h("li", {}, h("span", { class: "muted" }, `${String(e.at).slice(5, 16).replace("T", " ")} `),
+        e.url ? link(e.url, `${e.text} ↗`) : e.text)))) : null,
+    h("details", fold("gh"), h("summary", {}, "GitHub detail"),
+      h("div", {}, issue ? `labels: ${issue.labels.join(", ") || "none"} · ` : "",
+        d.inbox ? link(d.inbox.url, `inbox #${d.inbox.number}`) : "no inbox",
+        d.vars ? ` · AGENT_OWNER_LOGIN=${d.vars.AGENT_OWNER_LOGIN || "(not set)"}` : "",
+        full && full.url ? [" · ", link(full.url, "the request comment ↗")] : null))];
+}
+
+// A fold in the pane stays open or shut as you left it while data arriving re-draws the pane.
+state.folds = {};
+const fold = (name) => ({ class: name, open: !!state.folds[name], ontoggle: (e) => { state.folds[name] = e.currentTarget.open; } });
+
+// The issue's stages, the current one marked. Only drawn where the stage is known from the row itself.
+function track(at, label) {
+  const stages = ["Queued", label, "In review", "Merge gate", "Merged"];
+  return h("ol", { class: "track", "aria-label": "Stage" }, stages.map((s, i) => h("li", { class: i === at ? "on" : (i < at ? "past" : null),
+    "aria-current": i === at ? "step" : null }, s)));
+}
+
+// The primary action, Reject, and the three states drawn where the confirm opens: disabled with the
+// reason, refused (nothing was posted), and waiting for the Agent inbox workflow's answer. A post in
+// flight is kept per row (state.posting), so opening another item meanwhile neither re-enables these
+// buttons nor loses that item's own confirm.
+state.posting = new Set();
+function requestAction(r, d, full, beside) {
+  const q = r.req;
+  const p = state.pane;
+  const msg = state.paneMsg[r.key];
+  const busy = state.posting.has(r.key);
+  const [text, effect] = KIND_APPROVE[q.kind] || ["Approve", "the repository's own hook for this kind of request runs"];
+  const reasonOff = !full
+    ? "This request's comment was not read (the inbox could not be read, or it is older than the newest 1,000 comments), so it is not answered from here: answer it on the inbox."
+    : (full.pending || (msg && msg.kind === "waiting") ? "Your answer is posted; waiting for the Agent inbox workflow to apply it." : answerBlock(d));
+  const open = (which) => () => {
+    if (msg && msg.kind !== "waiting") delete state.paneMsg[r.key]; // trying again: the last outcome is old news
+    state.pane = { key: r.key, confirm: which, reason: "" };
+    state.focusId = which === "reject" ? "reject-reason" : "confirm-post";
+    renderView();
+  };
+  const buttons = h("div", { class: "actions" },
+    h("button", { type: "button", disabled: !!reasonOff || busy, onclick: open("approve") }, text),
+    SEEN_ONLY.has(q.kind) ? null : h("button", { type: "button", class: "quiet", disabled: !!reasonOff || busy, onclick: open("reject") }, "Reject…"),
+    beside ? h("span", { class: "muted beside" }, beside) : null);
+  let below = null;
+  if (p.confirm && (busy || !reasonOff)) below = requestConfirm(r, d, text, effect, busy);
+  else if (busy) below = h("div", { class: "state waiting" }, "Posting…");
+  else if (msg && (msg.kind !== "waiting" || reasonOff)) below = paneState(msg);
+  else if (full && full.pending) below = h("div", { class: "state waiting" }, reasonOff);
+  else if (reasonOff) below = h("div", { class: "state off" }, reasonOff, !full && d.inbox ? [" ", link(d.inbox.url, `Inbox #${d.inbox.number} ↗`)] : null);
+  return [buttons, below];
+}
+
+function requestConfirm(r, d, text, effect, busy) {
+  const q = r.req;
+  const p = state.pane;
+  const n = q.issue;
+  const reject = p.confirm === "reject";
+  const line = (reason) => (reject ? `/reject ${q.id} ${oneLine(reason, 300)}`.trimEnd() : `/approve ${q.id}`);
+  const code = h("code", {}, line(p.reason));
+  const s = d.stats && d.stats[q.role];
+  const expect = ["Its reply on the inbox within a minute or two."];
+  if (!reject && REQUEUE.has(q.kind)) {
+    expect.push("A run named for an issue skips the attempt cap.");
+    if (s) expect.push(s.cap === null || s.cap === undefined ? `${s.today} ${q.role} runs today.` : `Today ${s.today} of ${s.cap} ${q.role} runs are used.`);
+    if (d.vars && d.vars.AGENTS_ENABLED !== "true") expect.push("The agents are off in this repository, so the run does not start until they are on.");
+  }
+  const rejectEffect = KIND_APPROVE[q.kind] ? `#${n} stays as it is, gets the reason as a comment, and loses agent:needs-human`
+    : "the repository's own hook for this kind of request decides";
+  const post = () => postRequest(r, reject ? { type: "inbox_command", command: "reject", req: q.id, reason: p.reason }
+    : { type: "inbox_command", command: "approve", req: q.id });
+  const field = reject ? h("input", { type: "text", id: "reject-reason", "aria-label": "Reason", autocomplete: "off", maxlength: 300,
+    placeholder: "Reason (optional, one line)", disabled: busy,
+    oninput: (e) => { p.reason = e.target.value; code.textContent = line(p.reason); },
+    onkeydown: (e) => { if (e.key === "Enter" && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); post(); } } }) : null;
+  if (field) field.value = p.reason;
+  const cancel = () => { state.pane = { key: r.key, confirm: "", reason: "" }; renderView(); };
+  return h("div", { class: "confirm", role: "group", "aria-label": "Confirm" },
+    h("strong", {}, reject ? `Reject ${q.id}?` : `${text}${n ? ` #${n}` : ""}?`),
+    kv("Acts as", state.session.viewer),
+    field,
+    kv("Posts on", link(d.inbox.url, `inbox #${d.inbox.number}`), ": ", code),
+    kv("Then", `${cap1(reject ? rejectEffect : effect)}.`),
+    kv("Expect", expect.join(" ")),
+    h("div", { class: "actions" },
+      h("button", { type: "button", id: "confirm-post", disabled: busy, onclick: post }, busy ? "Posting…" : "Post the command"),
+      h("button", { type: "button", class: "quiet", disabled: busy, onclick: cancel }, "Cancel")));
+}
+
+function paneState(msg) {
+  if (msg.kind === "waiting") {
+    return h("div", { class: "state waiting" }, `Posted ${hhmm(msg.at)} `, msg.url ? link(msg.url, `${msg.line} ↗`) : h("code", {}, msg.line),
+      " · waiting for the Agent inbox workflow · checking every 10 s for 2 min");
+  }
+  return h("div", { class: `state ${{ refused: "refused", done: "done" }[msg.kind] || "note"}` }, msg.text);
+}
+
+async function postRequest(r, payload) {
+  const repo = r.repo;
+  if (state.posting.has(r.key)) return; // one post per row at a time: Enter held down, or a second click
+  state.posting.add(r.key);
+  renderView();
+  try {
+    const out = await api("/api/action", { method: "POST", body: Object.assign({ repo, viewer: state.session.viewer }, payload) });
+    state.paneMsg[r.key] = { kind: "waiting", line: out.posted, url: out.url, at: Date.now() };
+    watchAnswer(repo, payload.req, r.key);
+  } catch (e) {
+    // A 4xx is the server refusing before it posts (who may answer, already answered, a command still
+    // waiting). A 5xx, or no answer from the dashboard at all, may come after the comment was posted.
+    state.paneMsg[r.key] = e.status >= 400 && e.status < 500
+      ? { kind: "refused", text: `Nothing was posted: ${e.message}.` }
+      : { kind: "unknown", text: `It is not known whether anything was posted (${e.message}): look at the inbox before trying again.` };
+  }
+  state.posting.delete(r.key);
+  if (state.pane.key === r.key) state.pane = { key: r.key, confirm: "", reason: "" };
+  renderView();
+  await loadRepo(repo, true);
 }
 
 function activityView() {
@@ -624,23 +882,27 @@ async function loadInbox(repo, fresh) {
 }
 
 // After any inbox command: re-read the inbox every 10 s for two minutes, until the bot has replied
-// (awaiting_reply off), which also re-enables the other answer buttons.
-function watchAnswer(repo, req) {
+// (awaiting_reply off), which also re-enables the other answer buttons. Posted from an item pane
+// (key), the outcome is said in that pane; otherwise in the notice line.
+function watchAnswer(repo, req, key) {
   let left = 12;
+  const say = (text, kind) => {
+    if (key) { state.paneMsg[key] = { kind, text }; renderView(); } else notice(text);
+  };
   const tick = async () => {
     left -= 1;
     await loadInbox(repo, true); // the inbox only: the merge gate's logs are not worth re-reading every 10 s
     const got = state.inbox[repo];
     if (got && got.requests && !got.awaiting_reply) {
       const r = req && got.requests.find((x) => x.id === req);
-      notice(req && r && !r.answered
-        ? `The Agent inbox workflow replied but did not record ${req} as answered: read its reply on the inbox.`
-        : "The Agent inbox workflow has replied; see the inbox for what was done.");
+      if (req && r && !r.answered) say(`The Agent inbox workflow replied but did not record ${req} as answered: read its reply on the inbox.`, "note");
+      else if (key && r) say(`The Agent inbox workflow replied and recorded ${req} as answered.`, "done");
+      else say("The Agent inbox workflow has replied; see the inbox for what was done.", "note");
       await loadRepo(repo, true);
       return;
     }
     if (left > 0) setTimeout(tick, 10000);
-    else notice("No reply from the Agent inbox workflow after two minutes; check its runs on GitHub.");
+    else say("No reply from the Agent inbox workflow after two minutes; check its runs on GitHub. Until it replies, or for ten minutes, no other inbox command is sent in this repository.", "note");
   };
   setTimeout(tick, 10000);
 }
@@ -963,7 +1225,17 @@ function repoView() {
 
 function renderView() {
   const v = state.route.view;
+  // Data arriving re-draws the view: a field you are typing in (the reject reason) keeps its focus and caret.
+  const a = document.activeElement;
+  const keep = a && a.id && $("view").contains(a) ? [a.id, a.selectionStart, a.selectionEnd] : null;
   replace($("view"), { needs: needsView, activity: activityView, week: weekView, repos: reposView, repo: repoView }[v]());
+  const focus = state.focusId || (keep && keep[0]);
+  const el = focus && $(focus);
+  if (el) {
+    el.focus({ preventScroll: !state.focusId }); // a re-render keeps focus without moving the page
+    if (!state.focusId && keep && typeof keep[1] === "number") { try { el.setSelectionRange(keep[1], keep[2]); } catch (_) { /* not a text field */ } }
+  }
+  state.focusId = "";
   // Adding and finding repositories is a static form, so a re-render while you type keeps your text.
   $("repo-tools").hidden = v !== "repos";
   const ex = state.session ? state.session.excluded : [];
@@ -1015,14 +1287,24 @@ async function loadExtras(repo, fresh) {
 // gate of a repository when it is the one opened.
 function onRoute() {
   const was = state.route.view;
+  const wasOpen = state.route.open;
   state.route = parseRoute();
+  // Another item opened: a confirm left open on the last one closes; what was posted from it stays.
+  if (state.route.open !== wasOpen) state.pane = { key: "", confirm: "", reason: "" };
+  const named = state.route.open; // the item the address named, before the render pins the top one
   if (state.route.view === "needs" && was !== "needs") lookAgain();
   const repo = routeRepo();
   const opened = repo && repo !== state.selected;
   state.selected = repo;
   renderAll();
   if (opened) loadExtras(repo, false);
-  window.scrollTo(0, 0);
+  // Opening an item keeps the list where it is; where the pane sits under the list, it is brought into view.
+  if (state.route.view === "needs" && was === "needs") {
+    const pane = $("pane");
+    if (pane && named && getComputedStyle(pane.parentNode).gridTemplateColumns.split(" ").length < 2) {
+      window.scrollTo(0, pane.getBoundingClientRect().top + window.scrollY - document.querySelector(".bar").offsetHeight - 8);
+    }
+  } else window.scrollTo(0, 0);
 }
 
 async function refresh(fresh) {
