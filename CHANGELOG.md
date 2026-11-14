@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0 (2026-11-14)
+
+- The dashboard can now start and stop the agents' work. Start the coder (an auto pick, with every
+  check of a scheduled run), run the Claude review or the merge gate on an agent PR, cancel a running Gatehand run,
+  and turn `AGENTS_ENABLED` or `AGENT_AUTO_MERGE` on or off.
+- Review verdicts from the page: "Approve…" and "Request changes…" on an agent PR post the review
+  comment the merge gate and the fixer read from a person with write access, for the head the
+  preview names (refused if it moved, and Approve while the fixer is working). A Request changes note is plain text that cannot move the verdict under it, and can start the
+  fixer on it.
+- These show a preview first (the exact GitHub calls, the comment, what to expect, anything in the
+  way) and are done only if nothing changed since: a new head, a changed variable or a coder run that
+  started waiting all refuse.
+- Fixed: "Hand back to the merge gate" (0.5.0) was always refused.
+- Nothing installed into repositories changes: no update is needed.
+
 ## 0.5.0 (2026-11-14)
 
 - The dashboard can now answer the agents. Each open inbox request has its own button (named for

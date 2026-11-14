@@ -62,8 +62,10 @@ files above.
 `/gatehand:dashboard`, or `python3 bin/dashboard.py`, opens a local page with every repository
 where Gatehand is installed: what waits for you (inbox requests, stopped roles, blocked issues),
 agent PRs and why the merge gate holds them, what is running, the queue, and the week's runs and
-cost. Its buttons answer inbox requests, rerun, pause or resume a role, and hold or unqueue issues, as
-you, through your own `gh` login: the same comment or label you would make by hand. See
+cost. Its buttons answer inbox requests, rerun, pause or resume a role, hold or unqueue issues, start
+or cancel agent runs, approve or request changes on agent PRs, and turn the agents or auto-merge on
+and off, as you, through your own `gh` login: the same comment, label, dispatch or variable you
+would set by hand. See
 [`docs/dashboard.md`](docs/dashboard.md).
 
 ## Runners
