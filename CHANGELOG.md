@@ -8,6 +8,11 @@
   you is in the tab's title. The total tiles are gone: what waits for you, runs going and the week's cost sit
   in the sidebar; open PRs, queued issues and run counts are per repository, on Repositories and Week. Every list and
   button is still there, and sends exactly what it did.
+- Dashboard: the repository payload carries each role's `maxAttemptsPerIssue`, `maxCiFixes`,
+  `breakerThreshold` and `timeoutMinutes` (null when `policy.json` does not set one), and each
+  scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
+  branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only;
+  the page does not show them yet (#21, #22).
 - Nothing installed into repositories changes: no update is needed.
 
 ## 0.7.0 (2026-11-14)

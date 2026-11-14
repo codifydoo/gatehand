@@ -47,6 +47,22 @@ The inbox requests on a repository's Pipeline come from the agent bot's own requ
 request the "Open requests" checklist missed (that list is a best-effort summary; the comments are
 the record).
 
+### Limits and schedules
+
+`/api/repo/<owner>/<name>` also carries the figures the page shows beside an action that spends
+another run ("attempt 2 of 2", "next coder run 12:17"):
+
+| Field | What | Read from |
+|---|---|---|
+| `policy.roles.<role>` | `runsPerDay`, `maxOpenPrs`, `maxReviewFixes`, `maxAttemptsPerIssue`, `maxCiFixes`, `breakerThreshold`, `timeoutMinutes` | `policy.json` on the default branch. A key the role does not set is `null`, never the default the scripts would use; with `policy.json` unreadable, `roles` is empty and `policy_ok` is `false` |
+| `schedules.<coder\|merge\|sweep\|digest\|triage>` | `{"cron": [...], "next_run": "…Z"}`: the workflow's cron lines and the first minute after now that one of them matches, in UTC as GitHub runs cron. `null`: the workflow has no `schedule:`, or is not on the default branch (triage is optional). `"unknown"`: the file could not be read, or its `on:` is in a shape the reader does not follow; listed under the repository's errors | the `schedule:` lines of `agent-coder.yml`, `agent-merge.yml`, `agent-sweep.yml`, `agent-digest.yml` and `agent-triage.yml` on the default branch, not `policy.json`'s `schedules` (those take effect only once the workflows are re-rendered) |
+
+`next_run` is when the schedule falls due after `fetched_at` (the payload is cached for a minute, so
+it can already have passed: that is "due now"); GitHub often starts a scheduled run some minutes
+late, and skips it while the workflow is disabled. It is `null`, and listed under the errors, for a cron the
+server cannot read (only `*`, numbers, `-`, `,` and `/`, the operators GitHub documents) or one
+that matches no day in nine years.
+
 ## What you can do from it
 
 Every button asks you to confirm, says what will happen, and then does it with your own `gh` login,
