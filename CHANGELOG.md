@@ -6,6 +6,11 @@
   `rate_limited` with the time the limit resets, `not_found`, `no_access`, `unknown`), in each
   repository's new `unreadable` list and beside `error` in a failed request's answer. The page does
   not show it yet. Installed repositories need no update: the dashboard runs from the package.
+- Dashboard: the repository payload carries each role's `maxAttemptsPerIssue`, `maxCiFixes`,
+  `breakerThreshold` and `timeoutMinutes` (null when `policy.json` does not set one), and each
+  scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
+  branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only;
+  the page does not show them yet (#21, #22).
 
 ## 0.7.0 (2026-11-14)
 
