@@ -28,10 +28,10 @@ number of things waiting for you is also in the tab's title.
 | Activity | in every repository: running now, each with Cancel; not moving and not waiting on you, one row per cause per repository with when it moves; finished today | the running and queued Actions runs of Gatehand's nine workflows; `AGENTS_ENABLED`; `state/breaker.json`, the ledger and `policy.json`'s `runsPerDay` and `maxOpenPrs`; labels |
 | Week | each repository's runs over seven days per role: outcomes, runs today against `runsPerDay`, turns, time, cost | the ledger |
 | Repositories | version, `AGENTS_ENABLED`, `AGENT_AUTO_MERGE`, runs today against each role's `runsPerDay`, seven-day cost, breakers, health | `install.lock.json`, the repository's Actions variables, the ledger, the runner ref's copy of `agent-coder.yml` against the default branch's |
-| A repository, Pipeline | its inbox requests in full, agent PRs with the merge gate's last word on each, the queue by priority, in progress, blocked, candidates, on hold, merged to close | the inbox issue's newest 1,000 comments (the agent bot's only), the job logs of the newest three `Agent merge` runs that ran (a PR's newest line wins, so a run dispatched for one PR does not hide the others), labels |
-| A repository, Agents | each role's breaker, runs running now | the ledger, Actions runs |
-| A repository, Runs and spend | runs per role over seven days, ledger rows, recent finished runs | the ledger, Actions runs |
-| A repository, Settings | the two switches, who may answer, the inbox, version, whether the runner ref matches the default branch | the repository's Actions variables, `install.lock.json`, `policy.json` |
+| A repository, Pipeline | its inbox requests in full, agent PRs with the merge gate's last word on each, the queue by priority (with when the coder runs next and its runs today), in progress, blocked, candidates, on hold, merged to close | the inbox issue's newest 1,000 comments (the agent bot's only), the job logs of the newest three `Agent merge` runs that ran (a PR's newest line wins, so a run dispatched for one PR does not hide the others), labels |
+| A repository, Agents | each role: stopped or paused and since when, running or idle, runs today against `runsPerDay`, failures in a row against `breakerThreshold`, open agent PRs against `maxOpenPrs`, and when it runs next; each scheduled workflow with its cron (UTC), its last finished run and its next run; runs running now; each role's limits | the ledger, `state/breaker.json`, Actions runs, `policy.json`, the workflow files' `schedule:` (below) |
+| A repository, Runs and spend | seven days of cost (a floor) and runs per role, the ledger rows with each one's issue or PR and its run, recent finished Actions runs | the ledger, Actions runs |
+| A repository, Settings | the two switches with what each does now, who may answer, the inbox, version, whether the runner ref matches the default branch, where the limits are set, and Hide | the repository's Actions variables, `install.lock.json`, `policy.json` |
 
 Needs you counts the way it lists: a request about an agent PR (the fixer stopped, the merge gate
 cannot update it, its review never posted) is that PR's row; a stopped role and its breaker request
@@ -180,8 +180,48 @@ changed after its preview is previewed again before anything is sent. A PR's run
 the last seven days are beside the buttons; Claude review runs are not in the ledger. If labels are
 taken off one by one and a later one is refused, the pane says which were done.
 
-The other rows (an issue, to merge, to close) open a pane that says what to do and links to the
-repository tab, or GitHub, where it is done; their own panes come later.
+A blocked issue with no open request has a pane that says so (it was answered, or never filed), that
+the coder picks only `agent:ready` issues, and offers "Rerun coder" (`/rerun coder #N`) with the issue's
+coder runs and cost beside it, and Hold or Release; Rerun is disabled, with the reason, while the issue
+has an open `untrusted` request, or carries `agent:hold` (a run named for a held issue does not take it).
+If the issue also carries `agent:ready` and not `agent:hold`, the pane says the coder may take it on its next scheduled run.
+The server refuses a second command until the inbox workflow replies; after that, a rerun from a page
+not yet refreshed would be posted again, since a rerun names no request.
+
+The two folded groups open link-only panes, since the page merges nothing and closes nothing. "To
+merge" says the gate found nothing in the way and auto-merge is a dry run, shows the gate's line, and
+links to merge the PR on GitHub or to turn auto-merge on in Settings; Hold, Run review, Run merge gate
+and Request changes… stay available, quieter. "To close" says a merge is not a deploy and links to
+close the issue on GitHub once the fix is live.
+
+### A repository's tabs
+
+Lists route; they do not act. Whatever on a tab has a row in Needs you (an open request, a stopped
+role, a held agent PR, a blocked issue, an agent PR to merge, an issue to close) links to that row's
+item ("Open item →"), and is acted on there. What has no row is acted on in place, with the same
+confirm as an item pane, opening under its button: Pause for a role that runs, the two switches,
+Unqueue and Hold on a queued issue, Release on a held one, Start on the next one (the coder) and Run
+merge gate… (every agent PR) on the Agents tab's schedules, Cancel… on a running run, the quieter
+actions on an agent PR nobody holds, and a request with no row: one the inbox's checklist missed, or
+an older breaker request of a role that has a newer one.
+
+The Agents tab says when a role runs next by the run gate's rules, in its order: not while the
+agents are off, not while the runner branch's `agent-coder.yml` differs from the default branch's
+(the coder), not until its breaker is reset, not today once its runs are used up, not while the open
+agent PRs are at the coder's `maxOpenPrs`; else the coder's next scheduled run. If a part one of
+these rules needs could not be read (`policy.json` included), or `runnerRef` is the default branch
+itself (the gate refuses that), it says nothing. It does not read `AGENT_BOT_ID` or the fixer's own
+workflow on the runner branch, so for the fixer it gives only reasons it will not run, never a time.
+A figure is "n of m" only where `policy.json` sets m, and a next run is shown only where the server
+read one: where either is null or unknown the page shows nothing in its place, never a default.
+Times are on this machine's clock; crons are as written, in UTC. A run row that never reached the
+model is marked "not counted".
+
+With the agents off, the Pipeline says so above its rows (which stay): what skips its runs, how many
+queued issues (not held) and open PRs wait (each only if it was read and not zero), that inbox
+answers still work, and a link to the switch in Settings; each queued issue reads "Waiting on:
+agents off". With nothing queued, it says the page never queues work and links to the suggested
+(`agent:candidate`) issues on GitHub when there are any.
 
 ### Limits and schedules
 
@@ -201,22 +241,22 @@ that matches no day in nine years.
 
 ## What you can do from it
 
-Every button asks you to confirm, says what will happen, and then does it with your own `gh` login,
+Every button asks you to confirm (in an item pane or on a repository's tabs, under the button; on Activity, in a dialog), says what will happen, and then does it with your own `gh` login,
 so the agents see exactly what they would see if you had done it on GitHub, and apply the same rules.
 
 | Button | Where | What it does | Who it counts from |
 |---|---|---|---|
-| Approve (named for the request: "Requeue and rerun", "Reset the breaker", "Mark as seen"…), Reject… | each open inbox request on the Pipeline tab, and the item pane of its row in Needs you (a request about a PR is in the PR's pane, a breaker request in the role's) | posts `/approve REQ-…` or `/reject REQ-… <reason>` on the inbox issue | `AGENT_OWNER_LOGIN` only |
-| Rerun coder | blocked issues | posts `/rerun coder #N` | `AGENT_OWNER_LOGIN` only |
-| Pause, Resume | each role, on a repository's Agents tab; Resume also in a stopped role's pane | posts `/pause <role>` or `/resume <role>` | `AGENT_OWNER_LOGIN` only |
-| Unqueue | the queue | removes `agent:ready` from an issue | people with write access |
+| Approve (named for the request: "Requeue and rerun", "Reset the breaker", "Mark as seen"…), Reject… | the item pane of its row in Needs you (a request about a PR is in the PR's pane, a breaker request in the role's); on the Pipeline tab, only a request with no row | posts `/approve REQ-…` or `/reject REQ-… <reason>` on the inbox issue | `AGENT_OWNER_LOGIN` only |
+| Rerun coder | a blocked issue's pane | posts `/rerun coder #N` | `AGENT_OWNER_LOGIN` only |
+| Pause, Resume | Pause: a role that runs, on a repository's Agents tab; Resume: a stopped role's pane | posts `/pause <role>` or `/resume <role>` | `AGENT_OWNER_LOGIN` only |
+| Unqueue | the queue, on the Pipeline tab | removes `agent:ready` from an issue | people with write access |
 | Read and queue on GitHub | candidates | opens the issue; you add `agent:ready` there | people with write access |
-| Hold, Release | issues and agent PRs | adds or removes `agent:hold` | people with write access |
-| Hand back to the merge gate | agent PRs with `agent:blocked` or `agent:needs-human`, on the Pipeline tab and in the PR's pane | removes those labels, once you have fixed the PR yourself | people with write access |
+| Hold, Release | issues and agent PRs in their panes; on the Pipeline tab, queued and held issues and agent PRs with no row in Needs you | adds or removes `agent:hold` | people with write access |
+| Hand back to the merge gate | the pane of an agent PR with `agent:blocked` or `agent:needs-human` | removes those labels, once you have fixed the PR yourself | people with write access |
 | Turn agents on/off, Turn auto-merge on/off | a repository's Settings tab | sets `AGENTS_ENABLED` or `AGENT_AUTO_MERGE` to `true` or `false` | people who may set Actions variables |
-| Start the coder on the next one | the queue | dispatches an auto-pick `agent-coder.yml` run on `policy.runnerRef` | people with write access |
-| Approve…, Request changes… | agent PRs | posts a review comment the merge gate and the fixer read (below); Request changes can also start the fixer on it | people with write access, never the agent bot |
-| Run review, Run merge gate | agent PRs | dispatches `claude-code-review.yml` or `agent-merge.yml` on the default branch, for that PR (or every agent PR) | people with write access |
+| Start the coder on the next one | the coder's schedule, on a repository's Agents tab | dispatches an auto-pick `agent-coder.yml` run on `policy.runnerRef` | people with write access |
+| Approve…, Request changes… | an agent PR's pane, or on the Pipeline tab for one with no row in Needs you | posts a review comment the merge gate and the fixer read (below); Request changes can also start the fixer on it | people with write access, never the agent bot |
+| Run review, Run merge gate | an agent PR's pane, or on the Pipeline tab for one with no row; Run merge gate for every agent PR on the Agents tab | dispatches `claude-code-review.yml` or `agent-merge.yml` on the default branch, for that PR (or every agent PR) | people with write access |
 | Cancel | Activity, and a repository's Agents tab | cancels a run of one of Gatehand's nine workflows | people with write access |
 
 A button the agents would ignore from you is shown disabled with the reason. After an inbox command
