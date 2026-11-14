@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0 (2026-11-14)
+
+- New: a local dashboard, `/gatehand:dashboard` or `python3 bin/dashboard.py`. One page for every
+  repository where Gatehand is installed (found by scanning your repositories for
+  `install.lock.json`): what waits for you, open inbox requests in full, agent PRs with the merge
+  gate's last word on each, running and recent runs, the queue, and seven days of runs, cost and
+  breakers per role. It reads the ledger, labels, inbox and runs the way the agents' own scripts do,
+  through your `gh` login, and writes nothing to GitHub. It listens on 127.0.0.1 behind a per-launch
+  secret, Host and Origin checks; `docs/dashboard.md` has the security model. Python 3.9+ and `gh`,
+  no packages.
+- Nothing installed into repositories changes: no update is needed.
+
 ## 0.3.3 (2026-11-12)
 
 - Security: a review dispatched by hand for a fork's PR is refused before the PR is checked out. The

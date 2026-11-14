@@ -57,6 +57,14 @@ the package and recorded in `.github/agents/install.lock.json`. `/gatehand:updat
 them; it refuses to overwrite a file you edited by hand, because that change belongs in one of the
 files above.
 
+## Dashboard
+
+`/gatehand:dashboard`, or `python3 bin/dashboard.py`, opens a local page with every repository
+where Gatehand is installed: what waits for you (inbox requests, stopped roles, blocked issues),
+agent PRs and why the merge gate holds them, what is running, the queue, and the week's runs and
+cost. It reads through your own `gh` login and changes nothing on GitHub. See
+[`docs/dashboard.md`](docs/dashboard.md).
+
 ## Runners
 
 GitHub-hosted runners by default: a fresh VM per job is the isolation the design needs. For your own
