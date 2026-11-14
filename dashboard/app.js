@@ -1072,12 +1072,13 @@ function issuePane(r) {
     h("h2", {}, r.title, r.text ? h("span", { class: "muted" }, ` ${r.text}`) : null),
     track(1, "Coder · blocked"),
     kv("Why it's stuck", [issue ? `It carries ${issue.labels.filter((l) => STUCK.includes(l)).join(" and ") || "a blocking label"}` : "It is blocked",
-      d.inbox_state === "unknown" || !d.inbox
-        ? ". Which issue is the inbox could not be told, so it is not known whether a request about it is open."
-        : ", and no inbox request about it is open: it was answered, or never filed."]),
-    kv("What happens next", issue && issue.labels.includes("agent:ready")
-      ? "It also carries agent:ready, so the coder may take it on its next scheduled run (the lock then takes agent:blocked off)."
-      : (issue && issue.labels.includes("agent:hold") ? "Nothing while it carries agent:hold: the agents leave it alone."
+      d.inbox ? ", and no inbox request about it is open: it was answered, or never filed."
+        : (d.inbox_state === "none" ? ". There is no inbox issue, so no request about it is open."
+          : ". Which issue is the inbox could not be told, so it is not known whether a request about it is open.")]),
+    // Held first: the coder never picks a held issue, even one that also carries agent:ready.
+    kv("What happens next", issue && issue.labels.includes("agent:hold") ? "Nothing while it carries agent:hold: the agents leave it alone."
+      : (issue && issue.labels.includes("agent:ready")
+        ? "It also carries agent:ready, so the coder may take it on its next scheduled run (the lock then takes agent:blocked off)."
         : "Nothing. The coder picks only issues labelled agent:ready, and this one is not. It moves when you rerun it, or when it is queued again on GitHub.")),
     step(null, paneActions(r, acts, beside), h("p", {}, issue ? link(issue.url, `Open #${n} on GitHub ↗`) : null)),
     timeline(`#${n}`, (rows || []).map(runEvent)),

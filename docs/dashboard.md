@@ -119,7 +119,7 @@ A blocked issue with no open request has a pane that says so (it was answered, o
 the coder picks only `agent:ready` issues, and offers "Rerun coder" (`/rerun coder #N`) with the issue's
 coder runs and cost beside it, and Hold or Release; Rerun is disabled, with the reason, while the issue
 has an open `untrusted` request, or carries `agent:hold` (a run named for a held issue does not take it).
-If the issue also carries `agent:ready`, the pane says the coder may take it on its next scheduled run.
+If the issue also carries `agent:ready` and not `agent:hold`, the pane says the coder may take it on its next scheduled run.
 The server refuses a second command until the inbox workflow replies; after that, a rerun from a page
 not yet refreshed would be posted again, since a rerun names no request.
 
