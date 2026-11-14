@@ -91,7 +91,7 @@ if grep -qx 'GH_TOKEN=ghs_readOnlyTokenForTheTest' "${TMP}/gh_env" && grep -qx '
 else
   t_fail "wrapper: gh's environment was $(tr '\n' ' ' <"${TMP}/gh_env")"
 fi
-for ok in "pr diff 7" "pr list --state open" "issue view 12 --json body" "search prs fix --limit 5"; do
+for ok in "pr diff 7" "pr diff 7 --name-only" "pr view 7 -c" "pr list --state open -L 5" "pr list --json=number,title" "issue view 12 --json body" "search prs fix --limit 5"; do
   # shellcheck disable=SC2086
   rgh ${ok}
   [[ "${rc}" -eq 0 && -s "${TMP}/gh_argv" ]] && t_pass "wrapper: '${ok}' goes through" || t_fail "wrapper: '${ok}' was refused: $(cat "${TMP}/gh_err")"
@@ -121,12 +121,26 @@ refused "a host path" pr view 'evil.example/acme/repo/pull/7'
 refused "a URL on github.com too" pr view 'https://github.com/other/repo/pull/7'
 refused "an ssh remote" pr view 'git@evil.example:acme/repo'
 refused "a flag before the subcommand" --repo other/repo pr view 7
+refused "combined short flags (-cq is --jq)" pr view 7 --json title -cq '$ENV'
+refused "combined short flags (-cw is --web)" pr view 7 -cw
+refused "an attached short value" pr list -L5
+refused "--" pr view 7 -- --jq x
+refused "a PR given as anything but a number" pr view main
+refused "a host without a dot" pr view 'localhost:8080/acme/repo/pull/7'
+refused "a --json value that is not field names" pr view 7 --json 'title|$ENV'
+refused "a --json= value that is not field names" pr view 7 '--json=title,$ENV'
+refused "a search text with a URL" search prs 'https://evil.example/x'
+refused "a value that is a flag" pr list --state --jq
+refused "a flag that wants a value, with none" pr list --state
+refused "a positional for pr list" pr list evil
+refused "a value on a flag that takes none" pr view 7 --comments=yes
 
 # --- the post ----------------------------------------------------------------------------------------
 # The stub curl: logs "METHOD URL TOKEN-KIND" per call, keeps argv and the -K config, keeps the
 # comments posted in a JSON list that the GET then serves after the EXISTING ones.
 mkdir -p "${TMP}/bin"
 cat >"${TMP}/bin/curl" <<'STUB'
+#!/usr/bin/env bash
 cfg="$(cat)"
 printf '%s\n' "$@" >>"${CURL_ARGV}"
 printf '%s\n' "${cfg}" >>"${CURL_STDIN}"

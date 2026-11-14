@@ -193,21 +193,55 @@ jobs:
             printf '#!/usr/bin/env bash\nset -euo pipefail\nREAL_GH=%q\nREPO=%q\nHOST=%q\n' "${real}" "${GITHUB_REPOSITORY}" "${GITHUB_SERVER_URL#https://}"
             cat <<'WRAP'
           die() { echo "review-gh: $*" >&2; exit 2; }
-          [[ $# -ge 1 ]] || die "usage: review-gh pr view|pr diff|pr list|issue view|search ..."
-          case "$1 ${2:-}" in
-            "pr view"|"pr diff"|"pr list"|"issue view") ;;
-            "search prs"|"search issues"|"search code"|"search commits") ;;
-            *) die "only pr view, pr diff, pr list, issue view and search are allowed" ;;
+          # An ALLOWLIST, never a list of refusals: gh's flag parser accepts combined short flags
+          # (`-cq '$ENV'` is -c and --jq), attached values (`-L5`) and `--`, so every flag must be
+          # one this verb may use, spelled as its own token, and every value has a shape.
+          #   flags: name:v takes a value; positionals: num = PR or issue numbers, text = a query.
+          case "${1:-} ${2:-}" in
+            "pr view"|"issue view") flags="--json:v --comments -c"; pos=num ;;
+            "pr diff") flags="--patch --name-only"; pos=num ;;
+            "pr list") flags="--state:v -s:v --limit:v -L:v --json:v --search:v -S:v --base:v -B:v --label:v -l:v --author:v -A:v"; pos=none ;;
+            "search prs"|"search issues"|"search code"|"search commits") flags="--limit:v -L:v --json:v --state:v --match:v --sort:v --order:v"; pos=text ;;
+            *) die "only pr view, pr diff, pr list, issue view and search prs|issues|code|commits are allowed" ;;
           esac
-          host_re='^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+(:[0-9]+)?/'
+          value_ok() { # <flag> <value>
+            case "$1" in
+              --json) [[ "$2" =~ ^[A-Za-z][A-Za-z,]*$ ]] ;;
+              --limit|-L) [[ "$2" =~ ^[0-9]{1,4}$ ]] ;;
+              *) [[ "$2" =~ ^[A-Za-z0-9\ :._,\"\'#()+-]*$ && "$2" != *://* && "$2" != -* ]] ;;
+            esac
+          }
+          want=""
           for a in "${@:3}"; do
-            [[ ! "${a}" =~ ${host_re} ]] || die "an argument that names a host is not allowed"
-            case "${a}" in
-              --jq|--jq=*|-q|-q*|--template|--template=*|-t|-t*|--repo|--repo=*|-R|-R*|--hostname|--hostname=*|--web|-w|--browser*|--owner|--owner=*)
-                die "${a%%=*} is not allowed here" ;;
-              *://*|*@*:*) die "an argument that names a host is not allowed" ;;
+            if [[ -n "${want}" ]]; then
+              value_ok "${want}" "${a}" || die "that value for ${want} is not allowed"
+              want=""
+              continue
+            fi
+            if [[ "${a}" == -* ]]; then
+              name="${a%%=*}" val=""
+              [[ "${a}" == *=* ]] && val="${a#*=}"
+              hit=""
+              for f in ${flags}; do [[ "${f%:v}" == "${name}" ]] && hit="${f}"; done
+              [[ -n "${hit}" ]] || die "${name} is not allowed here"
+              if [[ "${hit}" == *:v ]]; then
+                if [[ "${a}" == *=* ]]; then
+                  [[ "${name}" == --* ]] && value_ok "${name}" "${val}" || die "that value for ${name} is not allowed"
+                else
+                  want="${name}"
+                fi
+              else
+                [[ "${a}" != *=* ]] || die "${name} takes no value"
+              fi
+              continue
+            fi
+            case "${pos}" in
+              num) [[ "${a}" =~ ^[1-9][0-9]{0,8}$ ]] || die "only a PR or issue number is allowed, not '${a}'" ;;
+              text) value_ok query "${a}" || die "that search text is not allowed" ;;
+              *) die "no argument is allowed here but flags" ;;
             esac
           done
+          [[ -z "${want}" ]] || die "${want} needs a value"
           cfg="$(mktemp -d)"
           trap 'rm -rf "${cfg}"' EXIT
           env -i PATH=/usr/bin:/bin HOME="${cfg}" GH_CONFIG_DIR="${cfg}" GH_HOST="${HOST}" GH_REPO="${REPO}" \

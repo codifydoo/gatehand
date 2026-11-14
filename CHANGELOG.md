@@ -16,9 +16,10 @@
     `Edit(//**)` denies every file write (a shell redirect included), and its reads stop at the
     checkout (`blockReadsOutsideWorkingDirectories`, plus `Read(//proc/**)`);
   - it reaches `gh` only as `review-gh`, a wrapper the workflow writes: `pr view`, `pr diff`,
-    `pr list`, `issue view` and `search` only, no `--jq`, `--template`, `--repo`, `--hostname` or
-    `--web`, no argument that names a host, and gh runs with an empty environment but for the
-    read-only token. Plain `gh` is denied;
+    `pr list`, `issue view` and `search` only, each with an allowlist of flags (so no `--jq`,
+    `--template`, `--repo` or `--web`, and no combined short flags such as `-cq`), values of a fixed
+    shape, PR and issue numbers only, and gh runs with an empty environment but for the read-only
+    token. Plain `gh` is denied;
   - `/verify-pr` ends with the review as its final message, saved as an artifact; a new
     `post-review` job, which runs no model and checks out nothing, posts it from the marker line on
     to the run's PR as `claude[bot]`, with a Claude App token it mints itself (OIDC, then Anthropic's
