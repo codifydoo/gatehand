@@ -25,6 +25,11 @@
   links to the PR to fix it, and hands it back from the pane; Hold, Run review, Run merge gate,
   Approve… and Request changes… confirm there too, with the server's preview. Issue, to merge and to
   close rows still link to where they are done.
+- Dashboard: the repository payload carries each role's `maxAttemptsPerIssue`, `maxCiFixes`,
+  `breakerThreshold` and `timeoutMinutes` (null when `policy.json` does not set one), and each
+  scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
+  branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only;
+  the page does not show them yet (#21, #22).
 - Nothing installed into repositories changes: no update is needed.
 
 ## 0.7.0 (2026-11-14)
