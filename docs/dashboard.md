@@ -47,13 +47,26 @@ against `runsPerDay`), the coder at its open-PR limit (open `agent:pr` PRs again
 an issue in `agent:in-progress` or a PR in `agent:fixing` with no run holding it (no coder run in
 progress; for a PR, no dispatched fixer run) and no `agent:hold` (a lock the hourly sweep frees once it expires). Without `policy.json` the limits are not
 known, and that is said. A stale runner ref is not listed here; Repositories shows it under health. Each row says when it moves only where the page's data can say:
-a daily limit lifts at 00:00 UTC, as the coder's gate counts days; a role's next scheduled run and a
-lock's expiry time are not read, so nothing is shown for them. A stopped role is also a row of Needs
+a daily limit lifts at 00:00 UTC, as the coder's gate counts days; a lock's expiry time is not read,
+and a role's next scheduled run is not used there (a run that starts while the role is stopped or at
+a limit does nothing), so nothing is shown for them. A stopped role is also a row of Needs
 you, where it is reset. "Finished today" is the ledger's rows that ended today, by this browser's
 clock: agent runs, a merge by the merge gate, and a stale lock the sweep closed. The Claude review,
 and merge gate or sweep runs that merge or close nothing, write no ledger row and are not in it. Each list
 counts as the sidebar does: "n+" while a repository loads or a part of it could not be read, with
 that part named under the list.
+
+With nothing running, Activity says so and, under it, the next scheduled runs: for each scheduled
+workflow, the soonest next run across the repositories, in this browser's time, and how many
+repositories run then ("Next: merge gate 18:11 in 3 repositories, coder 18:17 in 2"); a time six
+or more days out carries its date, and one already past is "due now". They come from `schedules`
+(below). A repository with no such schedule (`null`), or archived, adds nothing; one whose agents
+are off adds only the digest, which the switch does not stop. A workflow is left out of the line when
+any repository's time for it is not known (`"unknown"`, a `next_run` of `null`, variables it cannot
+read for a workflow the switch stops, a repository it cannot read), since its soonest time and count would be a guess. The line shows
+only with "Nothing is running.", so not while a repository loads or when one's runs cannot be read.
+A scheduled run still starts when its role is stopped or at a limit; "Not moving" says why it will do
+nothing.
 
 A row marked NEW was not there the last time you looked at Needs you. That is remembered by this
 browser for this address, so a dashboard started on another port (the default picks a free one)

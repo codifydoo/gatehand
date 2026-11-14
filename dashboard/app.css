@@ -59,6 +59,7 @@ details.fold > .lrow { padding-left: 24px; }
 .act h3 { font-size: 12px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
 .alist { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
 .alist > p { margin: 0; padding: 9px 10px; }
+.alist > p.next { padding-top: 0; font-size: 12.5px; }
 .alist .lrow { overflow-wrap: anywhere; }
 .alist .lmeta { display: block; } /* a flex line would break a short name to fit a long note beside it */
 div.lrow.arow { flex-direction: row; align-items: center; gap: 10px; }

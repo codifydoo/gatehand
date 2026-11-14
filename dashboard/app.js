@@ -740,10 +740,58 @@ function untilUtcMidnight() {
 }
 const isToday = (t) => { const x = new Date(t || ""); return !isNaN(x) && x.toDateString() === new Date().toDateString(); };
 
+// The next scheduled runs, said under "Nothing is running.": per scheduled workflow, the soonest next
+// run across the repositories (from each workflow file's cron, as the server reads it) and how many
+// repositories run then. A repository with no such schedule (null), or archived, adds nothing; one
+// whose agents are off adds only the digest, the one scheduled workflow the switch does not stop. A
+// workflow is left out of the line altogether when any repository's time for it is not known (its
+// schedule "unknown", its next run null, its variables unreadable for a switched workflow, the
+// repository unreadable): the soonest time and the count would be a guess. A time already past is
+// "due now": the payload can be some minutes old (the server's one-minute cache, the page's
+// five-minute refresh).
+const SCHEDULES = [["coder", "coder"], ["merge", "merge gate"], ["sweep", "sweep"], ["triage", "triage"], ["digest", "digest"]];
+function nextRunText(t) {
+  if (t === 0) return "due now";
+  const x = new Date(t), now = new Date();
+  if (x.toDateString() === now.toDateString()) return hhmm(x);
+  // Within the coming six calendar days a weekday is unambiguous; further out it needs the date.
+  // Counted between local midnights, so a 23-hour day (daylight saving) cannot shorten the week.
+  const days = Math.round((new Date(t).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86400000);
+  const opts = days < 6 ? { weekday: "short" } : { weekday: "short", day: "numeric", month: "short" };
+  return `${x.toLocaleDateString([], opts)} ${hhmm(x)}`;
+}
+function nextRunsLine(repos) {
+  const soonest = {}, unknown = new Set();
+  for (const repo of repos) {
+    const d = state.repos[repo];
+    if (!d || d.loading) continue;
+    if (d.failed || !d.schedules) { for (const [key] of SCHEDULES) unknown.add(key); continue; }
+    if (d.archived) continue; // GitHub runs no workflow in an archived repository
+    for (const [key] of SCHEDULES) {
+      const s = d.schedules[key];
+      if (s === null || s === undefined) continue;
+      if (key !== "digest") {
+        if (!d.vars) { unknown.add(key); continue; }
+        if (d.vars.AGENTS_ENABLED !== "true") continue;
+      }
+      let t = typeof s === "object" ? Date.parse(s.next_run || "") : NaN;
+      if (isNaN(t)) { unknown.add(key); continue; }
+      if (t <= Date.now()) t = 0;
+      const cur = soonest[key];
+      if (!cur || t < cur.t) soonest[key] = { t, n: 1 };
+      else if (t === cur.t) cur.n += 1;
+    }
+  }
+  const parts = SCHEDULES.filter(([k]) => soonest[k] && !unknown.has(k)).sort(([a], [b]) => soonest[a].t - soonest[b].t)
+    .map(([k, name], i) => `${name} ${nextRunText(soonest[k].t)} in ${soonest[k].n}${i ? "" : ` ${soonest[k].n === 1 ? "repository" : "repositories"}`}`);
+  return parts.length ? h("p", { class: "muted next" }, `Next: ${parts.join(", ")}.`) : null;
+}
+
 // Why a repository's agents are not moving, without anyone being asked: one row per cause, each with
-// when it moves where this page's data can say so (and nothing where it cannot: next-run times are not
-// sent). The causes are those of the coder gate (agent-state.sh gate_decide) that the design lists,
-// plus a lock no run holds; a stale runner ref is a health item, not one of these.
+// when it moves where this page's data can say so (and nothing where it cannot: a role's next
+// scheduled run is not used here, since a run at its limit or stopped does nothing). The causes are
+// those of the coder gate (agent-state.sh gate_decide) that the design lists, plus a lock no run
+// holds; a stale runner ref is a health item, not one of these.
 function stillRows(repo, d) {
   const rows = [], unread = [];
   const add = (cause, what, moves) => rows.push({ repo, cause, what, moves });
@@ -856,11 +904,11 @@ function activityView() {
     h("div", { class: "alist" }, rows,
       notes.map(([repo, text]) => h("div", { class: "lrow unread" },
         h("div", { class: "lmeta" }, routeLink(repoRoute(repo), { title: repo }, short(repo)), ` · ${text} · not counted`))),
-      rows.length || notes.length ? null : empty(loading.length ? "Loading…" : none)));
+      rows.length || notes.length ? null : (loading.length ? empty("Loading…") : none)));
   return [viewHead("Activity", c.runningText, loading.length ? ` · still loading ${loading.map(short).join(", ")}` : ""),
-    section("Running now", running.sort(newest).map(runningRow), unread.running, "Nothing is running."),
-    section("Not moving and not waiting on you", still.map(stillRow), unread.still, "Nothing is held up."),
-    section("Finished today", done.sort(newest).map(finishedRow), unread.done, "No agent run finished today.")];
+    section("Running now", running.sort(newest).map(runningRow), unread.running, [empty("Nothing is running."), nextRunsLine(repos)]),
+    section("Not moving and not waiting on you", still.map(stillRow), unread.still, empty("Nothing is held up.")),
+    section("Finished today", done.sort(newest).map(finishedRow), unread.done, empty("No agent run finished today."))];
 }
 
 function weekView() {
