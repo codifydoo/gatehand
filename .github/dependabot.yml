@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # Actions used by this repo's own CI, and by the workflows and composite actions Gatehand installs.
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /template
+      - /template/.github/actions/install-gh
+      - /defaults/dependencies
+      - /defaults/system
+      - /defaults/toolchain
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
