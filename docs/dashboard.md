@@ -25,7 +25,7 @@ number of things waiting for you is also in the tab's title.
 | Where | What | Read from |
 |---|---|---|
 | Needs you | one row per thing you act on, newest first: open inbox requests, stopped roles, agent PRs held for a person, blocked issues with no open request; folded below them, agent PRs that passed the merge gate while auto-merge is a dry run ("to merge"), and merged issues to close once live ("to close") | the inbox issue's "Open requests" list and, when it lists any, the request comments themselves (only they say what kind a request is, and whether it was answered; when they cannot be read, or a line's comment is older than the newest 1,000, the kind is told from the line's text); `state/breaker.json` on the ledger branch; labels; and, for a repository in dry run with agent PRs, the merge gate's report |
-| Activity | Gatehand's runs that are running or waiting to start, in every repository | the running and queued Actions runs of Gatehand's nine workflows |
+| Activity | in every repository: running now, each with Cancel; not moving and not waiting on you, one row per cause per repository with when it moves; finished today | the running and queued Actions runs of Gatehand's nine workflows; `AGENTS_ENABLED`; `state/breaker.json`, the ledger and `policy.json`'s `runsPerDay` and `maxOpenPrs`; labels |
 | Week | each repository's runs over seven days per role: outcomes, runs today against `runsPerDay`, turns, time, cost | the ledger |
 | Repositories | version, `AGENTS_ENABLED`, `AGENT_AUTO_MERGE`, runs today against each role's `runsPerDay`, seven-day cost, breakers, health | `install.lock.json`, the repository's Actions variables, the ledger, the runner ref's copy of `agent-coder.yml` against the default branch's |
 | A repository, Pipeline | its inbox requests in full, agent PRs with the merge gate's last word on each, the queue by priority, in progress, blocked, candidates, on hold, merged to close | the inbox issue's newest 1,000 comments (the agent bot's only), the job logs of the newest three `Agent merge` runs that ran (a PR's newest line wins, so a run dispatched for one PR does not hide the others), labels |
@@ -39,6 +39,34 @@ are one row; a blocked issue with an open request is the request's row. The fold
 sidebar, the tab's title and "All" are the same number, and the chips above the list (Requests,
 Stopped, PRs, Issues, To merge, To close) add up to it. Suggested (`agent:candidate`) issues are on
 a repository's Pipeline tab, not here: queueing one is done on GitHub, next to its text.
+
+Activity's middle list holds what keeps the agents still without asking anyone, one row per cause
+per repository: agents off (`AGENTS_ENABLED` is not `true`; the other causes wait behind it, so it is
+that repository's only row), a role stopped by its breaker, a role at its daily limit (runs today
+against `runsPerDay`), the coder at its open-PR limit (open `agent:pr` PRs against `maxOpenPrs`), and
+an issue in `agent:in-progress` or a PR in `agent:fixing` with no run holding it (no coder run in
+progress; for a PR, no dispatched fixer run) and no `agent:hold` (a lock the hourly sweep frees once it expires). Without `policy.json` the limits are not
+known, and that is said. A stale runner ref is not listed here; Repositories shows it under health. Each row says when it moves only where the page's data can say:
+a daily limit lifts at 00:00 UTC, as the coder's gate counts days; a lock's expiry time is not read,
+and a role's next scheduled run is not used there (a run that starts while the role is stopped or at
+a limit does nothing), so nothing is shown for them. A stopped role is also a row of Needs
+you, where it is reset. "Finished today" is the ledger's rows that ended today, by this browser's
+clock: agent runs, a merge by the merge gate, and a stale lock the sweep closed. The Claude review,
+and merge gate or sweep runs that merge or close nothing, write no ledger row and are not in it. Each list
+counts as the sidebar does: "n+" while a repository loads or a part of it could not be read, with
+that part named under the list.
+
+With nothing running, Activity says so and, under it, the next scheduled runs: for each scheduled
+workflow, the soonest next run across the repositories, in this browser's time, and how many
+repositories run then ("Next: merge gate 18:11 in 3 repositories, coder 18:17 in 2"); a time six
+or more days out carries its date, and one already past is "due now". They come from `schedules`
+(below). A repository with no such schedule (`null`), or archived, adds nothing; one whose agents
+are off adds only the digest, which the switch does not stop. A workflow is left out of the line when
+any repository's time for it is not known (`"unknown"`, a `next_run` of `null`, variables it cannot
+read for a workflow the switch stops, a repository it cannot read), since its soonest time and count would be a guess. The line shows
+only with "Nothing is running.", so not while a repository loads or when one's runs cannot be read.
+A scheduled run still starts when its role is stopped or at a limit; "Not moving" says why it will do
+nothing.
 
 A row marked NEW was not there the last time you looked at Needs you. That is remembered by this
 browser for this address, so a dashboard started on another port (the default picks a free one)
