@@ -121,8 +121,30 @@ not answer, the pane says it is not known whether anything was posted. When the 
 pane says what happened. A request whose comment was not read (the inbox could not be read, or it is
 older than the newest 1,000 comments) is not answered from the pane: it links to the inbox.
 
-The other rows (a stopped role, a PR, an issue, to merge, to close) open a pane that says what to do
-and links to the repository tab, or GitHub, where it is done; their own panes come later.
+A stopped role's pane shows, where the stages would be, the role's newest ledger rows, as many as
+its breaker counts in a row (or "Paused by the owner" for a role paused with `/pause`), then why it
+stopped (the breaker's own reason) and what that holds up: that role's runs, and every agent PR's
+merge, since the merge gate stops on any tripped breaker. Its one action: "Reset the breaker" posts
+`/approve REQ-…` for its open breaker request, which resets it and ticks the request; with no request
+(paused by hand) it reads "Resume" and posts `/resume <role>`, offered only for a role in
+`policy.json`. Neither starts a run: the coder's next scheduled run picks from the queue, and the
+fixer runs again the next time CI fails or a review asks for changes. A role whose breaker was reset
+while its request stayed open has the same pane, to answer it.
+
+An agent PR's pane says why it is held (the fixer's request, the merge gate unable to update it, a
+review that never posted, or just the labels; a request's kind is used only once its comment is read),
+the merge gate's last word on it, and what the agent wrote. A PR no longer among the open agent PRs
+is said to be so, not guessed at. Its first step is a link to the PR on GitHub, to fix it yourself; then "Hand back to the merge
+gate" takes `agent:blocked` and `agent:needs-human` off, one label at a time. Beside it: Mark request
+as seen (`/approve REQ-…`), Hold or Release, Run review, Run merge gate, Approve… and Request
+changes…. The last four confirm with the server's preview in the pane: what it will do, notes, the
+exact GitHub calls and the comment; Request changes… takes its note first and previews it, and a note
+changed after its preview is previewed again before anything is sent. A PR's runs and their cost over
+the last seven days are beside the buttons; Claude review runs are not in the ledger. If labels are
+taken off one by one and a later one is refused, the pane says which were done.
+
+The other rows (an issue, to merge, to close) open a pane that says what to do and links to the
+repository tab, or GitHub, where it is done; their own panes come later.
 
 ### Limits and schedules
 
@@ -147,13 +169,13 @@ so the agents see exactly what they would see if you had done it on GitHub, and 
 
 | Button | Where | What it does | Who it counts from |
 |---|---|---|---|
-| Approve (named for the request: "Requeue and rerun", "Reset the breaker", "Mark as seen"…), Reject… | each open inbox request on the Pipeline tab, and a request row's item pane in Needs you (requests about a PR or a breaker are answered on the Pipeline tab for now) | posts `/approve REQ-…` or `/reject REQ-… <reason>` on the inbox issue | `AGENT_OWNER_LOGIN` only |
+| Approve (named for the request: "Requeue and rerun", "Reset the breaker", "Mark as seen"…), Reject… | each open inbox request on the Pipeline tab, and the item pane of its row in Needs you (a request about a PR is in the PR's pane, a breaker request in the role's) | posts `/approve REQ-…` or `/reject REQ-… <reason>` on the inbox issue | `AGENT_OWNER_LOGIN` only |
 | Rerun coder | blocked issues | posts `/rerun coder #N` | `AGENT_OWNER_LOGIN` only |
-| Pause, Resume | each role, on a repository's Agents tab | posts `/pause <role>` or `/resume <role>` | `AGENT_OWNER_LOGIN` only |
+| Pause, Resume | each role, on a repository's Agents tab; Resume also in a stopped role's pane | posts `/pause <role>` or `/resume <role>` | `AGENT_OWNER_LOGIN` only |
 | Unqueue | the queue | removes `agent:ready` from an issue | people with write access |
 | Read and queue on GitHub | candidates | opens the issue; you add `agent:ready` there | people with write access |
 | Hold, Release | issues and agent PRs | adds or removes `agent:hold` | people with write access |
-| Hand back to the merge gate | agent PRs with `agent:blocked` or `agent:needs-human` | removes those labels, once you have fixed the PR yourself | people with write access |
+| Hand back to the merge gate | agent PRs with `agent:blocked` or `agent:needs-human`, on the Pipeline tab and in the PR's pane | removes those labels, once you have fixed the PR yourself | people with write access |
 | Turn agents on/off, Turn auto-merge on/off | a repository's Settings tab | sets `AGENTS_ENABLED` or `AGENT_AUTO_MERGE` to `true` or `false` | people who may set Actions variables |
 | Start the coder on the next one | the queue | dispatches an auto-pick `agent-coder.yml` run on `policy.runnerRef` | people with write access |
 | Approve…, Request changes… | agent PRs | posts a review comment the merge gate and the fixer read (below); Request changes can also start the fixer on it | people with write access, never the agent bot |
