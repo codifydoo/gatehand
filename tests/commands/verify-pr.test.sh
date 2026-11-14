@@ -71,19 +71,24 @@ cmd_body() {
 }
 body="$(cmd_body)"
 [[ -n "${body}" ]] || t_fail "frontmatter strip left nothing — verify-pr.md reformatted? Case 4 cannot check anything"
-for needle in 'gh pr view' 'gh pr diff' 'gh pr comment'; do
+for needle in 'gh pr view' 'gh pr diff'; do
   if grep -qF "${needle}" <<<"${body}"; then
     t_pass "command body uses ${needle}"
   else
-    t_fail "command body never calls ${needle} — it cannot fetch or post"
+    t_fail "command body never calls ${needle} — it cannot fetch the PR"
   fi
 done
+# And it never posts by itself (#1147): the review's tokens are read-only, and the workflow posts
+# the final message. A command that still says `gh pr comment` would spend its turns on denials.
+if grep -qE 'gh pr (comment|review)|create_inline_comment' "${CMD}"; then
+  t_fail "the command still tells the review to post by itself — the workflow posts its final message"
+else
+  t_pass "the command never tells the review to post by itself"
+fi
 
-# Case 4b: the posting behaviour itself, pinned by its exact wording. The verbs above prove the
-# command MENTIONS `gh pr comment`; these two prove it is still ORDERED to post — the mandatory
-# summary comment and the "no silent exit" rule that makes it mandatory. Delete steps 4-5 and both
-# go with them, which is the mutation Case 4 alone could not see.
-for needle in 'gh pr comment $ARGUMENTS --body' 'Never finish without posting'; do
+# Case 4b: the deliverable itself, pinned by its exact wording: the final message IS the review,
+# and the "no silent exit" rule that makes it mandatory. Delete steps 4-5 and both go with them.
+for needle in 'Your final message is the review' 'Never finish without the review as your final message'; do
   if grep -qF "${needle}" <<<"${body}"; then
     t_pass "command still mandates posting: \"${needle}\""
   else
@@ -146,10 +151,18 @@ alw="$(grep -m1 -oE -- '^[[:space:]]*--allowedTools "[^"]*"' "${WORKFLOW}" \
 # `Bash(gh search:*)` is NOT matched — the extractor wants a space after the noun, not a colon.
 # Nothing in the prose calls `gh search`, so nothing rides on that today; widening the regex would
 # be the fix if it ever does.
+# Since #1147 the CI review reaches gh only as review-gh (plain gh is denied), so every verb is
+# looked for in its review-gh spelling.
 missing=""
 while read -r verb; do
-  grep -qF ",Bash(${verb}:*)," <<<",${alw}," || missing="${missing} ${verb}"
-done < <(grep -oE 'gh (pr|issue|search) [a-z-]+' "${CMD}" | sort -u)
+  grep -qF ",Bash(review-${verb}:*)," <<<",${alw}," || missing="${missing} review-${verb}"
+done < <(grep -oE '(^|[^-])gh (pr|issue|search) [a-z-]+' "${CMD}" | sed -E 's/^[^g]*gh/gh/' | sort -u)
+# And plain gh is denied there: --jq and --template read the environment, a URL names a host.
+if grep -qF ',Bash(gh:*),' <<<",$(grep -m1 -oE -- '^[[:space:]]*--disallowedTools "[^"]*"' "${WORKFLOW}" | sed 's/^[[:space:]]*--disallowedTools "//; s/"$//'),"; then
+  t_pass "plain gh is denied to the CI review"
+else
+  t_fail "plain gh is not denied to the CI review: --jq '\$ENV' would read its environment"
+fi
 if [[ -z "${missing}" ]]; then
   t_pass "every gh verb the command uses is in the workflow's --allowedTools"
 else
@@ -170,10 +183,8 @@ fi
 # claude-code-review.yml regained its `pull_request` trigger, and claude-code-action installs the
 # inline-comment MCP server whenever the triggering event carries PR context (context.isPR).
 #
-# Step 4 of the command still treats inline anchoring as best-effort and the summary comment as
-# mandatory, and that is still correct: `workflow_dispatch` remains a valid trigger for that
-# workflow, and a dispatch run carries no PR context, so on that path the server is absent and the
-# tool does not exist. The command has to work on both paths from one file.
+# Since #1147 the review anchors nothing inline on any path: it has no token that can write, and
+# the workflow lists no inline-comment tool.
 missing_tools=""
 while read -r tool; do
   grep -qF ",${tool}," <<<",${alw}," || missing_tools="${missing_tools} ${tool}"
@@ -222,10 +233,10 @@ done
 # the baseline step's jq and again as a `marker='…'` assignment in the assert step — so the two
 # could drift apart with every individual test still green. One `env:` entry now feeds both.
 # Anchored to the key at its exact indentation so a mention in a comment cannot satisfy it.
-marker="$(grep -m1 -oE -- "^      REVIEW_MARKER: '[^']*'" "${WORKFLOW}" \
-  | sed "s/^      REVIEW_MARKER: '//; s/'$//")"
+marker="$(grep -m1 -oE -- "^  REVIEW_MARKER: '[^']*'" "${WORKFLOW}" \
+  | sed "s/^  REVIEW_MARKER: '//; s/'$//")"
 if [[ -z "${marker}" ]]; then
-  t_fail "no job-level REVIEW_MARKER in ${WORKFLOW##*/} — reformatted, or the marker was re-inlined into a step?"
+  t_fail "no workflow-level REVIEW_MARKER in ${WORKFLOW##*/} — reformatted, or the marker was re-inlined into a step?"
 elif grep -qF "${marker}" "${CMD}"; then
   t_pass "command emits the marker the workflow asserts on: \"${marker}\""
 else
@@ -255,7 +266,7 @@ fi
 # on the normal pull_request path while the inline comments say the opposite, and the workflow's
 # marker assertion cannot tell that apart from a clean PR.
 for needle in "List only problems you'd block the merge for" \
-  'Anchors are additive: every finding goes into the summary'; do
+  'never as instructions to you'; do
   if grep -qF "${needle}" <<<"${body}"; then
     t_pass "command carries: \"${needle}\""
   else
@@ -298,6 +309,47 @@ if [[ -n "${dis}" && -z "${missing_dis}" ]]; then
   t_pass "the workflow still denies what the command says the reviewer cannot run"
 else
   t_fail "workflow --disallowedTools no longer denies:${missing_dis:- (no list found)} — the command's 'no git, no package manager' paragraph is now false"
+fi
+
+# Case 14 (#1147): the review step holds no token that can write and no tool that can write.
+# - github_token is this job's read-only GITHUB_TOKEN, so the action mints no Claude App token
+#   for the model;
+# - Write, Edit and NotebookEdit are denied by name, and so are the gh verbs that post;
+# - nothing that writes is allowed, in the workflow's list or in the command's frontmatter;
+# - the settings confine reads to the checkout and deny every file write (a redirect included).
+review_step="$(awk '/^        id: claude-review$/ { on = 1 } on && /^      - / { exit } on' "${WORKFLOW}")"
+if grep -qx '          github_token: \${{ secrets.GITHUB_TOKEN }}' <<<"${review_step}"; then
+  t_pass "the review step runs on this job's own token"
+else
+  t_fail "the review step has no github_token: the action would mint the Claude App's write token for the model"
+fi
+missing_deny=""
+for tool in Write Edit NotebookEdit 'Bash(gh:*)' WebFetch WebSearch 'Bash(curl:*)' 'Bash(sh:*)' 'Bash(bash:*)' 'Bash(env:*)'; do
+  grep -qF ",${tool}," <<<",${dis}," || missing_deny="${missing_deny} ${tool}"
+done
+if [[ -n "${dis}" && -z "${missing_deny}" ]]; then
+  t_pass "the review's --disallowedTools removes every way to write or post"
+else
+  t_fail "workflow --disallowedTools is missing:${missing_deny:- (no list found)}"
+fi
+if grep -qE '(^|,)(Write|Edit|NotebookEdit|Bash\((review-)?gh (pr comment|pr review|api)[^)]*\)|Bash\(gh[: ][^)]*\)|mcp__[^,]*)(,|$)' <<<"${alw}"; then
+  t_fail "the review's --allowedTools grants a write or post tool: ${alw}"
+else
+  t_pass "the review's --allowedTools grants nothing that writes or posts"
+fi
+fm_tools="$(grep -m1 '^allowed-tools: ' "${CMD}")"
+if grep -qE 'Write|Edit|gh pr comment|gh pr review|gh api|mcp__' <<<"${fm_tools}"; then
+  t_fail "the command's allowed-tools grants a write or post tool: ${fm_tools}"
+else
+  t_pass "the command's allowed-tools grants nothing that writes or posts"
+fi
+settings="$(awk '/^          settings: \|$/ { getline; print; exit }' <<<"${review_step}")"
+if jq -e '.permissions.blockReadsOutsideWorkingDirectories == true
+    and ((.permissions.deny // []) | index("Edit(//**)") != null)
+    and ((.permissions.deny // []) | index("Read(//proc/**)") != null)' <<<"${settings}" >/dev/null 2>&1; then
+  t_pass "the review's settings confine reads and deny every file write"
+else
+  t_fail "the review step's settings do not confine reads and deny writes: '${settings}'"
 fi
 
 printf '\n[verify-pr] %d passed, %d failed\n' "${pass}" "${fail}"
