@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Get started · Gatehand</title>
+<meta name="description" content="Install Gatehand into a GitHub repository with Claude Code, set up the GitHub App and secrets, and run it day to day.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Gatehand">
+<meta property="og:image" content="https://codifydoo.github.io/gatehand/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Gatehand: unattended Claude coding agents for a GitHub repository, behind a merge gate.">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="favicon.svg" alt="">Gatehand</a>
+    <nav aria-label="Site">
+      <a href="how-it-works.html">How it works</a>
+      <a href="security.html">Security</a>
+      <a href="dashboard.html">Dashboard</a>
+      <a href="get-started.html" aria-current="page">Get started</a>
+      <a href="https://github.com/codifydoo/gatehand">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="page-head">
+    <h1>Get started</h1>
+    <p class="lead">Install the plugin, let the install skill draft the configuration with you, then
+      do the few steps only you can do.</p>
+  </div>
+
+  <section>
+    <h2>Requirements</h2>
+    <ul>
+      <li>A GitHub repository with Actions.</li>
+      <li>A Claude subscription token (<code>claude setup-token</code>) or an Anthropic API key.</li>
+      <li>Locally: bash 4+, git, jq and <code>gh</code>.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Install</h2>
+    <p>In Claude Code, from your repository:</p>
+<pre><code>/plugin marketplace add codifydoo/gatehand
+/plugin install gatehand@gatehand
+/gatehand:install</code></pre>
+    <p>The install skill reads your CI, toolchain and contributor docs, drafts the configuration with
+      you, renders the files on a branch, and walks you through the steps below. Nothing is pushed
+      or changed on GitHub without your go-ahead.</p>
+    <p>Without Claude Code: clone
+      <a href="https://github.com/codifydoo/gatehand">the repository</a> and run
+      <code>bin/render.sh &lt;your-repo&gt;</code>, then follow the setup yourself.</p>
+  </section>
+
+  <section>
+    <h2>Setup, in short</h2>
+    <p>The exact commands are under
+      <a href="https://github.com/codifydoo/gatehand/blob/main/docs/README.md#setup">Setup in the runbook</a>.</p>
+    <ol class="steps">
+      <li>
+        <h3>Create the GitHub App</h3>
+        <p>Webhook off. Repository permissions: Contents, Issues, Pull requests and Actions read and
+          write; Checks, Commit statuses and Metadata read. Nothing else, and <strong>no
+          Workflows</strong>. Install it on this repository only.</p>
+      </li>
+      <li>
+        <h3>Install the Claude GitHub App</h3>
+        <p>On the same repository: the review posts its verdict as <code>claude[bot]</code>.</p>
+      </li>
+      <li>
+        <h3>Set the secrets and variables</h3>
+        <p>The App's private key and client ID, the bot's ID, your login as
+          <code>AGENT_OWNER_LOGIN</code>, and the Claude token.</p>
+      </li>
+      <li>
+        <h3>Create the labels and the runner ref</h3>
+        <p><code>bash .github/scripts/agent-labels.sh</code>, then push the default branch to
+          <code>agent-runner</code>.</p>
+      </li>
+      <li>
+        <h3>Set the Actions defaults</h3>
+        <p>Workflow permissions: "Read repository contents", and untick "Allow GitHub Actions to
+          create and approve pull requests". Every workflow declares its own permissions.</p>
+      </li>
+      <li>
+        <h3>Turn it on</h3>
+        <p><code>gh variable set AGENTS_ENABLED --body true</code>. Leave
+          <code>AGENT_AUTO_MERGE</code> unset until you have read a few of the merge gate's dry-run
+          summaries.</p>
+      </li>
+      <li>
+        <h3>After the first agent PR</h3>
+        <p>Pin the "Needs a human (agent inbox)" issue, and add <code>agent pr guard</code> to the
+          default branch's required status checks.</p>
+      </li>
+    </ol>
+    <p><code>/gatehand:doctor</code> checks that the setup is complete and consistent: files, secrets,
+      variables, the GitHub App, the runner ref, labels, Actions settings, required checks.</p>
+  </section>
+
+  <section>
+    <h2>Day to day</h2>
+    <ul>
+      <li><strong>Queue work:</strong> label an issue <code>agent:ready</code>, or file it with the
+        "Agent task" template.</li>
+      <li><strong>Start a run now:</strong> <code>gh workflow run agent-coder.yml --ref agent-runner</code></li>
+      <li><strong>Keep an issue away from the agents:</strong> <code>agent:hold</code>.</li>
+      <li><strong>Allow protected paths for one issue:</strong> a writer adds
+        <code>agent:allow-protected</code> to the issue.</li>
+      <li><strong>Turn on auto-merge:</strong> <code>gh variable set AGENT_AUTO_MERGE --body true</code></li>
+      <li><strong>Kill switch:</strong> <code>gh variable set AGENTS_ENABLED --body false</code> stops
+        every agent job at its next start; the inbox still works.</li>
+    </ul>
+
+    <h3>The inbox</h3>
+    <p>Everything that needs a person lands as a comment on the "Needs a human (agent inbox)" issue.
+      Answer with a comment that starts with a command; only the owner's count.</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Command</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td><code>/approve REQ-…</code></td><td>Do what the request proposes</td></tr>
+          <tr><td><code>/reject REQ-… [reason]</code></td><td>Leave it as it is</td></tr>
+          <tr><td><code>/rerun coder #N</code></td><td>Re-queue #N and start the coder on it</td></tr>
+          <tr><td><code>/pause &lt;role&gt;</code> · <code>/resume &lt;role&gt;</code></td><td>Stop or restart a role (also resets its breaker)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The <a href="dashboard.html">dashboard</a>
+      (<code>/gatehand:dashboard</code>) has buttons for the same answers, across every repository
+      where Gatehand is installed.</p>
+  </section>
+
+  <section>
+    <h2>Changing the rules, and updating</h2>
+    <ul>
+      <li><strong>Numbers, models, schedules, runners, tools:</strong> edit <code>policy.json</code>,
+        then re-render with <code>/gatehand:update</code> and commit both.</li>
+      <li><strong>Your project's rules and checks:</strong> <code>project.md</code>. The coder and the
+        fixer read it on every run.</li>
+      <li><strong>A new version of Gatehand:</strong> <code>/gatehand:update</code>. The
+        <a href="https://github.com/codifydoo/gatehand/blob/main/CHANGELOG.md">changelog</a> says
+        whether installed repositories need one.</li>
+      <li><strong>Never edit the rendered package files:</strong> an update refuses to overwrite a
+        hand-edited file.</li>
+    </ul>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Gatehand, formerly <code>repo-agents</code>. MIT licence. By <a href="https://github.com/codifydoo">Codify d.o.o.</a></span>
+    <span class="spacer"></span>
+    <a href="https://github.com/codifydoo/gatehand/blob/main/docs/README.md">Runbook</a>
+    <a href="https://github.com/codifydoo/gatehand/blob/main/CHANGELOG.md">Changelog</a>
+    <a href="https://github.com/codifydoo/gatehand/blob/main/SECURITY.md">Security policy</a>
+  </div>
+</footer>
+</body>
+</html>

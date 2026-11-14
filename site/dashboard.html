@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The dashboard · Gatehand</title>
+<meta name="description" content="The Gatehand dashboard: one local page for every repository where the agents are installed. How to start it, what it shows, what its buttons do, and how it is kept private.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Gatehand">
+<meta property="og:image" content="https://codifydoo.github.io/gatehand/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Gatehand: unattended Claude coding agents for a GitHub repository, behind a merge gate.">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="favicon.svg" alt="">Gatehand</a>
+    <nav aria-label="Site">
+      <a href="how-it-works.html">How it works</a>
+      <a href="security.html">Security</a>
+      <a href="dashboard.html" aria-current="page">Dashboard</a>
+      <a href="get-started.html">Get started</a>
+      <a href="https://github.com/codifydoo/gatehand">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="page-head">
+    <h1>The dashboard</h1>
+    <p class="lead">One local page for every repository where Gatehand is installed: what the agents
+      are doing now, what waits for you, and what they did this week, with buttons for the answers
+      you would otherwise type on GitHub.</p>
+  </div>
+
+  <section>
+    <h2>Start it</h2>
+<pre><code>/gatehand:dashboard        # in Claude Code
+python3 bin/dashboard.py   # from a checkout of the package</code></pre>
+    <p>It needs <code>gh</code> signed in and Python 3.9 or later, nothing else: no packages, no build,
+      no server of ours. It opens your browser on <code>127.0.0.1</code>. Nothing of it is installed
+      into your repositories.</p>
+    <p>On first start it lists every repository your login can see and keeps the ones where Gatehand
+      is installed. "Find repositories" scans again; you can add one by hand as
+      <code>owner/name</code>, or hide one. The page refreshes every five minutes while it is
+      visible, and the server stops after two hours with no page open.</p>
+    <h3>Options</h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Option</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td><code>--port N</code></td><td>Listen on this port (default: a free one)</td></tr>
+          <tr><td><code>--no-open</code></td><td>Do not open a browser; print the address instead</td></tr>
+          <tr><td><code>--print-url</code></td><td>Print the address with its secret</td></tr>
+          <tr><td><code>--idle-minutes M</code></td><td>Stop after M minutes with no page open (default 120; 0 never)</td></tr>
+          <tr><td><code>--config FILE</code></td><td>Keep the repository list here</td></tr>
+          <tr><td><code>--ready-file FILE</code></td><td>Write <code>{port, token}</code> there once listening, for scripts</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>What it shows</h2>
+    <div class="cards">
+      <div class="card">
+        <h3>Totals</h3>
+        <p>Repositories, items waiting for you, open agent PRs, queued issues, runs now, and runs and
+          cost over seven days.</p>
+      </div>
+      <div class="card">
+        <h3>Waiting for you</h3>
+        <p>Open inbox requests, stopped roles, blocked issues and PRs, candidate issues, and merged
+          issues to close once live: the same list the weekly digest posts.</p>
+      </div>
+      <div class="card">
+        <h3>Repositories</h3>
+        <p>For each one: the installed version, whether the agents and auto-merge are on, runs today
+          against each role's daily cap, seven-day cost, breakers and health.</p>
+      </div>
+      <div class="card">
+        <h3>One repository</h3>
+        <p>Its inbox requests in full, agent PRs with the merge gate's last word on each, running and
+          recent runs, the queue by priority, and what is in progress, blocked or on hold.</p>
+      </div>
+    </div>
+    <p>Numbers are computed the way the agents compute them. A part it cannot read is shown as
+      <code>?</code> and listed under the repository, never as zero, "off" or "nothing waits".</p>
+  </section>
+
+  <section>
+    <h2>What you can do from it</h2>
+    <p>Every button asks you to confirm, says what will happen, and then does it with your own
+      <code>gh</code> login. The agents see exactly what they would see if you had done it on
+      GitHub, and apply the same rules.</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Buttons</th><th>What they do</th><th>Who it counts from</th></tr></thead>
+        <tbody>
+          <tr><td>Approve, Reject</td><td>Answer an open inbox request with <code>/approve</code> or <code>/reject</code></td><td>the owner only</td></tr>
+          <tr><td>Rerun coder</td><td>Posts <code>/rerun coder #N</code> for a blocked issue</td><td>the owner only</td></tr>
+          <tr><td>Pause, Resume</td><td>Stop or restart a role</td><td>the owner only</td></tr>
+          <tr><td>Unqueue, Hold, Release</td><td>Remove <code>agent:ready</code>, or add or remove <code>agent:hold</code></td><td>people with write access</td></tr>
+          <tr><td>Hand back to the merge gate</td><td>Clears the blocked labels on a PR you fixed yourself</td><td>people with write access</td></tr>
+          <tr><td>Start the coder, Run review, Run merge gate, Cancel</td><td>Dispatch or cancel a run of Gatehand's workflows</td><td>people with write access</td></tr>
+          <tr><td>Approve, Request changes on a PR</td><td>Posts a review comment the merge gate and the fixer read</td><td>people with write access</td></tr>
+          <tr><td>Turn agents or auto-merge on or off</td><td>Sets <code>AGENTS_ENABLED</code> or <code>AGENT_AUTO_MERGE</code></td><td>people who may set Actions variables</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>A button the agents would ignore from you is shown disabled, with the reason. Runs, verdicts
+      and the two switches are previewed first: the server shows each GitHub call it will make, and
+      makes it only if nothing changed in between.</p>
+    <div class="callout">
+      <p>The page never adds <code>agent:ready</code>. That label vouches for the issue's text as it
+        stands, and the page does not show that text, so queueing an issue stays on GitHub, next
+        to it.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>How it is kept private</h2>
+    <p>The server can read everything your <code>gh</code> login can, so the page is built so that
+      nothing but the tab it opened can talk to it.</p>
+    <ul>
+      <li>It listens on <code>127.0.0.1</code> only.</li>
+      <li>Every request needs a per-launch secret. It travels in the address's fragment, which is
+        never sent to any server, and is removed from the address bar once the page has it.</li>
+      <li>A site that rebinds its DNS name to 127.0.0.1 gets nothing, and another site's form or
+        script cannot post to it.</li>
+      <li>Issue titles and request bodies are set only as text, never as HTML, under a strict
+        Content-Security-Policy.</li>
+      <li>Your token never enters the dashboard's process: every call is a <code>gh</code> subprocess.</li>
+      <li>It writes to GitHub only through the buttons above, each a fixed shape the server builds.
+        Reading writes nothing.</li>
+    </ul>
+    <p><a href="https://github.com/codifydoo/gatehand/blob/main/docs/dashboard.md">The full dashboard reference</a>
+      has every button, every check and the security model in detail.</p>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Gatehand, formerly <code>repo-agents</code>. MIT licence. By <a href="https://github.com/codifydoo">Codify d.o.o.</a></span>
+    <span class="spacer"></span>
+    <a href="https://github.com/codifydoo/gatehand/blob/main/docs/README.md">Runbook</a>
+    <a href="https://github.com/codifydoo/gatehand/blob/main/CHANGELOG.md">Changelog</a>
+    <a href="https://github.com/codifydoo/gatehand/blob/main/SECURITY.md">Security policy</a>
+  </div>
+</footer>
+</body>
+</html>
