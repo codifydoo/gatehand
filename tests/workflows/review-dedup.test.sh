@@ -122,20 +122,26 @@ gate_after() { # <file> <anchor-regex>
     found && /^      - / { exit }
   ' "$1"
 }
-# Since #1147 the de-dup gate sits on the probe, the first step of the review proper; the review
-# step runs only when the probe says it can be posted, so it inherits the gate.
-gate_review="$(gate_after "${WORKFLOW}" '^        id: probe$')"
-gate_model="$(gate_after "${WORKFLOW}" '^        id: claude-review$')"
-if [[ "${gate_model}" == "steps.probe.outputs.valid == 'true'" ]]; then
-  t_pass "the review step runs only after the probe, so it inherits the probe's gate"
+gate_review="$(gate_after "${WORKFLOW}" '^        id: claude-review$')"
+# Since #1147 the assertion is the post-review job's; the review job's save step carries the gate,
+# and the post job runs only when it ran (its `ran` output).
+gate_assert="$(gate_after "${WORKFLOW}" '^        id: save$')"
+gate_upload="$(awk '/^        name: verify-pr-review$/ {exit} /^      - uses: actions\/upload-artifact@/ {f = 1; next} f && /^        if: / {sub(/^        if: /, ""); g = $0} END {print g}' "${WORKFLOW}")"
+if [[ -n "${gate_upload}" && "${gate_upload}" == "${gate_assert}" ]]; then
+  t_pass "the save step and the upload share one gate"
 else
-  t_fail "the review step's if: is '${gate_model}', not the probe's verdict"
+  t_fail "the upload's gate '${gate_upload}' differs from the save step's '${gate_assert}'"
 fi
-gate_assert="$(gate_after "${WORKFLOW}" '^      - name: assert the review actually posted a comment$')"
-if [[ -n "${gate_review}" && "${gate_review}" == "${gate_assert}" ]]; then
-  t_pass "the probe and assert steps share one identical gate"
+if grep -qx "    if: needs.claude-review.outputs.ran == 'true'" "${WORKFLOW}" \
+  && grep -qx "      ran: \${{ steps.save.conclusion == 'success' }}" "${WORKFLOW}"; then
+  t_pass "the post job runs exactly when the save step ran"
 else
-  t_fail "probe gate and assert gate differ — probe:'${gate_review}' assert:'${gate_assert}'"
+  t_fail "the post job's if: or the review job's ran output changed"
+fi
+if [[ -n "${gate_review}" && "${gate_review}" == "${gate_assert}" ]]; then
+  t_pass "the review and save steps share one identical gate"
+else
+  t_fail "review gate and save gate differ — review:'${gate_review}' save:'${gate_assert}'"
 fi
 if [[ "${gate_review}" == *"workflow_dispatch"* && "${gate_review}" == *"already_reviewed"* ]]; then
   t_pass "the gate skips on a prior review but always honours an explicit dispatch"

@@ -68,11 +68,13 @@ The model never shares a job with a write-capable token, and nothing it wrote is
 - **The `agent-runner` ref.** The model controls its own job, including the Actions runtime token
   later steps hold, so it could write cache entries. Runs are dispatched on `agent-runner`, whose
   cache scope the default branch and PRs never read, and the code job restores no caches.
-- **The review model cannot write.** The review step runs on the job's read-only `GITHUB_TOKEN`
-  with no tool that writes or posts, and its reads stop at the checkout. Its final message is the
-  review; a step after the model posts it to the run's PR as `claude[bot]`, with a Claude App token
-  that step mints from the job's OIDC token and revokes, and refuses one that carries text shaped
-  like a credential. `/verify-pr` frames everything in the PR as data.
+- **The review model cannot write.** The `claude-review` job's token is read-only and it has no
+  `id-token` grant. The model has no tool that writes, its reads stop at the checkout, and it reaches
+  `gh` only through `review-gh`, which refuses `--jq`, `--template`, `--repo` and host arguments and
+  hides the environment from gh. Its final message is the review; the `post-review` job, which runs
+  no model and checks out nothing, posts it to the run's PR as `claude[bot]` with a Claude App token
+  it mints from its own OIDC token and revokes, and refuses one that carries text shaped like a
+  credential. `/verify-pr` frames everything in the PR as data.
 - **The review runs the PR's code.** `claude-code-review.yml` checks out the PR and runs its
   `.github/actions/install-gh` and `.claude/` with an OIDC token in reach. A dispatch refuses
   a fork's PR before the checkout. An automatic run skips one too, but that is not a control: on

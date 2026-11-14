@@ -662,9 +662,13 @@ review_attribution() {
   while read -r run _ status; do
     [[ -n "${run}" && "${status}" == completed ]] || continue
     # Every attempt (filter=all): a re-run's attempt 2 may skip the review, and its comment then
-    # sits in attempt 1's window.
+    # sits in attempt 1's window. Since #1147 the comment is posted by the post-review job, after the
+    # claude-review job has ended, so an attempt's window runs from claude-review's start (what the
+    # review read is as fresh as that) to the later of the two jobs' ends.
     w="$(gh api "repos/${GH_REPO}/actions/runs/${run}/jobs?filter=all&per_page=100" \
-      --jq '.jobs[] | select(.name == "claude-review") | "\(.started_at // "") \(.completed_at // "")"')" || return 1
+      --jq '[.jobs[] | select(.name == "claude-review" or .name == "post-review")] | group_by(.run_attempt) | .[]
+        | ([.[] | select(.name == "claude-review")] | first) as $r | select($r != null)
+        | "\($r.started_at // "") \(([.[] | .completed_at // ""] | max) // "")"')" || return 1
     while read -r js je; do
       [[ -n "${js}" && -n "${je}" ]] || continue
       if [[ ! "${at}" < "${js}" && ! "${at}" > "${je}" ]]; then

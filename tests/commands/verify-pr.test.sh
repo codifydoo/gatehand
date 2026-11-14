@@ -151,10 +151,18 @@ alw="$(grep -m1 -oE -- '^[[:space:]]*--allowedTools "[^"]*"' "${WORKFLOW}" \
 # `Bash(gh search:*)` is NOT matched — the extractor wants a space after the noun, not a colon.
 # Nothing in the prose calls `gh search`, so nothing rides on that today; widening the regex would
 # be the fix if it ever does.
+# Since #1147 the CI review reaches gh only as review-gh (plain gh is denied), so every verb is
+# looked for in its review-gh spelling.
 missing=""
 while read -r verb; do
-  grep -qF ",Bash(${verb}:*)," <<<",${alw}," || missing="${missing} ${verb}"
-done < <(grep -oE 'gh (pr|issue|search) [a-z-]+' "${CMD}" | sort -u)
+  grep -qF ",Bash(review-${verb}:*)," <<<",${alw}," || missing="${missing} review-${verb}"
+done < <(grep -oE '(^|[^-])gh (pr|issue|search) [a-z-]+' "${CMD}" | sed -E 's/^[^g]*gh/gh/' | sort -u)
+# And plain gh is denied there: --jq and --template read the environment, a URL names a host.
+if grep -qF ',Bash(gh:*),' <<<",$(grep -m1 -oE -- '^[[:space:]]*--disallowedTools "[^"]*"' "${WORKFLOW}" | sed 's/^[[:space:]]*--disallowedTools "//; s/"$//'),"; then
+  t_pass "plain gh is denied to the CI review"
+else
+  t_fail "plain gh is not denied to the CI review: --jq '\$ENV' would read its environment"
+fi
 if [[ -z "${missing}" ]]; then
   t_pass "every gh verb the command uses is in the workflow's --allowedTools"
 else
@@ -225,10 +233,10 @@ done
 # the baseline step's jq and again as a `marker='…'` assignment in the assert step — so the two
 # could drift apart with every individual test still green. One `env:` entry now feeds both.
 # Anchored to the key at its exact indentation so a mention in a comment cannot satisfy it.
-marker="$(grep -m1 -oE -- "^      REVIEW_MARKER: '[^']*'" "${WORKFLOW}" \
-  | sed "s/^      REVIEW_MARKER: '//; s/'$//")"
+marker="$(grep -m1 -oE -- "^  REVIEW_MARKER: '[^']*'" "${WORKFLOW}" \
+  | sed "s/^  REVIEW_MARKER: '//; s/'$//")"
 if [[ -z "${marker}" ]]; then
-  t_fail "no job-level REVIEW_MARKER in ${WORKFLOW##*/} — reformatted, or the marker was re-inlined into a step?"
+  t_fail "no workflow-level REVIEW_MARKER in ${WORKFLOW##*/} — reformatted, or the marker was re-inlined into a step?"
 elif grep -qF "${marker}" "${CMD}"; then
   t_pass "command emits the marker the workflow asserts on: \"${marker}\""
 else
@@ -316,7 +324,7 @@ else
   t_fail "the review step has no github_token: the action would mint the Claude App's write token for the model"
 fi
 missing_deny=""
-for tool in Write Edit NotebookEdit 'Bash(gh pr comment:*)' 'Bash(gh pr review:*)' 'Bash(gh api:*)' WebFetch WebSearch 'Bash(curl:*)'; do
+for tool in Write Edit NotebookEdit 'Bash(gh:*)' WebFetch WebSearch 'Bash(curl:*)'; do
   grep -qF ",${tool}," <<<",${dis}," || missing_deny="${missing_deny} ${tool}"
 done
 if [[ -n "${dis}" && -z "${missing_deny}" ]]; then
@@ -324,7 +332,7 @@ if [[ -n "${dis}" && -z "${missing_deny}" ]]; then
 else
   t_fail "workflow --disallowedTools is missing:${missing_deny:- (no list found)}"
 fi
-if grep -qE '(^|,)(Write|Edit|NotebookEdit|Bash\(gh (pr comment|pr review|api):\*\)|mcp__[^,]*)(,|$)' <<<"${alw}"; then
+if grep -qE '(^|,)(Write|Edit|NotebookEdit|Bash\((review-)?gh (pr comment|pr review|api)[^)]*\)|Bash\(gh[: ][^)]*\)|mcp__[^,]*)(,|$)' <<<"${alw}"; then
   t_fail "the review's --allowedTools grants a write or post tool: ${alw}"
 else
   t_pass "the review's --allowedTools grants nothing that writes or posts"

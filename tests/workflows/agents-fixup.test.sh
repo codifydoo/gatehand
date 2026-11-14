@@ -84,7 +84,7 @@ base_rules() { # base_rules <pr-json> <comments-json>
   stub_gh_json 'api --paginate repos/o/r/actions/workflows/claude-code-review.yml/runs*' \
     "{\"workflow_runs\":[{\"id\":70,\"display_title\":\"Claude review of PR #44\",\"created_at\":\"2026-11-05T10:20:00Z\",\"status\":\"completed\"}]}"
   # JOB_EXTRA: an earlier attempt's job, listed first; only `filter=all` returns it.
-  local latest="{\"name\":\"claude-review\",\"started_at\":\"${JOB_START:-2026-11-05T10:30:00Z}\",\"completed_at\":\"${JOB_END:-2026-11-05T11:45:00Z}\"}"
+  local latest="{\"name\":\"claude-review\",\"run_attempt\":2,\"started_at\":\"${JOB_START:-2026-11-05T10:30:00Z}\",\"completed_at\":\"${JOB_END:-2026-11-05T11:45:00Z}\"}"
   stub_gh_json 'api repos/o/r/actions/runs/70/jobs?filter=all*' "{\"jobs\":[${JOB_EXTRA:+${JOB_EXTRA},}${latest}]}"
   stub_gh_json 'api repos/o/r/actions/runs/70/jobs*' "{\"jobs\":[${latest}]}"
   if [[ -n "${PR_FILES_FAIL:-}" ]]; then stub_gh_on 'api --paginate repos/o/r/pulls/44/files*' '' 1 'gh: HTTP 502'; fi
@@ -674,7 +674,7 @@ unset PR_BODY
 pre_extra() { review_body_rule 1 "${REVIEW_RC}"; }
 JOB_START=2026-11-05T09:55:00Z pre_case "$(prjson)" "$(comments "claude[bot]|2026-11-05T11:00:00Z|${REVIEW_RC}")" review comment-1
 expect "preflight: a review whose job started before the push is stale" "$(outv reason)" "stale: the review job started before the head was pushed"
-JOB_END=2026-11-05T10:50:00Z JOB_EXTRA='{"name":"claude-review","started_at":"2026-11-05T10:55:00Z","completed_at":"2026-11-05T11:05:00Z"}' \
+JOB_END=2026-11-05T10:50:00Z JOB_EXTRA='{"name":"claude-review","run_attempt":1,"started_at":"2026-11-05T10:55:00Z","completed_at":"2026-11-05T11:05:00Z"}' \
   pre_case "$(prjson)" "$(comments "claude[bot]|2026-11-05T11:00:00Z|${REVIEW_RC}")" review comment-1
 expect "preflight: a review written by an EARLIER attempt of a re-run review run still counts" "$(outv go)" true
 JOB_END=2026-11-05T10:50:00Z pre_case "$(prjson)" "$(comments "claude[bot]|2026-11-05T11:00:00Z|${REVIEW_RC}")" review comment-1

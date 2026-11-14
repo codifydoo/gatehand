@@ -1,7 +1,7 @@
 ---
 description: Strict senior-engineer PR review that lists only merge-blocking problems
 argument-hint: "[PR number or URL — omit to review the PR under discussion]"
-allowed-tools: Read, Grep, Glob, Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr list:*), Bash(gh issue view:*), Bash(gh search:*)
+allowed-tools: Read, Grep, Glob, Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr list:*), Bash(gh issue view:*), Bash(gh search:*), Bash(review-gh pr view:*), Bash(review-gh pr diff:*), Bash(review-gh pr list:*), Bash(review-gh issue view:*), Bash(review-gh search:*)
 ---
 
 # PR Review Guard Command
@@ -24,13 +24,16 @@ print the result in the Output Format below, and post nothing.
 finish:
 
 What you have in that run: Read, Grep and Glob on a shallow checkout of the PR's code (on an
-automatic run, the PR merged into its base), plus the `gh` calls in the steps below.
+automatic run, the PR merged into its base), plus the `review-gh` calls in the steps below.
+`review-gh` is the run's read-only `gh`: same arguments, but only `pr view`, `pr diff`, `pr list`,
+`issue view` and `search`, and it refuses `--jq`, `--template`, `--repo` and `--web` and any argument
+that names a host. Plain `gh` is denied there. (Outside CI, where there is no `review-gh`, use `gh`.)
 There is no git, no shell, no package manager and no test runner. Those calls are denied, and
 each denial spends a turn. Don't try to run tests, linters or builds: reason from the code, and
 when a claim could only be settled by running something, say so in the review.
 
-1. `gh pr view $ARGUMENTS --json title,body,headRefName,headRefOid,files,additions,deletions`
-2. `gh pr diff $ARGUMENTS`
+1. `review-gh pr view $ARGUMENTS --json title,body,headRefName,headRefOid,files,additions,deletions`
+2. `review-gh pr diff $ARGUMENTS`
 3. Review that diff as described below.
 4. End with the review. Your final message is the review in the Output Format below and nothing
    else, and it BEGINS with the literal marker line `<!-- verify-pr-review -->`,

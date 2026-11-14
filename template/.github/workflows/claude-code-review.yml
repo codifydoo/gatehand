@@ -8,7 +8,7 @@ run-name: 'Claude review of PR #${{ inputs.pr || github.event.pull_request.numbe
 # The Claude review every PR gets, and the verdict the agents' merge gate reads
 # (.github/scripts/agent-merge.sh): one summary comment carrying the review marker (REVIEW_MARKER
 # below), whose Approve or Request changes line is that verdict. /verify-pr writes it as its final
-# message, with no token that can write; a step after it posts it as the Claude App (#1147).
+# message, with no token that can write; the post-review job posts it as the Claude App (#1147).
 #
 # Runs on PR open and on a draft being marked ready. NOT on `synchronize`: it is not a required check,
 # so a run per push would spend a runner on output nothing gates on. The fixer and the merge gate
@@ -20,8 +20,8 @@ run-name: 'Claude review of PR #${{ inputs.pr || github.event.pull_request.numbe
 # asking for a fresh review.
 #
 # A FORK's PR is not reviewed here. A dispatch refuses it before anything from the PR is on disk (the
-# fork guard step): the review runs the PR's own .github/actions and .claude/ with this job's OIDC
-# token and the Claude credential in reach. The automatic run skips it too, but only as a courtesy:
+# fork guard step): the review runs the PR's own .github/actions and .claude/ with the Claude
+# credential in reach. The automatic run skips it too, but only as a courtesy:
 # on `pull_request` GitHub runs the PR's own copy of this file, which a fork can edit. What keeps
 # that run harmless is GitHub's fork downgrade (no secrets, a read-only GITHUB_TOKEN), not this
 # file, and only while a private repository's "Fork pull request workflows" settings send neither
@@ -42,16 +42,18 @@ on:
         required: true
         type: string
 
+# THE marker, defined once for the whole workflow and read by both jobs. It was once spelled twice,
+# inline in the baseline step's jq and again in the assert step, each pinned by its own test but never
+# compared to the other, so changing one and not the other left de-dup silently never firing while
+# every test stayed green. .claude/commands/verify-pr.md must emit this exact string; Gatehand's
+# tests/commands/verify-pr.test.sh reads THIS line and checks the command against it.
+env:
+  REVIEW_MARKER: '<!-- verify-pr-review -->'
+
 jobs:
   claude-review:
     runs-on: @@RUNS_ON_REVIEW@@
     env:
-      # THE marker, defined once for the whole job. It was spelled twice — inline in the baseline
-      # step's jq and again in the assert step — each pinned by its own test but never compared to
-      # the other, so changing one and not the other left de-dup silently never firing while every
-      # test stayed green. .claude/commands/verify-pr.md must emit this exact string;
-      # Gatehand's tests/commands/verify-pr.test.sh reads THIS line and checks the command against it.
-      REVIEW_MARKER: '<!-- verify-pr-review -->'
       REVIEW_BOT: '@@REVIEW_BOT_LOGIN@@'
     # GitHub fires `opened` for DRAFT PRs too. Until now that case was caught inside the
     # code-review plugin's own step 1, which this workflow no longer uses — so the guard has to be
@@ -66,24 +68,22 @@ jobs:
     # PR queues behind it.
     timeout-minutes: 30
     # This token is the model's (the review step hands it over as github_token), so it is
-    # read-only. The comment goes out with the Claude App token, which the post step mints from
-    # this job's OIDC token after the model has exited. id-token: write is that step's: its request
-    # values are in every step's environment, the model's too, which can neither read its
-    # environment (reads stop at the checkout) nor make a request of its own (no network tool, no
-    # `gh api`).
+    # read-only, and the job has NO id-token grant: with one, the OIDC request values would be in
+    # the model's environment, and an OIDC token is what mints the Claude App's write token. The
+    # post-review job, which runs no model, holds both.
     outputs:
-      skipped: ${{ steps.assert.outputs.skipped }}
+      ran: ${{ steps.save.conclusion == 'success' }}
+      claude_ran: ${{ steps.save.outputs.claude_ran }}
+      baseline: ${{ steps.baseline.outputs.id }}
     permissions:
       contents: read
       pull-requests: read
       issues: read
-      id-token: write
 
     steps:
       # THE FORK GUARD: a dispatch for a fork's PR stops here, before the checkout below puts the
       # PR's head on disk. The steps after it run that tree's ./.github/actions/install-gh and read
-      # its .claude/ (settings, /verify-pr) with this job's OIDC token (which mints the Claude App
-      # token) and with the Claude credential in later steps' reach. From a branch of this repository that is code
+      # its .claude/ (settings, /verify-pr) with the Claude credential in later steps' reach. From a branch of this repository that is code
       # from someone who could push here anyway; from a fork it is anyone's. To review a fork's PR,
       # read it, push its head to a branch here, and open a PR from that branch.
       # curl and jq, not gh: gh comes from install-gh, which needs the checkout this step guards.
@@ -174,21 +174,237 @@ jobs:
           echo "newest comment id on PR #${PR} before the review: ${latest:-none}"
           echo "a /verify-pr review already exists on PR #${PR}: ${reviewed}"
 
-      # THE PROBE, and the only reason the review step below can be skipped for free. The comment is
-      # posted with the Claude App token (the review bot's login, which the dedup above, the merge
-      # gate and the fixer read), minted by exchanging this job's OIDC token at Anthropic, as
-      # claude-code-action itself does when it is given no github_token. That exchange refuses when
-      # this file differs from the default branch's copy ("workflow validation"), which is exactly
-      # the PR that edits it. Asking before the review means such a PR costs nothing, as when the
-      # action did the exchange itself. The token is revoked at once: nothing holds it while the
-      # model runs. The gate is the de-dup gate, verbatim, and the assert step's MUST stay identical
-      # to it; Gatehand's tests/workflows/review-dedup.test.sh pins the two together.
-      - name: probe the Claude App token exchange
-        id: probe
+      # THE MODEL'S gh. The review reads the PR with `gh`, and plain `gh` is a way out: `--jq` and
+      # `--template` evaluate jq and Go templates that can read the environment (`$ENV`, `env`), and a
+      # URL argument or `--repo`/`--hostname` sends a request to a host the model names, with the
+      # rest of the URL as a channel. So the model gets `review-gh` instead (the only gh its
+      # --allowedTools name; plain `gh` is denied): it allows `pr view`, `pr diff`, `pr list`,
+      # `issue view` and `search`, refuses those flags and any argument that is a URL or names a
+      # host, pins the repository, and runs gh with an empty environment but for this job's
+      # read-only token. Its source is this file, never the PR's tree.
+      - name: the review's gh
+        id: review_gh
         if: github.event_name == 'workflow_dispatch' || steps.baseline.outputs.already_reviewed != 'true'
         run: |
           set -euo pipefail
-          # The two request values go to curl as config on stdin, never in argv.
+          real="$(command -v gh)"
+          mkdir -p "$RUNNER_TEMP/review-bin"
+          {
+            printf '#!/usr/bin/env bash\nset -euo pipefail\nREAL_GH=%q\nREPO=%q\nHOST=%q\n' "${real}" "${GITHUB_REPOSITORY}" "${GITHUB_SERVER_URL#https://}"
+            cat <<'WRAP'
+          die() { echo "review-gh: $*" >&2; exit 2; }
+          [[ $# -ge 1 ]] || die "usage: review-gh pr view|pr diff|pr list|issue view|search ..."
+          case "$1 ${2:-}" in
+            "pr view"|"pr diff"|"pr list"|"issue view") ;;
+            "search prs"|"search issues"|"search code"|"search commits") ;;
+            *) die "only pr view, pr diff, pr list, issue view and search are allowed" ;;
+          esac
+          host_re='^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+(:[0-9]+)?/'
+          for a in "${@:3}"; do
+            [[ ! "${a}" =~ ${host_re} ]] || die "an argument that names a host is not allowed"
+            case "${a}" in
+              --jq|--jq=*|-q|-q*|--template|--template=*|-t|-t*|--repo|--repo=*|-R|-R*|--hostname|--hostname=*|--web|-w|--browser*|--owner|--owner=*)
+                die "${a%%=*} is not allowed here" ;;
+              *://*|*@*:*) die "an argument that names a host is not allowed" ;;
+            esac
+          done
+          cfg="$(mktemp -d)"
+          trap 'rm -rf "${cfg}"' EXIT
+          env -i PATH=/usr/bin:/bin HOME="${cfg}" GH_CONFIG_DIR="${cfg}" GH_HOST="${HOST}" GH_REPO="${REPO}" \
+            GH_TOKEN="${GH_TOKEN:?}" GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1 \
+            "${REAL_GH}" "$@"
+          WRAP
+          } >"$RUNNER_TEMP/review-bin/review-gh"
+          chmod 0755 "$RUNNER_TEMP/review-bin/review-gh"
+          echo "$RUNNER_TEMP/review-bin" >>"$GITHUB_PATH"
+
+      - name: Run Claude Code Review
+        id: claude-review
+        # De-dup. Skip when this PR already carries a /verify-pr review, so draft -> ready ->
+        # draft -> ready does not review twice and an auto run followed by anything else does not
+        # stack. A workflow_dispatch is exempt on purpose: a dispatch is a human pressing "review
+        # this again", and silently ignoring that is worse than a duplicate. This condition is
+        # duplicated on the save step below and on the post-review job's `ran` output, and the copies
+        # MUST stay identical; Gatehand's tests/workflows/review-dedup.test.sh pins them together.
+        if: github.event_name == 'workflow_dispatch' || steps.baseline.outputs.already_reviewed != 'true'
+        uses: anthropics/claude-code-action@61a9c274fa7110a66dfafc1bbbced03833eb25fe # v1.0.269
+        with:
+          @@CLAUDE_AUTH@@
+          # LOAD-BEARING for the autonomous agents. The action refuses any non-User actor not named
+          # here (src/github/validation/actor.ts, checkHumanActor), and a PR the coder agent opens has
+          # the actor `@@BOT_SLUG@@[bot]`. Without this line every agent PR would get NO review: the
+          # step throws before Claude starts, and the review is the only qualitative gate before an
+          # agent PR merges. One name, not `*`: allowed bots skip the write-permission check.
+          allowed_bots: @@BOT_SLUG@@
+          # THE MODEL HOLDS NO WRITE TOKEN (#1147). It reads text the PR's author wrote: on an agent
+          # PR, a coder model steered by issue text anyone may have written. With no github_token the
+          # action mints the Claude App's token (contents, issues and pull_requests write) and hands it
+          # to the model as GH_TOKEN; a review that followed planted text could then post anything
+          # anywhere, or hand the token out. This job's token is read-only and the job has no
+          # id-token grant, so nothing here can mint a token that writes. The review comes back as
+          # the model's final message, which the post-review job posts.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: '/verify-pr ${{ inputs.pr || github.event.pull_request.number }}'
+          # Reads stop at the checkout, so /proc/self/environ (the Claude credential), $HOME and
+          # $RUNNER_TEMP are out of reach; `Read(//proc/**)` says it again in case the setting goes.
+          # `Edit(//**)` denies every file write, a shell redirect included (Claude Code checks one
+          # against Edit rules), and deny beats any allow in the PR's own .claude/settings.json. The
+          # model writes nothing at all: a write would be a way to steer a later step (GITHUB_ENV,
+          # BASH_ENV, the saved review) or, on a self-hosted runner, a later job.
+          settings: |
+            {"permissions": {"blockReadsOutsideWorkingDirectories": true, "deny": ["Read(//proc/**)", "Edit(//**)"]}}
+          # --allowedTools ALLOWS; it does not RESTRICT. In agent mode the action appends claude_args
+          # to the CLI verbatim and adds no list of its own (src/modes/agent/index.ts), so a tool the
+          # command needs and this line omits is not granted BY THE ACTION. Keep its review-gh verbs
+          # equal to the gh calls in .claude/commands/verify-pr.md; Gatehand's
+          # tests/commands/verify-pr.test.sh asserts they agree.
+          #
+          # The flag does not bound the grant: the checkout puts the PR's `.claude/settings.json` in
+          # the workspace and Claude Code loads it, so the effective grant is this flag, that file's
+          # `permissions.allow` and the command's frontmatter together. --disallowedTools is what
+          # bounds it: it maps onto `deny`, and deny beats allow from every scope. Write, Edit and
+          # NotebookEdit are denied by name, so the tools are gone; so is plain `gh` (the review uses
+          # review-gh, above); the network tools so that it cannot send anything out; and git, the
+          # package managers, build tools and interpreters so that a repo's settings cannot quietly
+          # widen this job: it reads a diff and writes one message, and needs none of them. Bash rules
+          # are SCOPED (`Bash(git:*)`), never a bare `Bash`, which would take review-gh with it.
+          #
+          # No Task: /verify-pr is a single-pass review.
+          # MODEL, set explicitly (policy.json roles.review.model, rendered here): without --model
+          # the CLI default applies, which can be a smaller model than the one the merge gate is
+          # meant to trust. Gatehand's tests/commands/verify-pr.test.sh pins it. claude-code-action installs its
+          # own pinned CLI, so after changing the model, dispatch a review and check that the agent
+          # step ran more than one turn before trusting it: a model the CLI does not know dies on its
+          # first request with no comment.
+          claude_args: |
+            --model @@REVIEW_MODEL@@
+            --allowedTools "Read,Grep,Glob,TodoWrite,Bash(review-gh pr view:*),Bash(review-gh pr diff:*),Bash(review-gh pr list:*),Bash(review-gh issue view:*),Bash(review-gh search:*)"
+            --disallowedTools "Write,Edit,NotebookEdit,Bash(gh:*),Bash(pnpm:*),Bash(npm:*),Bash(npx:*),Bash(yarn:*),Bash(bun:*),Bash(go:*),Bash(gofmt:*),Bash(cargo:*),Bash(pip:*),Bash(uv:*),Bash(python:*),Bash(python3:*),Bash(node:*),Bash(make:*),Bash(git:*),Bash(docker:*),Bash(curl:*),Bash(wget:*),Bash(env:*),Bash(printenv:*),Bash(cat:*),WebFetch,WebSearch"
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://code.claude.com/docs/en/cli-reference for available options
+
+      # The model has exited. Its final message (the `result` of the execution file) is the review;
+      # it goes to the post-review job as an artifact, whatever it says: that job, which runs no
+      # model and no code from the PR, decides whether it can be posted. An empty file when Claude
+      # never ran or said nothing: the post job tells the two apart by `claude_ran`.
+      - name: save the review for the post job
+        id: save
+        if: github.event_name == 'workflow_dispatch' || steps.baseline.outputs.already_reviewed != 'true'
+        env:
+          EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/verify-pr-review"
+          mkdir -p "$RUNNER_TEMP/verify-pr-review"
+          if [[ -n "${EXECUTION_FILE:-}" && -s "${EXECUTION_FILE}" ]]; then
+            jq -r '[.[]? | select(.type? == "result")] | last | .result // empty' "${EXECUTION_FILE}" >"$RUNNER_TEMP/verify-pr-review/final.md"
+            echo "claude_ran=true" >>"$GITHUB_OUTPUT"
+          else
+            : >"$RUNNER_TEMP/verify-pr-review/final.md"
+            echo "::notice title=Review skipped::Claude never ran, so there is nothing to post. Nothing re-runs it on its own: dispatch the review by hand."
+            echo "claude_ran=false" >>"$GITHUB_OUTPUT"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch' || steps.baseline.outputs.already_reviewed != 'true'
+        with:
+          name: verify-pr-review
+          path: ${{ runner.temp }}/verify-pr-review
+          retention-days: 7
+          if-no-files-found: error
+
+  # THE POST. Runs no model and nothing from the PR (no checkout): it downloads the review job's
+  # final message and posts it to this run's PR, never one the text names, as the Claude App, whose
+  # login (the review bot) the de-dup, the merge gate and the fixer read. The token comes from
+  # exchanging this job's OIDC token at Anthropic, as claude-code-action itself does when it is
+  # given no github_token, for pull_requests write only; it is used for one comment and revoked.
+  # The exchange refuses when this file differs from the default branch's copy ("workflow
+  # validation"): a PR that edits it gets the "not reviewed" note instead. The merge gate and the
+  # fixer read a review's time window from the claude-review job's start to this job's end
+  # (agent-state.sh review_attribution), so keep both job names.
+  post-review:
+    needs: claude-review
+    if: needs.claude-review.outputs.ran == 'true'
+    runs-on: @@RUNS_ON_REVIEW@@
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: verify-pr-review
+          path: ${{ runner.temp }}/verify-pr-review
+      - name: post the review
+        id: post
+        env:
+          PR: ${{ inputs.pr || github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          CLAUDE_RAN: ${{ needs.claude-review.outputs.claude_ran }}
+          BASELINE: ${{ needs.claude-review.outputs.baseline }}
+          FINAL: ${{ runner.temp }}/verify-pr-review/final.md
+          GH_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [[ "${PR}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::pr must be a PR number, not '${PR}'"; exit 1; }
+          [[ "${BASELINE:-0}" =~ ^[0-9]+$ ]] || BASELINE=0
+          # ghapi <token> <method> <path> [data-file]: the GitHub API, token as curl config on stdin.
+          ghapi() {
+            printf 'header = "Authorization: Bearer %s"\n' "$1" \
+              | curl -K - -fsS -X "$2" -H 'Accept: application/vnd.github+json' ${4:+--data-binary "@$4"} "${GITHUB_API_URL}$3"
+          }
+          # comment_ids <jq filter on one comment>: ids of this PR's comments that match, every page.
+          comment_ids() {
+            local page=1 got
+            while :; do
+              got="$(ghapi "${GH_API_TOKEN}" GET "/repos/${REPO}/issues/${PR}/comments?per_page=100&page=${page}")"
+              jq -r ".[] | select($1) | .id" <<<"${got}"
+              [[ "$(jq length <<<"${got}")" -eq 100 ]] || break
+              page=$((page + 1))
+            done
+          }
+          # The "Claude did not review this PR" note, once per PR, on an automatic run only (whoever
+          # dispatched a run is watching it). It must NOT carry the review marker: the de-dup and the
+          # merge gate would then count it as a review.
+          skip_note() { # <why>
+            [[ "${EVENT}" == pull_request ]] || return 0
+            local skip_marker='<!-- verify-pr-skipped -->' note
+            [[ -z "$(comment_ids "(.body // \"\") | contains(\"${skip_marker}\")")" ]] || return 0
+            note="$(mktemp)"
+            # The backticks below are markdown for the comment, not command substitution.
+            # shellcheck disable=SC2016
+            printf '%s\n\n**Claude did not review this PR.** %s\n\n%s\n\n```bash\ngh workflow run "Claude Code Review" -f pr=%s\n```\n\nRun log: %s\n' \
+              "${skip_marker}" "$1" \
+              'Nothing runs the review later on its own. Ask for it by hand; this works before merging, because a dispatch runs the default branch'"'"'s copy of this workflow:' \
+              "${PR}" "${RUN_URL}" | jq -Rs '{body: .}' >"${note}"
+            ghapi "${GH_API_TOKEN}" POST "/repos/${REPO}/issues/${PR}/comments" "${note}" >/dev/null
+          }
+          if [[ "${CLAUDE_RAN}" != true ]]; then
+            echo "::notice title=Review skipped::Claude never ran, so there is nothing to post."
+            skip_note 'The review was skipped without running Claude.'
+            exit 0
+          fi
+          # From the marker line on: /verify-pr puts it first, so anything before it is not the review.
+          body="$(mktemp)"
+          tr -d '\r' <"${FINAL}" | awk -v m="${REVIEW_MARKER}" 'on || index($0, m) == 1 { on = 1; print }' >"${body}"
+          if [[ ! -s "${body}" ]]; then
+            echo "::error title=Review posted nothing::the review's final message carries no line starting with ${REVIEW_MARKER}, so there is nothing to post. The job log of the review is redacted by claude-code-action; likely causes: /verify-pr did not resolve as a slash command, the model ran out of turns, or it ended with something other than the review."
+            exit 1
+          fi
+          if [[ "$(wc -c <"${body}" | tr -d ' ')" -gt 60000 ]]; then
+            echo "::error title=Review not posted::the review is over 60000 bytes; nothing was posted."
+            exit 1
+          fi
+          # Shapes of the credentials a review job could reach. A real review has no reason to
+          # carry one, and a review that does is posting a secret. Defence in depth: the boundary is
+          # that the model can neither read its environment nor send anything out.
+          if grep -qE 'sk-ant-[A-Za-z0-9_-]{8}|gh[opsur]_[A-Za-z0-9]{20}|github_pat_[A-Za-z0-9_]{20}|-----BEGIN [A-Z ]*PRIVATE KEY|ACTIONS_(ID_TOKEN_REQUEST|RUNTIME)_TOKEN|eyJ[A-Za-z0-9_-]{20,}\.eyJ' "${body}"; then
+            echo "::error title=Review not posted::the review carries text shaped like a credential, so it was not posted. Read the run's artifact before trusting this PR."
+            exit 1
+          fi
+          # The token exchange. The two OIDC request values go to curl as config on stdin.
           oidc="$(printf 'header = "Authorization: bearer %s"\nurl = "%s&audience=claude-code-github-action"\n' \
             "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?the job needs id-token: write}" "${ACTIONS_ID_TOKEN_REQUEST_URL:?}" \
             | curl -K - -fsS --retry 3 --retry-all-errors --retry-delay 5 | jq -r '.value // empty')"
@@ -202,249 +418,36 @@ jobs:
           [[ "${code}" -eq 0 ]] || { echo "::error::the Claude App token exchange could not be reached (curl ${code})"; exit 1; }
           status="${resp##*$'\n'}"
           json="${resp%$'\n'*}"
-          if [[ "${status}" == 200 ]]; then
-            tok="$(jq -r '.token // .app_token // empty' <<<"${json}")"
-            [[ -n "${tok}" ]] || { echo "::error::the token exchange answered 200 with no token"; exit 1; }
-            echo "::add-mask::${tok}"
-            printf 'header = "Authorization: Bearer %s"\n' "${tok}" \
-              | curl -K - -sS -o /dev/null -X DELETE -H 'Accept: application/vnd.github+json' "${GITHUB_API_URL}/installation/token" || true
-            echo "valid=true" >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-          err="$(jq -r '(.error.details.error_code // "") + " " + (.error.message // "") + " " + (.message // "")' <<<"${json}" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
-          if [[ "${err}" == *workflow_not_found_on_default_branch* || ( "${status}" == 401 && "${err}" == *"workflow validation failed"* ) ]]; then
-            echo "::notice title=Review skipped::this workflow differs from the default branch's copy, so the Claude App will not post for it and the review is not run."
-            echo "valid=false" >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "::error::the Claude App token exchange answered ${status}; nothing was reviewed"
-          exit 1
-
-      - name: Run Claude Code Review
-        id: claude-review
-        # Only when the probe says the review can be posted; it carries the de-dup gate.
-        if: steps.probe.outputs.valid == 'true'
-        uses: anthropics/claude-code-action@61a9c274fa7110a66dfafc1bbbced03833eb25fe # v1.0.269
-        with:
-          @@CLAUDE_AUTH@@
-          # LOAD-BEARING for the autonomous agents. The action refuses any non-User actor not named
-          # here (src/github/validation/actor.ts, checkHumanActor), and a PR the coder agent opens has
-          # the actor `@@BOT_SLUG@@[bot]`. Without this line every agent PR would get NO review: the
-          # step throws before Claude starts, and the review is the only qualitative gate before an
-          # agent PR merges. One name, not `*`: allowed bots skip the write-permission check.
-          allowed_bots: @@BOT_SLUG@@
-          # THE MODEL HOLDS NO WRITE TOKEN. It reads text the PR's author wrote: on an agent PR, a
-          # coder model steered by issue text that anyone who can open an issue may have written.
-          # With no github_token the action mints the Claude App token (contents, issues and
-          # pull_requests write) and hands it to the model as GH_TOKEN; a review that followed
-          # planted text could then post anything anywhere, or hand the token out. This job's own
-          # token is read-only (see `permissions:`), and the action uses it as given. The review
-          # comes back as the model's final message, and the next step posts it.
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          prompt: '/verify-pr ${{ inputs.pr || github.event.pull_request.number }}'
-          # Reads stop at the checkout, so /proc/self/environ (the Claude credential), $HOME and
-          # $RUNNER_TEMP are out of reach; `Read(//proc/**)` says it again in case the setting goes.
-          # `Edit(//**)` denies every file write, including a shell redirect (Claude Code checks one
-          # against Edit rules), and deny beats any allow in the PR's own .claude/settings.json. The
-          # model writes nothing at all: a write would be a way to steer the posting step after it
-          # (GITHUB_ENV, BASH_ENV) or, on a self-hosted runner, a later job.
-          settings: |
-            {"permissions": {"blockReadsOutsideWorkingDirectories": true, "deny": ["Read(//proc/**)", "Edit(//**)"]}}
-          # --allowedTools ALLOWS; it does not RESTRICT. In agent mode the action appends claude_args
-          # to the CLI verbatim and adds no list of its own (src/modes/agent/index.ts), so a tool the
-          # command needs and this line omits is not granted BY THE ACTION. Keep it equal to the
-          # frontmatter of .claude/commands/verify-pr.md; Gatehand's tests/commands/verify-pr.test.sh
-          # asserts they agree.
-          #
-          # The flag does not bound the grant: the checkout puts the PR's `.claude/settings.json` in
-          # the workspace and Claude Code loads it, so the effective grant is this flag, that file's
-          # `permissions.allow` and the command's frontmatter together. --disallowedTools is what
-          # bounds it: it maps onto `deny`, and deny beats allow from every scope. Bash rules are
-          # SCOPED (`Bash(git:*)`), never a bare `Bash`, which would take the `gh` reads with it.
-          # Write, Edit and NotebookEdit are denied by name, so the tools are gone, and so are
-          # `gh pr comment`, `gh pr review` and `gh api`: the review posts nothing itself. The
-          # network tools are denied so that it cannot send anything out, and git, the package
-          # managers, build tools and interpreters so that a repo's settings cannot quietly widen
-          # this job: it reads a diff and writes one message, and needs none of them.
-          #
-          # No Task: /verify-pr is a single-pass review.
-          # MODEL, set explicitly (policy.json roles.review.model, rendered here): without --model
-          # the CLI default applies, which can be a smaller model than the one the merge gate is
-          # meant to trust. Gatehand's tests/commands/verify-pr.test.sh pins it. claude-code-action installs its
-          # own pinned CLI, so after changing the model, dispatch a review and check that the agent
-          # step ran more than one turn before trusting it: a model the CLI does not know dies on its
-          # first request with no comment.
-          claude_args: |
-            --model @@REVIEW_MODEL@@
-            --allowedTools "Read,Grep,Glob,TodoWrite,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh search:*)"
-            --disallowedTools "Write,Edit,NotebookEdit,Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh api:*),Bash(pnpm:*),Bash(npm:*),Bash(npx:*),Bash(yarn:*),Bash(bun:*),Bash(go:*),Bash(gofmt:*),Bash(cargo:*),Bash(pip:*),Bash(uv:*),Bash(python:*),Bash(python3:*),Bash(node:*),Bash(make:*),Bash(git:*),Bash(docker:*),Bash(curl:*),Bash(wget:*),WebFetch,WebSearch"
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
-
-      # THE POST. The model has exited; this step, which runs no model, posts what it said. The
-      # review is the model's final message (the `result` of its execution file), from the marker
-      # line on: /verify-pr puts the marker first, so anything before it is not the review. The
-      # target is this run's PR, never one the text names. A review that is missing, oversized or
-      # carries something shaped like a credential is not posted, and the assert step then reddens
-      # the job. The token is minted here, used for one comment and revoked; it never existed while
-      # the model ran.
-      - name: post the review
-        id: post
-        if: steps.claude-review.outputs.execution_file != ''
-        env:
-          PR: ${{ inputs.pr || github.event.pull_request.number }}
-          EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          [[ "${PR}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::pr must be a PR number, not '${PR}'"; exit 1; }
-          body="$(mktemp)"
-          jq -r '[.[]? | select(.type? == "result")] | last | .result // empty' "${EXECUTION_FILE}" \
-            | tr -d '\r' | awk -v m="${REVIEW_MARKER}" 'on || index($0, m) == 1 { on = 1; print }' >"${body}"
-          if [[ ! -s "${body}" ]]; then
-            echo "::error title=Review posted nothing::the review's final message carries no line starting with ${REVIEW_MARKER}, so there is nothing to post."
+          if [[ "${status}" != 200 ]]; then
+            err="$(jq -r '(.error.details.error_code // "") + " " + (.error.message // "") + " " + (.message // "")' <<<"${json}" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+            if [[ "${err}" == *workflow_not_found_on_default_branch* || ( "${status}" == 401 && "${err}" == *"workflow validation failed"* ) ]]; then
+              echo "::notice title=Review not posted::this workflow differs from the default branch's copy, so the Claude App will not post for it."
+              # The backticks are markdown for the comment, not command substitution.
+              # shellcheck disable=SC2016
+              skip_note 'The review ran, but the Claude App posts only for the default branch'"'"'s copy of `.github/workflows/claude-code-review.yml`, and this PR edits it.'
+              exit 0
+            fi
+            echo "::error::the Claude App token exchange answered ${status}; nothing was posted"
             exit 1
           fi
-          if [[ "$(wc -c <"${body}" | tr -d ' ')" -gt 60000 ]]; then
-            echo "::error title=Review not posted::the review is over 60000 bytes; nothing was posted."
-            exit 1
-          fi
-          # Shapes of the credentials a review job could reach. A real review has no reason to
-          # carry one, and a review that does is posting a secret.
-          if grep -qE 'sk-ant-[A-Za-z0-9_-]{8}|gh[opsur]_[A-Za-z0-9]{20}|github_pat_[A-Za-z0-9_]{20}|-----BEGIN [A-Z ]*PRIVATE KEY|ACTIONS_(ID_TOKEN_REQUEST|RUNTIME)_TOKEN|eyJ[A-Za-z0-9_-]{20,}\.eyJ' "${body}"; then
-            echo "::error title=Review not posted::the review carries text shaped like a credential, so it was not posted. Read the run's execution file before trusting this PR."
-            exit 1
-          fi
-          oidc="$(printf 'header = "Authorization: bearer %s"\nurl = "%s&audience=claude-code-github-action"\n' \
-            "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?the job needs id-token: write}" "${ACTIONS_ID_TOKEN_REQUEST_URL:?}" \
-            | curl -K - -fsS --retry 3 --retry-all-errors --retry-delay 5 | jq -r '.value // empty')"
-          [[ -n "${oidc}" ]] || { echo "::error::no OIDC token from the runner"; exit 1; }
-          echo "::add-mask::${oidc}"
-          tok="$(printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "${oidc}" \
-            | curl -K - -fsS --retry 3 --retry-all-errors --retry-delay 5 -X POST \
-              --data '{"permissions":{"pull_requests":"write"}}' \
-              'https://api.anthropic.com/api/github/github-app-token-exchange' | jq -r '.token // .app_token // empty')"
-          [[ -n "${tok}" ]] || { echo "::error::the Claude App token exchange gave no token; nothing was posted"; exit 1; }
+          tok="$(jq -r '.token // .app_token // empty' <<<"${json}")"
+          [[ -n "${tok}" ]] || { echo "::error::the token exchange answered 200 with no token"; exit 1; }
           echo "::add-mask::${tok}"
-          revoke() {
-            printf 'header = "Authorization: Bearer %s"\n' "${tok}" \
-              | curl -K - -sS -o /dev/null -X DELETE -H 'Accept: application/vnd.github+json' "${GITHUB_API_URL}/installation/token" || true
-          }
+          revoke() { ghapi "${tok}" DELETE /installation/token >/dev/null 2>&1 || true; }
           trap revoke EXIT
-          jq -n --rawfile b "${body}" '{body: $b}' >"${body}.json"
-          printf 'header = "Authorization: Bearer %s"\n' "${tok}" \
-            | curl -K - -fsS -o /dev/null -X POST -H 'Accept: application/vnd.github+json' \
-              --data-binary "@${body}.json" "${GITHUB_API_URL}/repos/${REPO}/issues/${PR}/comments"
-          echo "posted the review on PR #${PR}"
-
-      # I3 ASSERTION — the other half of the baseline step near the top of this job. DO NOT DELETE
-      # THIS AS REDUNDANT WITH Gatehand's tests/commands/verify-pr.test.sh. That suite is static analysis: it
-      # proves the command file still SAYS to end with the review and that the allowlist still permits
-      # what it needs. This step is the only thing in the repo that observes whether a comment ACTUALLY LANDED.
-      #
-      # Nothing above can see that on its own. `claude -p` exits 0 whatever it said, and
-      # claude-code-action redacts its own log, so a review that fetched nothing, ended without the
-      # marker, or never resolved `/verify-pr` as a slash command at all would otherwise end as a
-      # green check with an empty PR — the silent no-post signature, which shipped past a fully
-      # green CI once already. This step converts that entire class into a red job.
-      #
-      # MARKER-BASED, NOT IDENTITY-BASED, and it must stay that way: the comment's author is the
-      # Claude App's bot, and `github-actions[bot]` is not unique to this job (any other workflow
-      # commenting with the default GITHUB_TOKEN posts as that login), so a login filter could go
-      # green on a run where this review posted nothing. The marker is minted by verify-pr.md and by
-      # nothing else in this repo, so it identifies the artifact rather than the account.
-      #
-      # The id watermark is still needed alongside it: a re-run on a PR that was already reviewed
-      # would otherwise be satisfied by the PREVIOUS run's marker comment. New AND marked, both.
-      #
-      # Not `if: always()`: a review or post step that failed outright already reddens the job and
-      # would only add a confusing second error. The gap this closes is the SUCCESSFUL-but-silent run.
-      - name: assert the review actually posted a comment
-        id: assert
-        # The probe's de-dup condition, verbatim, and it MUST stay identical: skipping the review
-        # but not this assertion would demand a comment that was never going to be posted.
-        # Gatehand's tests/workflows/review-dedup.test.sh pins the two together.
-        if: github.event_name == 'workflow_dispatch' || steps.baseline.outputs.already_reviewed != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ inputs.pr || github.event.pull_request.number }}
-          BASELINE: ${{ steps.baseline.outputs.id }}
-          # Empty when the action never actually ran Claude: the probe found this workflow differs
-          # from the default branch's copy, or the action skipped for a reason of its own.
-          EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
-        run: |
-          set -euo pipefail
-          # Keyed on the action producing no execution file rather than on the PR's changed-file
-          # list: it covers every reason the review might not run, not just the edited workflow.
-          # The note on the PR is the skip-note job's: this job's token cannot comment.
-          if [[ -z "${EXECUTION_FILE:-}" ]]; then
-            echo "::notice title=Review skipped::Claude never ran, so there is nothing to assert. On a PR that edits .github/workflows/claude-code-review.yml this is expected: the Claude App posts only for the default branch's copy of this file. Nothing re-runs it on its own: dispatch the review by hand, which works before merging because a dispatch runs the default branch's copy of this workflow."
-            echo "skipped=true" >>"$GITHUB_OUTPUT"
+          jq -Rs '{body: .}' <"${body}" >"${body}.json"
+          # No retry: a POST that timed out may have landed, and a second would double the review.
+          ghapi "${tok}" POST "/repos/${REPO}/issues/${PR}/comments" "${body}.json" >/dev/null
+          revoke
+          trap - EXIT
+          # I3 ASSERTION. The review is only done when a NEW comment carrying the marker is on the
+          # PR: new (above the baseline id the review job read before the review, so a re-run is not
+          # satisfied by the previous run's comment) AND marked (the marker identifies the artifact,
+          # not the account: `github-actions[bot]` is not unique to this job). A post that returned
+          # 2xx and left nothing behind reddens the job instead of ending green with no review.
+          if [[ -n "$(comment_ids ".id > ${BASELINE} and ((.body // \"\") | contains(\"${REVIEW_MARKER}\"))")" ]]; then
+            echo "posted the review on PR #${PR}"
             exit 0
           fi
-          # THE marker, and the only copy of it in this file. Gatehand's tests/commands/verify-pr.test.sh
-          # lifts the job-level line and asserts .claude/commands/verify-pr.md still tells the review to
-          # emit the same string.
-          marker="${REVIEW_MARKER}"
-          # Default to 0 rather than interpolating an empty string into the jq filter: an empty
-          # BASELINE would make this `select(.id > )`, a jq syntax error that reads as a broken
-          # assertion instead of the review failure it is meant to report on.
-          baseline="${BASELINE:-0}"
-          # `.body // ""` because `null | contains("…")` is a jq ERROR, not false.
-          posted="$(gh api "repos/${{ github.repository }}/issues/${PR}/comments" \
-            --paginate -X GET -f per_page=100 \
-            --jq ".[] | select(.id > ${baseline}) | select((.body // \"\") | contains(\"${marker}\")) | .id" \
-            | wc -l | tr -d ' ')"
-          if [[ "${posted}" -gt 0 ]]; then
-            echo "OK: ${posted} new comment(s) carrying ${marker} on PR #${PR} (baseline id ${baseline})."
-            exit 0
-          fi
-          echo "::error title=Review posted nothing::the review ran but no new comment carrying the ${marker} marker appeared on PR #${PR} (nothing newer than comment id ${baseline})."
-          echo "The job log is redacted by claude-code-action; the post step's errors above say why nothing was posted."
+          echo "::error title=Review posted nothing::the comment was sent, but no new comment carrying ${REVIEW_MARKER} is on PR #${PR}."
           exit 1
-
-  # The "Claude did not review this PR" note, on an automatic run whose review never ran. Its own job
-  # because it needs a token that can comment, and the review job's must not: the model runs there.
-  # It checks out the default branch, never the PR, and runs no model.
-  skip-note:
-    needs: claude-review
-    if: github.event_name == 'pull_request' && needs.claude-review.outputs.skipped == 'true'
-    runs-on: @@RUNS_ON_REVIEW@@
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      pull-requests: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-          fetch-depth: 1
-      - uses: ./.github/actions/install-gh
-      - name: say the PR was not reviewed
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          # The notice alone was not enough: the check is green either way, and a green check
-          # reads as "reviewed". A large PR once merged that way with no review at all. So an
-          # automatic run also says it on the PR, once -- the skip marker keeps a draft -> ready
-          # toggle from posting it twice. It must NOT carry the review marker: the baseline step
-          # and the agents' merge gate would then count this note as a review.
-          skip_marker='<!-- verify-pr-skipped -->'
-          noted="$(gh api "repos/${{ github.repository }}/issues/${PR}/comments" \
-            --paginate -X GET -f per_page=100 \
-            --jq ".[] | select((.body // \"\") | contains(\"${skip_marker}\")) | .id" \
-            | wc -l | tr -d ' ')"
-          [[ "${noted}" -eq 0 ]] || exit 0
-          # The backticks below are markdown for the comment, not command substitution.
-          # shellcheck disable=SC2016
-          printf '%s\n\n%s\n\n%s\n\n```bash\ngh workflow run "Claude Code Review" -f pr=%s\n```\n\n%s\n' \
-            "${skip_marker}" \
-            '**Claude did not review this PR.** The review was skipped without running Claude. The usual reason: this PR edits `.github/workflows/claude-code-review.yml`, and the Claude App posts reviews only for the copy of that file on the default branch.' \
-            'Nothing runs the review later on its own. Ask for it by hand; this works before merging, because a dispatch runs the default branch'"'"'s copy of this workflow:' \
-            "${PR}" \
-            "Run log: ${RUN_URL}" \
-            | gh pr comment "${PR}" --repo "${{ github.repository }}" --body-file -
