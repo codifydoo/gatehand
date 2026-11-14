@@ -3,7 +3,7 @@
 // never as HTML, and only https://github.com/ links become hrefs.
 "use strict";
 
-const state = { token: "", session: null, repos: {}, selected: "", gate: {}, inbox: {}, drafts: {} };
+const state = { token: "", session: null, repos: {}, selected: "", gate: {}, inbox: {} };
 const $ = (id) => document.getElementById(id);
 
 // --- session secret: from the URL fragment once, then from this tab's sessionStorage -----------------
