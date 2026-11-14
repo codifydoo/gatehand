@@ -31,6 +31,11 @@
   scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
   branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only;
   the page does not show them yet (#21, #22).
+- Dashboard: a weekly budget in US dollars and a warning line (a share of it, 80% by default), kept
+  in the dashboard's local config file, set through `POST /api/budget` and returned by
+  `/api/session`. A setting on this machine only: nothing is written to GitHub, no agent reads it,
+  and it stops nothing. A config file from before loads unchanged. The page does not show or set it
+  yet (#28).
 - Nothing installed into repositories changes: no update is needed.
 
 ## 0.7.0 (2026-11-14)

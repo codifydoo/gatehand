@@ -257,6 +257,18 @@ Each repository costs about seven API calls per refresh, cached for a minute; th
 every five minutes while it is visible, and on "Refresh". The server stops after `--idle-minutes`
 with no page open; a page in a background tab counts as open.
 
+## Weekly budget
+
+The server keeps a weekly budget in US dollars, and a warning line as a share of it (80% unless you
+set another). It is a personal setting on the machine the dashboard runs on, kept in the same config
+file as the repository list (`budget_usd`, `budget_warn`): nothing is written to GitHub,
+`policy.json` does not hold it, and no agent reads it. It is for warning only and stops nothing; to
+stop the agents, turn them off. The page does not show or set it yet.
+
+`POST /api/budget` takes exactly `{"weekly_usd": <number of 0 or more, or null to clear>,
+"warn_at": <share from 0 to 1, or null for the default>}` (`warn_at` may be left out to keep it);
+anything else is refused with a reason. `/api/session` returns the budget as `budget`.
+
 ## Security model
 
 The server can read everything your `gh` login can, so the page is built so that nothing but the
@@ -287,6 +299,8 @@ tab it opened can talk to it.
   request from the page is passed through. Reading writes nothing. `tests/dashboard/dashboard.test.sh`
   pins each point above, runs every command the page can post through the real `parse_commands`, and
   every verdict through the real `review_verdict`.
+- Besides GitHub and the files above, it writes only its own config file: the repository list and
+  the weekly budget, each a fixed shape the server validates, kept with mode 0600.
 
 ## Options
 
@@ -296,5 +310,5 @@ tab it opened can talk to it.
 | `--no-open` | do not open a browser; print the address instead |
 | `--print-url` | print the address with its secret |
 | `--idle-minutes M` | stop after M minutes with no page open (default 120; 0 never) |
-| `--config FILE` | keep the repository list here |
+| `--config FILE` | keep the repository list and the weekly budget here |
 | `--ready-file FILE` | write `{port, token}` there (mode 0600) once listening, for scripts |

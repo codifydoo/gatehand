@@ -28,6 +28,11 @@
 #      schedules come from the workflow files on the default branch, not policy.json; no `schedule:`
 #      (or no file) is null; a file, or a shape of `on:`, that cannot be read is "unknown" and listed
 #      under the errors, never "no schedule". The next run is POSIX cron's, in UTC.
+#  10. The weekly budget is a setting in the local config file, never on GitHub: set, change and
+#      clear it with a fixed-shape body; a negative, non-numeric, infinite or out-of-range value, or
+#      any other field, is refused with a reason and changes nothing; the file keeps mode 0600 and
+#      the repository list; a config file from before the budget loads unchanged, and a budget
+#      hand-edited out of shape loads as not set. Setting it makes no gh call.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -317,6 +322,50 @@ expect "the viewer" "$(jq -r .viewer <<<"${s}")" "owner-login"
 expect "the list is kept, mode 0600" "$(mode_of "${TMP}/cfg/dashboard.json")" 600
 expect "a repository not on the list: refused" "$(code -H "X-Gatehand-Token: ${TOKEN}" "${B}/api/repo/o/plain")" 404
 expect "a path out of the list: refused" "$(code --path-as-is -H "X-Gatehand-Token: ${TOKEN}" "${B}/api/repo/o/..%2F..%2Fetc")" 404
+
+# 10. the weekly budget: a local setting, set from the page, read with the session.
+budget() { curl -s -H "X-Gatehand-Token: ${TOKEN}" -H "Origin: ${B}" -H "Content-Type: application/json" -d "$1" "${B}/api/budget"; }
+budget_code() { code -H "X-Gatehand-Token: ${TOKEN}" -H "Origin: ${B}" -H "Content-Type: application/json" -d "$1" "${B}/api/budget"; }
+expect "budget: none until one is set, the warning line at 80%" "$(jq -c .budget <<<"${s}")" '{"weekly_usd":null,"warn_at":0.8}'
+n_calls="$(stub_gh_calls | wc -l)"
+expect "budget: set" "$(budget '{"weekly_usd":60}' | jq -c .budget)" '{"weekly_usd":60,"warn_at":0.8}'
+expect "budget: change, with a warning line" "$(budget '{"weekly_usd":75.5,"warn_at":0.9}' | jq -c .budget)" '{"weekly_usd":75.5,"warn_at":0.9}'
+expect "budget: a change without warn_at keeps the line" "$(budget '{"weekly_usd":80}' | jq -c .budget)" '{"weekly_usd":80,"warn_at":0.9}'
+expect "budget: setting it is never a call to GitHub" "$(stub_gh_calls | wc -l)" "${n_calls}"
+expect "budget: the session carries it" "$(get /api/session | jq -c .budget)" '{"weekly_usd":80,"warn_at":0.9}'
+expect "budget: kept in the config file, which keeps its repositories and mode 0600" \
+  "$(jq -c '[.budget_usd, .budget_warn, .discovered]' "${TMP}/cfg/dashboard.json") $(mode_of "${TMP}/cfg/dashboard.json")" '[80,0.9,["o/r"]] 600'
+# Each refused by the budget's own check (its reason's first words), not by the JSON reader.
+huge="1$(printf '0%.0s' {1..400})"
+while IFS='|' read -r bad why; do
+  expect "budget: refused with a reason, ${bad:0:40}" "$(budget_code "${bad}") $(budget "${bad}" | jq -r .error | cut -d' ' -f1-3)" "400 ${why}"
+done <<BAD
+{"weekly_usd":-1}|weekly_usd must be
+{"weekly_usd":"60"}|weekly_usd must be
+{"weekly_usd":true}|weekly_usd must be
+{"weekly_usd":Infinity}|weekly_usd must be
+{"weekly_usd":NaN}|weekly_usd must be
+{"weekly_usd":${huge}}|weekly_usd must be
+{"weekly_usd":60,"warn_at":1.5}|warn_at must be
+{"weekly_usd":60,"warn_at":-0.1}|warn_at must be
+{"warn_at":0.5}|the budget is
+{"weekly_usd":60,"repo":"o/r"}|the budget is
+BAD
+expect "budget: a refusal says why" "$(budget '{"weekly_usd":-1}' | jq -r .error)" "weekly_usd must be a number from 0 up, or null"
+expect "budget: and changes nothing" "$(get /api/session | jq -c .budget)" '{"weekly_usd":80,"warn_at":0.9}'
+expect "budget: clear (null), and the warning line back to its default" "$(budget '{"weekly_usd":null,"warn_at":null}' | jq -c .budget)" '{"weekly_usd":null,"warn_at":0.8}'
+expect "budget: zero is a budget, not none" "$(budget '{"weekly_usd":0}' | jq -c .budget.weekly_usd)" 0
+budget '{"weekly_usd":null}' >/dev/null
+# A config file from before the budget, and one hand-edited out of shape.
+cfg_load() { (cd "${PKG}/bin" && PYTHONDONTWRITEBYTECODE=1 python3 -c 'import json, sys, dashboard; c = dashboard.Config(sys.argv[1]); print(json.dumps([c.repos(), c.data["excluded"], c.data["scanned_at"], c.budget()]))' "$1"); }
+printf '%s' '{"discovered":["o/r"],"added":["o/x"],"excluded":["o/y"],"scanned_at":"2026-11-01T00:00:00Z","scan_notes":[]}' >"${TMP}/old.json"
+expect "budget: an old config file loads unchanged, with no budget" "$(cfg_load "${TMP}/old.json")" \
+  '[["o/r", "o/x"], ["o/y"], "2026-11-01T00:00:00Z", {"weekly_usd": null, "warn_at": 0.8}]'
+for odd in '"lots"' "${huge}"; do
+  printf '{"discovered":["o/r"],"budget_usd":%s,"budget_warn":7}' "${odd}" >"${TMP}/odd.json"
+  expect "budget: a value out of shape in the file (${odd:0:10}) is not set, and the rest loads" "$(cfg_load "${TMP}/odd.json")" \
+    '[["o/r"], [], null, {"weekly_usd": null, "warn_at": 0.8}]'
+done
 
 # 2-5. one repository
 r="$(get /api/repo/o/r)"
