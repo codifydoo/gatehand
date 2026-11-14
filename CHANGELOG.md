@@ -18,7 +18,13 @@
   pane says why it is stuck, shows what the agent wrote, links to the step on GitHub that comes
   first (such as commenting on the blocked issue), and answers it with a confirm that opens in the
   pane, naming the exact inbox line and what follows. Disabled, refused (nothing posted) and waiting
-  for the Agent inbox workflow are said in the pane. Other rows' panes link to where they are done.
+  for the Agent inbox workflow are said in the pane.
+- A stopped role and an agent PR held for a person have panes of their own. The role's shows its
+  newest runs, why the breaker tripped and what it holds up, and resets it from the pane (Reset the
+  breaker for its request, or Resume). The PR's says why it is held and the merge gate's last word,
+  links to the PR to fix it, and hands it back from the pane; Hold, Run review, Run merge gate,
+  Approve… and Request changes… confirm there too, with the server's preview. Issue, to merge and to
+  close rows still link to where they are done.
 - Nothing installed into repositories changes: no update is needed.
 
 ## 0.7.0 (2026-11-14)
