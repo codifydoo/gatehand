@@ -7,6 +7,9 @@
   scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
   branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only;
   the page does not show them yet (#21, #22).
+- Project site: `site/` holds five static pages (home, how it works, security, the dashboard, get
+  started), published to GitHub Pages by `.github/workflows/pages.yml` on a push to `main`. Not
+  part of the package: nothing changes in installed repositories.
 - Review: `/verify-pr` now says how to write its two headings (plain `###` markdown, with the
   verdict alone on the line under `### Verdict`). In one installation, 45 of 316 reviews in a month
   wrote the Verdict heading as HTML, in bold or on one line with the verdict, and the merge gate
