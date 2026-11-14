@@ -64,6 +64,28 @@ repository, never as zero, "off" or "nothing waits": Needs you says what it coul
 as the digest does. Without the repository's variables (a login with less than write access) or its
 `policy.json`, it does not guess which issue is the inbox.
 
+### Health: what could not be read
+
+A repository that could not be read, wholly or in part, has a health row at the end of Needs you. It
+is never counted, and it is never the item opened on arrival. Its pane gives the cause (below) and
+what `gh` said, as text, and the one thing that helps, which is always outside the page:
+
+- **SSO not authorized:** run `gh auth refresh -h github.com` (a Copy button puts that fixed text on
+  the clipboard) and follow the browser prompt, or use the organization's sign-in page on GitHub;
+- **not found:** find the new name or get access back on GitHub;
+- **too little access:** ask for access; without the variables, which issue is the inbox cannot be told;
+- **anything else:** usually passes.
+
+A repository that cannot be read at all can also be hidden from its pane (the existing local setting).
+Where parts fail for different reasons, the pane leads with the cause whose fix is most specific (SSO,
+then access, then not found).
+
+"Check again" reads that repository only, past the cache, with its inbox and the merge gate's report,
+and says whether it is still unread (and why) or readable again. It writes nothing. Two causes hit
+every repository and are said once, under the bar, instead of in rows: `gh` signed out (with the
+command to copy and Check again), and the API limit, with when reads resume; Refresh, and the
+five-minute refresh, are off until then. On a health item, `a` runs Check again (a read).
+
 ### Why a read failed
 
 Each failed read also says why, as one cause from a fixed set, so the page can offer the one thing

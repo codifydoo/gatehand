@@ -33,6 +33,8 @@ async function api(path, opts = {}) {
   if (!res.ok) {
     const err = new Error((data && data.error) || `HTTP ${res.status}`);
     err.status = res.status; // 4xx: refused before anything was done; 5xx: it may or may not have been
+    // Why a read failed (bin/dashboard.py cause_of): one of a fixed set, never a guess.
+    if (data && typeof data.cause === "string") { err.cause = data.cause; err.resetsAt = data.resets_at || null; }
     throw err;
   }
   return data;
@@ -197,7 +199,7 @@ function routeRepo() {
 // to close once the fix is live). Suggested issues are not here: queueing one is done on GitHub,
 // next to its text, from the Pipeline tab.
 const CHIPS = [["request", "Requests"], ["role", "Stopped"], ["pr", "PRs"], ["issue", "Issues"], ["merge", "To merge"], ["close", "To close"]];
-const KIND_LABEL = { request: "Request", role: "Role", pr: "PR", issue: "Issue", merge: "To merge", close: "To close" };
+const KIND_LABEL = { request: "Request", role: "Role", pr: "PR", issue: "Issue", merge: "To merge", close: "To close", health: "Repository" };
 const FOLDED = { merge: (n) => `${n} ${n === 1 ? "PR" : "PRs"} to merge · passed the gate, auto-merge is a dry run`,
   close: (n) => `${n} merged ${n === 1 ? "issue" : "issues"} to close once live` };
 const KIND_VERB = { blocked: "blocked on", failed: "failed on", protected: "needs protected paths for", untrusted: "stopped: changed text on" };
@@ -480,10 +482,11 @@ function needsView() {
 
   // The open item: the one the address names, else the first row as listed (the landing opens the top
   // item). Rows in a folded group come after the others, as they are shown.
-  const shownRows = kind ? of(kind) : [...rows.filter((r) => !FOLDED[r.kind]), ...Object.keys(FOLDED).flatMap(of)];
+  const healthList = kind ? [] : (state.session ? state.session.repos : []).map(healthOf).filter((x) => x && !x.global);
+  const shownRows = kind ? of(kind) : [...rows.filter((r) => !FOLDED[r.kind]), ...Object.keys(FOLDED).flatMap(of), ...healthList];
   const want = state.route.open;
   const closed = want === "-"; // closed by tapping its row on a narrow window
-  const sel = closed ? null : (want ? shownRows.find((r) => r.key === want) || null : shownRows[0] || null);
+  const sel = closed ? null : (want ? shownRows.find((r) => r.key === want) || null : shownRows.find((r) => r.kind !== "health") || null);
   // The top row, once open, is pinned in the address: a newer row arriving does not take the pane
   // from under you, and once it is answered the pane says what happened instead of moving on.
   // Only while the address itself still says Needs you with nothing open: a navigation not yet handled wins.
@@ -514,10 +517,9 @@ function needsView() {
         of(k).map(row)) : null))];
   }
   // What could not be read: named, never counted.
-  const unread = per.filter(([, x]) => x.notes.length).map(([repo, x]) => h("div", { class: "lrow unread" },
-    h("div", { class: "lmeta" }, `${short(repo)} · could not read · not counted`),
-    x.notes.map((n) => h("div", {}, n)),
-    routeLink(repoRoute(repo), {}, `Open ${repo}`)));
+  // What could not be read: one health row per repository, at the end, never counted. A cause that
+  // hits every repository (signed out, rate limited) is in the banner under the bar instead.
+  const unread = healthList.map((x) => (narrow && sel && sel.key === x.key && pane ? [healthRow(x, true), paneBox(true)] : healthRow(x, !!sel && sel.key === x.key)));
   const any = rows.length && (!kind || of(kind).length);
   // Still being read: one line per repository, after the rows, until it answers.
   const reading = per.filter(([, x]) => x.loading).map(([repo]) => {
@@ -554,7 +556,10 @@ function zeroPane(c, repos) {
   if (c.unread.length) {
     return [h("h2", {}, "Nothing that could be read needs you."),
       h("p", {}, `${c.unread.map(short).join(", ")} could not be read, so this is not "nothing".`),
-      h("p", {}, routeLink(repoRoute(c.unread[0]), {}, `Open ${short(c.unread[0])} →`))];
+      (() => {
+        const r = c.unread.find((u) => { const x = healthOf(u); return x && !x.global; });
+        return h("p", {}, r ? routeLink(needsRoute("", `${r}|health`), {}, `Open ${short(r)}'s health item →`) : "Why is said under the bar.");
+      })()];
   }
   // What the agents are doing meanwhile, from what was read.
   // (Every repository was read here: an unread one returned above.)
@@ -572,6 +577,170 @@ function zeroPane(c, repos) {
     running || q ? h("p", {}, `${[running, q].filter(Boolean).join(" and ")} in ${busy.size}${more} ${busy.size === 1 && !more ? "repository" : "repositories"}.`) : null,
     c.runningUnknown && !c.running ? h("p", {}, "Whether anything is running could not be read in every repository.") : null,
     h("p", {}, routeLink("/activity", {}, "See Activity →"))];
+}
+
+// --- health: why a repository, or a part of it, could not be read, and the one thing that helps ----------
+// The cause comes from the server (bin/dashboard.py cause_of), never guessed. The fix is always
+// outside the page; the page's own button only reads again. Health never counts.
+const GLOBAL_CAUSES = new Set(["signed_out", "rate_limited"]);
+const CAUSE = {
+  sso: { short: "the organization needs SSO authorization", hint: "Authorize gh for the organization · then Check again",
+    why: (org) => `${org} enforces SAML single sign-on, and gh's token is not authorized for it.` },
+  not_found: { short: "not found: renamed, deleted, or access removed", hint: "Open on GitHub · or Hide it",
+    why: () => "GitHub answers \"not found\" both for a repository that is gone and for one your login cannot see." },
+  no_access: { short: "your login cannot read it", hint: "Ask for access",
+    why: () => "Your login can see the repository but is not allowed to read this." },
+  signed_out: { short: "gh is signed out", hint: "Sign in to gh again", why: () => "gh has no login, or its token was revoked or expired." },
+  rate_limited: { short: "the API limit is reached", hint: "Wait until it resets", why: () => "GitHub's rate limit for your login is used up for now." },
+  unknown: { short: "the read failed", hint: "Usually passes · Check again",
+    why: () => "GitHub or gh answered with an error that is not one of the known causes (a server error, a timeout); it often passes." },
+};
+state.healthBusy = new Set();
+
+function healthOf(repo) {
+  const x = needRows(repo);
+  if (!x.notes.length) return null;
+  const d = state.repos[repo];
+  const parts = [];
+  if (d && d.failed) parts.push({ part: "repository", cause: d.cause || "unknown", error: d.failed, resetsAt: d.resetsAt || null });
+  else if (d) {
+    for (const u of d.unreadable || []) parts.push({ part: u.part, cause: u.cause || "unknown", error: u.error, resetsAt: u.resets_at || null });
+    const ib = state.inbox[repo];
+    if (ib && ib.error) parts.push({ part: "inbox", cause: ib.cause || "unknown", error: ib.error, resetsAt: ib.resetsAt || null });
+    const gt = state.gate[repo];
+    if (gt && gt.error) parts.push({ part: "merge gate report", cause: gt.cause || "unknown", error: gt.error, resetsAt: gt.resetsAt || null });
+  }
+  // Shown: the cause whose fix is most specific, not the first read.
+  const rank = { sso: 0, no_access: 1, not_found: 2, unknown: 3 };
+  const main = parts.filter((q) => !GLOBAL_CAUSES.has(q.cause)).sort((a, b) => (rank[a.cause] ?? 4) - (rank[b.cause] ?? 4))[0] || parts[0] || null;
+  // The repository itself unread (a failed request, or its "repository" part): nothing of it is shown.
+  const whole = !!(d && (d.failed || (d.unreadable || []).some((u) => u.part === "repository")));
+  return { kind: "health", key: `${repo}|health`, repo, at: "", whole, parts, main,
+    // A note with no failed read behind it (no inbox issue, a file that does not parse) is said as it is.
+    other: parts.length ? [] : x.notes,
+    global: parts.length > 0 && parts.every((q) => GLOBAL_CAUSES.has(q.cause)) };
+}
+
+function healthRow(x, on) {
+  const C = CAUSE[x.main ? x.main.cause : "unknown"] || CAUSE.unknown;
+  const n = x.parts.length;
+  const title = x.whole ? `${short(x.repo)} can't be read` : (n === 1 ? `${short(x.repo)}'s ${x.parts[0].part} can't be read` : `${short(x.repo)}: ${n || x.other.length} ${(n || x.other.length) === 1 ? "part" : "parts"} unread`);
+  return routeLink(needsRoute(state.route.kind, on && NARROW.matches ? "-" : x.key), { class: `lrow unread${on ? " on" : ""}`, title: x.repo,
+    "aria-current": on ? "true" : null },
+  h("div", { class: "lmeta" }, `${short(x.repo)} · ${x.whole ? "could not read · not counted" : "partly unread · the rest is counted"}`),
+  h("div", { class: "ltitle" }, h("strong", {}, title), x.main ? ` ${C.short}` : ""),
+  h("div", { class: "lhint" }, x.main ? C.hint : "Check again"));
+}
+
+function healthPane(x) {
+  const repo = x.repo;
+  const owner = repo.split("/")[0];
+  const d = state.repos[repo];
+  const cause = x.main ? x.main.cause : "unknown";
+  const C = CAUSE[cause] || CAUSE.unknown;
+  const busy = state.healthBusy.has(x.key);
+  const said = [...x.parts.map((q) => (String(q.error).startsWith(`${q.part}:`) ? q.error : `${q.part}: ${q.error}`)), ...x.other].join("\n");
+  const cmd = "gh auth refresh -h github.com";
+  let first = null;
+  if (cause === "sso") {
+    first = step("1", h("strong", {}, `Authorize gh for ${owner}. `), "Run this in a terminal and follow the browser prompt:",
+      h("div", { class: "cmd" }, h("code", {}, cmd), " ", copyBtn(cmd)),
+      h("div", { class: "muted" }, "The page cannot do this for you: it never holds the token. ",
+        link(`https://github.com/orgs/${owner}/sso`, "Organization sign-in on GitHub ↗")));
+  } else if (cause === "not_found") {
+    first = step("1", h("strong", {}, "Find the new name, or get access back. "), link(`https://github.com/${repo}`, "Open on GitHub ↗"));
+  } else if (cause === "no_access") {
+    first = step("1", h("strong", {}, "Ask the repository's admins for access. "),
+      x.parts.some((q) => q.part === "variables") ? h("div", { class: "muted" }, "Without the variables, which issue is the inbox cannot be told.") : null);
+  }
+  return [
+    h("div", { class: "pane-head" }, [repo, "Repository", x.whole ? "could not read" : "partly unread", d && (d.at || d.fetched_at) ? `read at ${hhmm(d.at || Date.parse(d.fetched_at))}` : ""].filter(Boolean).join(" · ")),
+    h("h2", {}, x.whole ? `${short(repo)} can't be read: ${C.short}` : `${short(repo)}: ${x.parts.map((q) => q.part).join(", ") || "a part"} can't be read`),
+    h("ol", { class: "track", "aria-label": "Parts" }, x.whole ? h("li", { class: "on" }, "nothing read")
+      : x.parts.map((q) => h("li", { class: "on" }, `${q.part} ?`))),
+    kv("Why", x.main ? C.why(owner) : "A part of it could not be used; the server's note is below."),
+    kv("What happens next", x.whole
+      ? `Nothing from ${short(repo)} is shown or counted until it can be read. The agents there keep running; only your view is affected.`
+      : `The rest of ${short(repo)} is shown and counted; what could not be read shows "?" in its place.`),
+    h("div", { class: "said" }, h("div", { class: "muted" }, "What gh said (plain text)"), h("pre", { class: "body" }, said)),
+    first,
+    step(first ? "2" : null, h("div", { class: "actions" },
+      h("button", { type: "button", disabled: busy, onclick: () => checkAgain(x) }, busy ? "Reading…" : "Check again"),
+      x.whole ? removeBtn(repo, "Hide repository") : null),
+    h("div", { class: "muted" }, `Reads ${short(repo)} only, past the cache. Writes nothing.`),
+    state.paneMsg[x.key] ? paneState(state.paneMsg[x.key]) : null)];
+}
+
+function copyBtn(text) {
+  return h("button", { type: "button", class: "quiet small", onclick: (e) => {
+    const b = e.currentTarget;
+    const fail = () => { b.textContent = "Copy failed: select it above"; };
+    if (!navigator.clipboard) { fail(); return; }
+    navigator.clipboard.writeText(text).then(() => { b.textContent = "Copied"; }, fail);
+  } }, "Copy");
+}
+
+// Check again: this repository only, past the cache, its inbox and the gate's report included.
+async function checkAgain(x) {
+  if (state.healthBusy.has(x.key)) return;
+  state.healthBusy.add(x.key);
+  delete state.paneMsg[x.key];
+  renderView();
+  const before = needRows(x.repo).rows.length;
+  await loadRepo(x.repo, true, true);
+  state.healthBusy.delete(x.key);
+  const now = healthOf(x.repo);
+  if (now) {
+    const same = now.main && x.main && now.main.cause === x.main.cause;
+    state.paneMsg[x.key] = { kind: "note", at: Date.now(),
+      text: `Still can't be read at ${hhmm(Date.now())}: ${same ? "the same answer from GitHub" : "GitHub answered"} (${now.main ? now.main.cause : "no cause given"}).` };
+  } else {
+    const after = needRows(x.repo).rows.length;
+    state.paneMsg[x.key] = { kind: "done", at: Date.now(),
+      text: `${short(x.repo)} is readable again: ${after} ${after === 1 ? "item" : "items"} from it in Needs you${after !== before ? ` (was ${before})` : ""}.` };
+  }
+  renderAll();
+}
+
+// Causes that hit every repository go under the bar, not in rows: signed out, and the API limit (with
+// Refresh off until it resets).
+function limited() { return !!(state.limitUntil && state.limitUntil > Date.now()); }
+function renderBanner() {
+  let el = $("health-banner");
+  if (!el) {
+    el = h("div", { id: "health-banner", class: "banner", role: "status" });
+    document.querySelector(".bar").after(el);
+  }
+  const all = [];
+  for (const repo of state.session ? state.session.repos : []) { const x = healthOf(repo); if (x) all.push(...x.parts); }
+  const sc = state.session && state.session.scan_cause;
+  if (sc && sc.cause) all.push({ cause: sc.cause, resetsAt: sc.resets_at || null });
+  if (state.sessionCause) all.push(state.sessionCause); // the session request itself failed (signed out at start)
+  const out = all.some((q) => q.cause === "signed_out");
+  const rate = all.filter((q) => q.cause === "rate_limited");
+  const resets = rate.map((q) => Date.parse(q.resetsAt)).filter((n) => isFinite(n));
+  state.limitUntil = rate.length && resets.length ? Math.max(...resets) : 0;
+  const kids = [];
+  if (out) {
+    kids.push(h("div", {}, "gh is signed out. Nothing can be read or sent. Run ", h("code", {}, "gh auth login -h github.com"), " in a terminal. ",
+      copyBtn("gh auth login -h github.com"), " ", h("button", { type: "button", class: "quiet small", onclick: () => refresh(true) }, "Check again")));
+  }
+  if (rate.length) {
+    const upd = $("updated").textContent;
+    const left = state.limitUntil - Date.now();
+    kids.push(h("div", {}, !state.limitUntil ? "API limit reached; GitHub did not say until when. Try again in a few minutes."
+      : (left > 0 ? `API limit reached. Reads resume at ${hhmm(state.limitUntil)}, in ${Math.max(1, Math.round(left / 60000))} min.${upd ? ` What is shown is from the last read (${upd}).` : ""}`
+        : `The API limit should have reset at ${hhmm(state.limitUntil)}: Refresh to read again.`)));
+  }
+  // Re-drawn when the limit resets, so Refresh comes back on its own.
+  clearTimeout(state.limitTimer);
+  if (limited()) state.limitTimer = setTimeout(renderAll, state.limitUntil - Date.now() + 1000);
+  // Replaced only when its text changes, so a screen reader does not hear it again on every arrival.
+  const text = kids.map((k) => k.textContent).join("\n");
+  if (el.dataset.text !== text) { replace(el, kids); el.dataset.text = text; }
+  el.hidden = !kids.length;
+  $("refresh").disabled = limited() || !!state.refreshing;
+  $("refresh").title = limited() ? `Off until ${hhmm(state.limitUntil)}: the API limit` : "";
 }
 
 // The width below which the list and the pane do not fit side by side (app.css has the same number).
@@ -598,7 +767,7 @@ const cap1 = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
 function itemPane(r) {
   if (state.pane.key !== r.key) state.pane = { key: r.key, confirm: "", text: "", fixer: true, preview: null };
-  const pane = { request: requestPane, role: rolePane, pr: prPane, issue: issuePane, merge: mergePane, close: closePane }[r.kind] || framePane;
+  const pane = { request: requestPane, role: rolePane, pr: prPane, issue: issuePane, merge: mergePane, close: closePane, health: healthPane }[r.kind] || framePane;
   return pane(r);
 }
 
@@ -1027,7 +1196,7 @@ function gateFor(repo) {
   const asked = state.gateAsked.has(repo);
   state.gateAsked.add(repo);
   if (!gate && !asked) {
-    api(`/api/repo/${repo}/gate`).then((x) => { state.gate[repo] = x; }, (e) => { state.gate[repo] = { error: e.message }; }).then(renderAll);
+    api(`/api/repo/${repo}/gate`).then((x) => { state.gate[repo] = x; }, (e) => { state.gate[repo] = { error: e.message, cause: e.cause || "unknown", resetsAt: e.resetsAt || null }; }).then(renderAll);
   }
   return gate;
 }
@@ -1361,7 +1530,7 @@ async function previewAct(repo, payload, btn) {
 
 async function loadInbox(repo, fresh) {
   try { state.inbox[repo] = await api(`/api/repo/${repo}/inbox${fresh ? "?fresh=1" : ""}`); }
-  catch (e) { state.inbox[repo] = { error: e.message }; }
+  catch (e) { state.inbox[repo] = { error: e.message, cause: e.cause || "unknown", resetsAt: e.resetsAt || null }; }
   renderAll(); // the requests change Needs you and the sidebar counts, not only this repository's page
 }
 
@@ -1726,7 +1895,7 @@ function renderView() {
   $("excluded").textContent = ex.length ? `Hidden: ${ex.join(", ")}` : "";
 }
 
-function renderAll() { renderSide(); renderView(); }
+function renderAll() { renderSide(); renderView(); renderBanner(); }
 
 function notice(text) {
   const n = $("notice");
@@ -1740,15 +1909,16 @@ function applySession(s) {
   for (const r of Object.keys(state.repos)) if (!state.session.repos.includes(r)) delete state.repos[r];
 }
 
-async function loadRepo(repo, fresh) {
+async function loadRepo(repo, fresh, waitExtras) {
   if (!state.repos[repo]) state.repos[repo] = { loading: true };
   try {
     state.repos[repo] = await api(`/api/repo/${repo}${fresh ? "?fresh=1" : ""}`);
   } catch (e) {
-    state.repos[repo] = { failed: e.message };
+    state.repos[repo] = { failed: e.message, cause: e.cause || "unknown", resetsAt: e.resetsAt || null, at: Date.now() };
   }
   renderAll();
-  loadExtras(repo, fresh);
+  const extras = loadExtras(repo, fresh);
+  if (waitExtras) await extras;
 }
 
 // The inbox and the merge gate's report: always for the repository on screen, and for any other when
@@ -1759,7 +1929,7 @@ async function loadExtras(repo, fresh) {
   const q = fresh ? "?fresh=1" : "";
   const open = repo === state.selected;
   const part = (name) => api(`/api/repo/${repo}/${name}${q}`)
-    .then((r) => { state[name][repo] = r; }, (e) => { state[name][repo] = { error: e.message }; })
+    .then((r) => { state[name][repo] = r; }, (e) => { state[name][repo] = { error: e.message, cause: e.cause || "unknown", resetsAt: e.resetsAt || null }; })
     .then(renderAll);
   const jobs = [];
   if (d.inbox && (open || needsInbox(d))) jobs.push(part("inbox"));
@@ -1799,8 +1969,10 @@ async function refresh(fresh) {
     return;
   }
   $("refresh").disabled = true;
+  state.refreshing = (state.refreshing || 0) + 1;
   try {
     applySession(await api(`/api/session${fresh ? "?fresh=1" : ""}`));
+    state.sessionCause = null;
     state.selected = routeRepo();
     const scan = [state.session.scan_error && `Finding repositories failed: ${state.session.scan_error}`,
       ...(state.session.scan_notes || []).map((n) => `Finding repositories: ${n}`)].filter(Boolean);
@@ -1809,13 +1981,16 @@ async function refresh(fresh) {
     const core = state.session.rate && state.session.rate.core;
     $("rate").textContent = core ? `API ${core.remaining}/${core.limit}` : "";
     renderAll();
-    await Promise.all(state.session.repos.map((r) => loadRepo(r, fresh)));
+    await Promise.all(state.session.repos.filter((r) => !state.healthBusy.has(`${r}|health`)).map((r) => loadRepo(r, fresh)));
     $("updated").textContent = `updated ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
   } catch (e) {
     notice(e.message);
-    if (!state.session) { state.sessionFailed = e.message; renderAll(); } // not "Loading…" forever
+    state.sessionCause = e.cause ? { cause: e.cause, resetsAt: e.resetsAt || null } : null;
+    if (!state.session) state.sessionFailed = e.message; // not "Loading…" forever
+    renderAll();
   } finally {
-    $("refresh").disabled = false;
+    state.refreshing -= 1;
+    $("refresh").disabled = limited() || state.refreshing > 0; // the API limit, or another refresh still reading
   }
 }
 
@@ -1895,7 +2070,7 @@ $("add").addEventListener("submit", async (e) => {
   } catch (err) { notice(err.message); }
 });
 // Every five minutes while the tab is visible; the server caches each repository for a minute.
-setInterval(() => { if (document.visibilityState === "visible") refresh(false); }, 5 * 60 * 1000);
+setInterval(() => { if (document.visibilityState === "visible" && !limited()) refresh(false); }, 5 * 60 * 1000);
 // The server stops after a while with no page open; a background tab still counts as open.
 setInterval(() => { if (state.token) api("/api/ping").catch(() => {}); }, 60 * 1000);
 // What Needs you showed when you last looked, read now that everything above is defined.

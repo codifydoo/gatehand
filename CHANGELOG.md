@@ -40,6 +40,11 @@
 - Needs you with nothing in it says what is true and what to do next: nothing needs you (with what
   is running and queued), nothing that could be read (naming what could not), or no repositories
   found; a repository still being read shows a "reading…" line.
+- What could not be read has a health row at the end of Needs you, never counted, whose pane says
+  why (the server's cause) and the one thing that helps: authorize gh for an organization's SSO,
+  find a repository that moved, ask for access; "Check again" re-reads that repository only. A
+  signed-out gh and the API limit are said once under the bar, and Refresh is off until the limit
+  resets.
 - Keys on Needs you: j/k move, o goes into the item, a opens its primary action's confirm (Enter
   confirms), r opens Reject…, Esc closes the confirm, ? lists them.
 - Nothing installed into repositories changes: no update is needed.
