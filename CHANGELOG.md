@@ -14,6 +14,7 @@
   passed the merge gate while auto-merge is a dry run, folded under "to merge", since a person has
   to merge them. A row you have not seen before is marked NEW. Suggested issues are no longer in
   Needs you; they stay on the repository's Pipeline tab.
+=======
 - Dashboard: the repository payload carries each role's `maxAttemptsPerIssue`, `maxCiFixes`,
   `breakerThreshold` and `timeoutMinutes` (null when `policy.json` does not set one), and each
   scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
