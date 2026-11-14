@@ -19,6 +19,11 @@
   first (such as commenting on the blocked issue), and answers it with a confirm that opens in the
   pane, naming the exact inbox line and what follows. Disabled, refused (nothing posted) and waiting
   for the Agent inbox workflow are said in the pane. Other rows' panes link to where they are done.
+- Dashboard: the repository payload carries each role's `maxAttemptsPerIssue`, `maxCiFixes`,
+  `breakerThreshold` and `timeoutMinutes` (null when `policy.json` does not set one), and each
+  scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
+  branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only;
+  the page does not show them yet (#21, #22).
 - Nothing installed into repositories changes: no update is needed.
 
 ## 0.7.0 (2026-11-14)
