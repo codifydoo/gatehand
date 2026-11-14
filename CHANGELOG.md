@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- The dashboard is laid out as a sidebar and views instead of one long page: Needs you, Activity,
+  Week, a Repositories list, and per repository four tabs (Pipeline, Agents, Runs and spend,
+  Settings). The view is in the address, so a reload or a link keeps it, and the number waiting for
+  you is in the tab's title. The total tiles are gone: what waits for you, runs going and the week's cost sit
+  in the sidebar; open PRs, queued issues and run counts are per repository, on Repositories and Week. Every list and
+  button is still there, and sends exactly what it did.
 - Dashboard: the repository payload carries each role's `maxAttemptsPerIssue`, `maxCiFixes`,
   `breakerThreshold` and `timeoutMinutes` (null when `policy.json` does not set one), and each
   scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
@@ -15,6 +21,8 @@
   wrote the Verdict heading as HTML, in bold or on one line with the verdict, and the merge gate
   read 10 of them as unknown, which leaves an agent PR waiting for a person. Installed repositories
   get the wording on their next update.
+- Nothing else installed into repositories changes: an update is needed only to get the review
+  wording above.
 
 ## 0.7.0 (2026-11-14)
 
