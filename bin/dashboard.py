@@ -8,7 +8,9 @@ Serves one page on 127.0.0.1 and reads GitHub through the `gh` CLI, so it sees e
 ledger branch, its issues and PRs, its Actions runs and variables, read the way the agents' own
 scripts read them (agent-digest.sh, agent-state.sh, agent-lib.sh).
 
-Read-only towards GitHub. The only thing it writes is its own list of repositories, in
+Reading writes nothing. Its writes to GitHub are the page's buttons, each a fixed shape built here
+and done with your own login after you confirm: an inbox command posted on the inbox issue, or one of
+a few agent label changes (see "actions" below). Locally it writes only its list of repositories, in
 ${XDG_CONFIG_HOME:-~/.config}/gatehand/dashboard.json.
 
 Security (docs/dashboard.md): it listens on 127.0.0.1 only; every /api/ request must carry the
@@ -97,8 +99,8 @@ def gh(args, stdin=None):
     return p.stdout
 
 
-def gh_json(args):
-    out = gh(args)
+def gh_json(args, stdin=None):
+    out = gh(args, stdin)
     try:
         return json.loads(out) if out.strip() else None
     except ValueError:
@@ -406,6 +408,7 @@ def read_repo(repo):
         d["version"] = None
     if r.get("lock") is None:
         d["errors"].append("no %s on %s: Gatehand is not installed here" % (LOCK_PATH, default))
+    d["policy_ok"] = policy_ok
     bot = policy.get("botLogin") or "gatehand[bot]"
     roles = policy.get("roles") if isinstance(policy.get("roles"), dict) else {}
     ledger = policy.get("ledgerBranch") or "agent-ledger"
@@ -539,9 +542,15 @@ nodes{author{__typename login} body createdAt url}}}}}"""
 MAX_INBOX_PAGES = 10
 
 
-def read_inbox(repo, number, bot):
+AWAIT_SECONDS = 600
+
+
+def read_inbox(repo, number, bot, owner_login=""):
     """The inbox's requests, from its newest comments back (a long-lived inbox has thousands; the
-    newest are the ones that matter, and an answer always comes after its request)."""
+    newest are the ones that matter, and an answer always comes after its request). Also whether a
+    command of the owner's is still waiting for the inbox workflow: the bot replies to every comment
+    that carries commands, so an owner's command newer than the bot's last comment (and under ten
+    minutes old: a workflow that never ran must not block forever) is not applied yet."""
     owner, name = repo.split("/", 1)
     comments, cursor, truncated = [], None, False
     for page in range(MAX_INBOX_PAGES):
@@ -560,7 +569,18 @@ def read_inbox(repo, number, bot):
             break
         cursor = info.get("startCursor")
         truncated = page == MAX_INBOX_PAGES - 1
-    return {"requests": inbox_requests(comments, bot), "truncated": truncated}
+    requests = inbox_requests(comments, bot)
+    # The bot's last REPLY: its request comments (the merge gate, the fixer, the coder file them at
+    # any time) say nothing about whether the owner's command has been applied.
+    last_bot = max((c["created_at"] or "" for c in comments if c["user"]["login"] == bot
+                    and not REQ_MARK_RE.fullmatch(((c["body"] or "").replace("\r", "").split("\n", 1)[0]).strip())), default="")
+    floor = iso(now_utc() - timedelta(seconds=AWAIT_SECONDS))
+    waiting = [c for c in comments if owner_login and c["user"]["login"] == owner_login
+               and (c["created_at"] or "") > max(last_bot, floor) and (c["body"] or "").startswith("/")]  # as agent-inbox.yml tests it
+    pending = {m for c in waiting for m in re.findall(r"(?m)^/(?:approve|reject)[ \t]+(REQ-[0-9]{8}-[0-9a-f]{4})", c["body"] or "")}
+    for r in requests:
+        r["pending"] = r["id"] in pending and not r["answered"]
+    return {"requests": requests, "truncated": truncated, "awaiting_reply": bool(waiting)}
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
@@ -611,6 +631,148 @@ def read_gate(repo):
     run = ran[0]
     return {"run": {"id": run["id"], "url": run.get("html_url"), "created_at": run.get("created_at"),
                     "conclusion": run.get("conclusion")}, "prs": {str(k): v for k, v in lines.items()}}
+
+
+# --- actions: writes, as the signed-in user ----------------------------------------------------------
+#
+# Every action is something the user could do by hand on GitHub, done with their own gh login, so
+# every guard the agents apply to a person applies unchanged. The checks below only refuse early,
+# with a reason, what the agents would ignore anyway (a command by someone other than
+# AGENT_OWNER_LOGIN, a label by someone without write access), and what this page should never send.
+
+REQ_ID_RE = re.compile(r"REQ-[0-9]{8}-[0-9a-f]{4}")
+INBOX_LITERAL = "<!-- agent-inbox -->"  # agent-inbox.yml checks this literal, not policy.inboxMarker
+WRITERS = ("WRITE", "MAINTAIN", "ADMIN")
+# (op, label) -> what it may be put on or taken off: "issue", "pr" or both.
+LABEL_ACTIONS = {
+    # No ("add", "agent:ready"): that label vouches for the issue's text as it stands (the agents trust
+    # everything written before a writer applied it), and this page does not show that text. Queueing
+    # stays on GitHub, next to the text.
+    ("remove", "agent:ready"): {"issue"},
+    ("add", "agent:hold"): {"issue", "pr"},     # agents never touch it
+    ("remove", "agent:hold"): {"issue", "pr"},
+    ("remove", "agent:blocked"): {"pr"},        # a person fixed the PR: back to the merge gate
+    ("remove", "agent:needs-human"): {"pr"},
+}
+
+
+def one_line(s, n):
+    """A reason as agent-inbox.sh takes it: one line of printable text, at most n characters."""
+    s = re.sub(r"[\x00-\x1f\x7f]+", " ", str(s or "")).strip()
+    return s[:n].rstrip()
+
+
+def inbox_command_line(cmd, body, roles):
+    """The one command line to post, in exactly the grammar agent-inbox.sh parse_commands accepts;
+    ApiError for anything else."""
+    if cmd in ("approve", "reject"):
+        req = body.get("req")
+        if not isinstance(req, str) or not REQ_ID_RE.fullmatch(req):
+            raise ApiError(400, "req must be REQ-YYYYMMDD-xxxx")
+        if cmd == "approve":
+            return "/approve %s" % req
+        reason = one_line(body.get("reason"), 300)
+        return ("/reject %s %s" % (req, reason)).rstrip()
+    if cmd == "rerun":
+        n = body.get("issue")
+        if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
+            raise ApiError(400, "issue must be a positive number")
+        return "/rerun coder #%d" % n
+    if cmd in ("pause", "resume"):
+        role = body.get("role")
+        if role not in roles:
+            raise ApiError(400, "role must be one of the policy.json roles: %s" % (", ".join(sorted(roles)) or "none"))
+        return "/%s %s" % (cmd, role)
+    raise ApiError(400, "command must be approve, reject, rerun, pause or resume")
+
+
+INBOX_LOCKS = {}
+INBOX_LOCKS_GUARD = threading.Lock()
+
+
+def do_inbox_command(repo, d, viewer, body):
+    """Post one inbox command as the viewer, after the checks agent-inbox.yml and agent-inbox.sh make.
+    One at a time per repository, from the read to the post: two clicks (or two tabs) must not both
+    find no command waiting and both post."""
+    with INBOX_LOCKS_GUARD:
+        lock = INBOX_LOCKS.setdefault(repo.lower(), threading.Lock())
+    with lock:
+        return _do_inbox_command(repo, d, viewer, body)
+
+
+def _do_inbox_command(repo, d, viewer, body):
+    if d.get("vars") is None:
+        raise ApiError(409, "cannot read this repository's variables, so cannot tell who may answer")
+    owner = d["vars"].get("AGENT_OWNER_LOGIN") or ""
+    if not owner:
+        raise ApiError(409, "AGENT_OWNER_LOGIN is not set in %s: nobody's commands are applied" % repo)
+    if viewer != owner:  # exact: agent-inbox.sh compares case-sensitively
+        raise ApiError(403, "only %s (AGENT_OWNER_LOGIN) can answer in %s; you are %s" % (owner, repo, viewer))
+    if not d.get("policy_ok"):
+        raise ApiError(409, "cannot read policy.json in %s" % repo)
+    if not d.get("inbox"):
+        raise ApiError(409, "no inbox issue found in %s" % repo)
+    line = inbox_command_line(body.get("command"), body, set(d["policy"]["roles"]))
+    number = d["inbox"]["number"]
+    # The issue as the workflow will see it: open, an issue, the literal marker, opened by the bot or the owner.
+    issue = gh_json(["api", "repos/%s/issues/%d" % (repo, number)]) or {}
+    if issue.get("state") != "open" or "pull_request" in issue:
+        raise ApiError(409, "#%d is not an open issue" % number)
+    if INBOX_LITERAL not in (issue.get("body") or ""):
+        raise ApiError(409, "#%d does not carry %s, so the inbox workflow would not run" % (number, INBOX_LITERAL))
+    if (issue.get("user") or {}).get("login") not in (d["policy"]["botLogin"], owner):
+        raise ApiError(409, "#%d was not opened by the agent bot or %s, so the inbox workflow would not run" % (number, owner))
+    got = read_inbox(repo, number, d["policy"]["botLogin"], owner)
+    if got["awaiting_reply"]:
+        # Two inbox runs at once each read the bot's comments before either replies, so both would
+        # apply: an Approve sent twice, or an Approve and a Reject, would both happen.
+        raise ApiError(409, "your last command on #%d has no answer from the Agent inbox workflow yet; wait for it" % number)
+    if body.get("command") in ("approve", "reject"):
+        reqs = got["requests"]
+        r = next((x for x in reqs if x["id"] == body["req"]), None)
+        if r is None:
+            raise ApiError(404, "%s is not a request the agent made in #%d" % (body["req"], number))
+        if r["answered"]:
+            raise ApiError(409, "%s is already answered" % body["req"])
+    out = gh_json(["api", "repos/%s/issues/%d/comments" % (repo, number), "--input", "-"],
+                  stdin=json.dumps({"body": line})) or {}
+    return {"posted": line, "url": out.get("html_url"), "inbox": number}
+
+
+def do_label(repo, d, body):
+    """Add or take off one agent label as the viewer, who must have write access (a label by anyone
+    else is ignored by the agents)."""
+    if d.get("viewer_permission") not in WRITERS:
+        raise ApiError(403, "labels count only from people with write access to %s; you have %s"
+                       % (repo, str(d.get("viewer_permission") or "unknown").lower()))
+    op, label, n = body.get("op"), body.get("label"), body.get("number")
+    where = LABEL_ACTIONS.get((op, label))
+    if where is None:
+        raise ApiError(400, "not a label change this page makes: %s %s" % (op, label))
+    if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
+        raise ApiError(400, "number must be a positive number")
+    # The inbox is not work for the agents (held or unqueued, it means nothing; queued, the coder would
+    # take it). While it cannot be told which issue the inbox is, no issue can be ruled out.
+    if d.get("inbox_state") == "unknown":
+        raise ApiError(409, "cannot tell which issue is the inbox in %s, so no label is changed" % repo)
+    if d.get("inbox") and d["inbox"]["number"] == n:
+        raise ApiError(409, "#%d is the agent inbox" % n)
+    item = gh_json(["api", "repos/%s/issues/%d" % (repo, n)]) or {}
+    kind = "pr" if "pull_request" in item else "issue"
+    if item.get("state") != "open":
+        raise ApiError(409, "#%d is not open" % n)
+    if kind not in where:
+        raise ApiError(400, "%s %s is for %s only, and #%d is %s" % (
+            op, label, " or ".join("a PR" if w == "pr" else "an issue" for w in sorted(where)), n, "a PR" if kind == "pr" else "an issue"))
+    if op == "add":
+        gh_json(["api", "repos/%s/issues/%d/labels" % (repo, n), "--input", "-"], stdin=json.dumps({"labels": [label]}))
+    else:
+        try:
+            gh(["api", "-X", "DELETE", "repos/%s/issues/%d/labels/%s" % (repo, n, urllib.parse.quote(label, safe=""))])
+        except GhError as e:
+            if not e.not_found:  # not there: already off
+                raise
+    return {"done": "%s %s %s #%d" % ("added" if op == "add" else "removed", label, "on" if op == "add" else "from", n)}
 
 
 # --- discovery and the repository list ---------------------------------------------------------------
@@ -882,8 +1044,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not d.get("inbox"):
             raise ApiError(404, "no inbox issue in %s" % repo)
         bot = d["policy"]["botLogin"]
-        got = cache.get("inbox:" + repo, lambda: read_inbox(repo, d["inbox"]["number"], bot), fresh)
+        owner = (d.get("vars") or {}).get("AGENT_OWNER_LOGIN") or ""
+        got = cache.get("inbox:" + repo, lambda: read_inbox(repo, d["inbox"]["number"], bot, owner), fresh)
         return self.send(200, dict(got, inbox=d["inbox"]))
+
+    def action(self, body):
+        repo = body.get("repo")
+        if not valid_repo(repo) or not self.server.config.has(repo):
+            raise ApiError(404, "not a repository on this dashboard")
+        repo = next(r for r in self.server.config.repos() if r.lower() == repo.lower())
+        cache = self.server.cache
+        # Decide on fresh state, and on the login gh will post as now (gh auth switch mid-session).
+        viewer = (cache.get("user", lambda: gh_json(["api", "user"]) or {}, fresh=True, ttl=3600) or {}).get("login") or ""
+        d = cache.get("repo:" + repo, lambda: read_repo(repo), fresh=True)
+        if body.get("viewer") != viewer:  # the page's confirm named the login it will act as
+            raise ApiError(409, "gh is now signed in as %s, not %s as this page says: reload the page" % (viewer, body.get("viewer")))
+        kind = body.get("type")
+        if kind == "inbox_command":
+            out = do_inbox_command(repo, d, viewer, body)
+        elif kind == "label":
+            out = do_label(repo, d, body)
+        else:
+            raise ApiError(400, "type must be inbox_command or label")
+        for k in ("repo:", "inbox:", "gate:"):
+            cache.drop(k + repo)
+        sys.stderr.write("dashboard: %s %s: %s\n" % (viewer, repo, out.get("posted") or out.get("done")))
+        self.send(200, dict(out, ok=True))
 
     def repo_list(self):
         c = self.server.config
@@ -913,6 +1099,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.check_post()
         self.server.last_seen = time.monotonic()
         body = self.body_json()
+        if path == "/api/action":
+            return self.action(body)
         if path != "/api/repos":
             raise ApiError(404, "not found")
         op, repo = body.get("op"), body.get("repo")
