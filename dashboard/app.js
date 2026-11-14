@@ -53,6 +53,35 @@ const pill = (text, kind) => h("span", { class: `pill ${kind || ""}` }, text);
 const empty = (text) => h("p", { class: "muted" }, text);
 function replace(el, ...kids) { el.replaceChildren(...kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false)); }
 
+// --- asking you: a dialog in the page, never window.confirm or window.prompt --------------------------
+// Some browsers (an app's or an editor's built-in one) suppress native dialogs and answer them
+// "Cancel" without showing anything, which would make every button silently do nothing. Resolves
+// null for Cancel or Esc; for OK, true, or the text typed when `input` (its starting value) is given.
+// One dialog at a time, as native ones were: a preview that arrives while another question is open
+// waits for it, so an Enter meant for one never answers the other.
+let asking = Promise.resolve();
+function ask(text, input) {
+  const shown = asking.then(() => new Promise((resolve) => {
+    const field = input === undefined ? null : h("input", { type: "text", "aria-label": "Reason", autocomplete: "off" });
+    if (field) field.value = input;
+    // Plain buttons, not a <form method="dialog">: nothing here depends on form submission being allowed.
+    const ok = h("button", { type: "button", onclick: () => dlg.close("ok") }, "OK");
+    const cancel = h("button", { type: "button", class: "quiet", onclick: () => dlg.close("") }, "Cancel");
+    // Enter in the field is OK, except while an input method is composing (keyCode 229 is Safari's commit).
+    if (field) field.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); dlg.close("ok"); } });
+    const dlg = h("dialog", { class: "ask" }, h("div", { class: "ask-text" }, text), field, h("div", { class: "actions" }, ok, cancel));
+    dlg.addEventListener("close", () => {
+      dlg.remove();
+      resolve(dlg.returnValue === "ok" ? (field ? field.value : true) : null);
+    });
+    document.body.append(dlg);
+    dlg.showModal();
+    (field || ok).focus();
+  }));
+  asking = shown.catch(() => {}); // one dialog that fails must not stop every later one
+  return shown;
+}
+
 const usd = (n) => (typeof n === "number" ? `$${n.toFixed(2)}` : "–");
 const mins = (ms) => (typeof ms === "number" ? `${Math.round(ms / 60000)} min` : "–");
 function ago(iso) {
@@ -242,7 +271,7 @@ function actBtn(text, blocked, onclick, kind) {
 }
 
 async function act(repo, payload, question, btn) {
-  if (!window.confirm(question)) return null;
+  if (!(await ask(question))) return null;
   if (btn) btn.disabled = true;
   try {
     const out = await api("/api/action", { method: "POST", body: Object.assign({ repo, viewer: state.session.viewer }, payload) });
@@ -274,7 +303,7 @@ async function previewAct(repo, payload, btn) {
       ...(p.warnings.length ? ["", ...p.warnings.map((w) => `Note: ${w}.`)] : []),
       "", `GitHub calls, as ${state.session.viewer}:`, ...p.calls.map((c) => `  ${c}`),
       ...(p.comment ? ["", "The comment:", "", p.comment] : [])].join("\n");
-    if (!window.confirm(text)) { if (btn) btn.disabled = false; return null; }
+    if (!(await ask(text))) { if (btn) btn.disabled = false; return null; }
     const out = await api("/api/action", { method: "POST", body: Object.assign(body, { confirm: p.confirm }) });
     notice(`Done: ${out.done}.`);
     await loadRepo(repo, true);
@@ -340,7 +369,7 @@ function requestActions(repo, d, r) {
     : KIND_APPROVE[r.kind] ? `#${r.issue} stays as it is, gets the reason as a comment, and loses agent:needs-human`
       : "the repository's own hook for this kind of request decides";
   const reject = actBtn("Reject…", blocked, async (b) => {
-    const reason = window.prompt(`Reject ${r.id}. Reason (optional, one line of at most 300 characters):`, "");
+    const reason = await ask(`Reject ${r.id}. Reason (optional, one line of at most 300 characters):`, "");
     if (reason === null) return;
     const line = `/reject ${r.id} ${oneLine(reason, 300)}`.trimEnd();
     await act(repo, { type: "inbox_command", command: "reject", req: r.id, reason },
@@ -537,7 +566,7 @@ function prActions(repo, d, p) {
   const out = [];
   if (stuck.length) {
     out.push(actBtn("Hand back to the merge gate", labelBlock(d), async (b) => {
-      if (!window.confirm(`Remove ${stuck.join(" and ")} from PR #${p.number} as ${state.session.viewer}?\n\nDo this once you have fixed the PR yourself: the merge gate and the fixer pick it up again.`)) return;
+      if (!(await ask(`Remove ${stuck.join(" and ")} from PR #${p.number} as ${state.session.viewer}?\n\nDo this once you have fixed the PR yourself: the merge gate and the fixer pick it up again.`))) return;
       b.disabled = true;
       for (const label of stuck) {
         try { await api("/api/action", { method: "POST", body: { repo, viewer: state.session.viewer, type: "label", op: "remove", label, number: p.number } }); }
