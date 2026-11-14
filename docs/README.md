@@ -68,8 +68,16 @@ The model never shares a job with a write-capable token, and nothing it wrote is
 - **The `agent-runner` ref.** The model controls its own job, including the Actions runtime token
   later steps hold, so it could write cache entries. Runs are dispatched on `agent-runner`, whose
   cache scope the default branch and PRs never read, and the code job restores no caches.
+- **The review model cannot write.** The `claude-review` job's token is read-only and it has no
+  `id-token` grant. The model has no tool that writes, its reads stop at the checkout, and it reaches
+  `gh` only through `review-gh`, which refuses `--jq`, `--template`, `--repo` and host arguments and
+  hides the environment from gh. Its final message is the review; the `post-review` job, which runs
+  no model and checks out nothing, posts it to the run's PR as `claude[bot]` with a Claude App token
+  it mints from its own OIDC token and revokes, and refuses one that carries text shaped like a
+  credential. `/verify-pr` frames everything in the PR as data.
 - **The review runs the PR's code.** `claude-code-review.yml` checks out the PR and runs its
-  `.github/actions/install-gh` and `.claude/` with a PR-write and an OIDC token. A dispatch refuses
+  `.github/actions/install-gh` and `.claude/` with the Claude credential in reach (the job drops
+  the checkout's Claude settings and `.mcp.json` before the model starts). A dispatch refuses
   a fork's PR before the checkout. An automatic run skips one too, but that is not a control: on
   `pull_request` GitHub runs the PR's own copy of the workflow, which a fork can edit, and GitHub
   gives that run no secrets and a read-only token (keep a private repository's "Fork pull request
@@ -92,6 +100,10 @@ Residual risks you accept by running this:
 - **CI runs agent code.** An agent PR's code runs in your CI like any PR's, without a person reading
   it first. Keep secrets out of PR-triggered CI jobs, and on self-hosted runners keep the agent pool
   apart from the CI pool.
+- **The review's verdict is a model's.** A planted instruction can no longer make the review post
+  elsewhere or hand out a token, but a review that is fooled can still say Approve. The merge gate
+  also needs green CI, the PR guard and no protected path, and it never merges a PR a writer let
+  touch protected paths; set `AGENT_AUTO_MERGE` off if you want a person to merge every agent PR.
 - **Shared subscription.** With `claude.auth: "oauth"` the runs count against the same Claude
   subscription as your interactive sessions; `runsPerDay` is the guard.
 
@@ -176,6 +188,22 @@ Answer with a comment that starts with a command; only `AGENT_OWNER_LOGIN` count
 
 **Kill switch:** `gh variable set AGENTS_ENABLED --body false` stops every agent job at its next
 start; the inbox still works.
+
+## The dashboard
+
+`/gatehand:dashboard` in Claude Code with the Gatehand plugin installed, or `python3 bin/dashboard.py`
+from a checkout of the package, opens a page on your machine for every repository where Gatehand is
+installed: what waits for you, agent PRs and why the merge gate holds each, the queue, runs, cost
+and breakers. It needs `gh` signed in and Python 3.9 or later. Its buttons do what this page has you
+type: the inbox commands (`/rerun coder #N` and "Requeue and rerun" included), `agent:hold`,
+removing `agent:ready` from a queued issue, handing a fixed PR back to the merge gate, the two
+variables above, starting or cancelling a run, and a review verdict on an agent PR. They act with
+your own `gh` login, so every rule here applies as if you had done it on GitHub. Runs, verdicts and
+the variables are previewed first. The inbox commands re-queue an issue and start the coder on it
+exactly as if you had typed them; apart from those, the page never adds `agent:ready`, and a run it
+dispatches itself is only ever an auto pick. Queueing a new issue stays on GitHub, next to the
+issue's text. Nothing of it is installed in this repository; `docs/dashboard.md` in the package has
+the details.
 
 ## When something is stuck
 

@@ -118,8 +118,8 @@ route_ci() {
 # review_is_current <pr> <comment-id> <at> <who> <head> <updated>: exit 0 when the review comment is
 # about the PR's current head: newer than the head's push and, for the review bot's, never edited
 # and written by a review job that started after the push (a review that began on the old head and
-# posted later saw the old diff). The review bot never edits its review; a review job of ANOTHER PR
-# can (its tools include `gh pr comment`, and so `--edit-last`), so an edited one is not its verdict.
+# posted later saw the old diff). The review bot never edits its review, so an edited one is not its
+# verdict: someone else wrote over it.
 # Prints why not otherwise; exit 2 when that cannot be read.
 review_is_current() {
   local pr="$1" at="$3" who="$4" head="$5" upd="${6:-$3}" pushed seen
