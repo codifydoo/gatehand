@@ -3,7 +3,7 @@
 // never as HTML, and only https://github.com/ links become hrefs.
 "use strict";
 
-const state = { token: "", session: null, repos: {}, selected: "", gate: {}, inbox: {} };
+const state = { token: "", session: null, repos: {}, selected: "", gate: {}, inbox: {}, drafts: {} };
 const $ = (id) => document.getElementById(id);
 
 // --- session secret: from the URL fragment once, then from this tab's sessionStorage -----------------
@@ -260,6 +260,33 @@ async function act(repo, payload, question, btn) {
   }
 }
 
+// Runs, verdicts and switches: the server first says exactly what it would do (the GitHub calls, the
+// comment, what to expect, anything in the way) and hands back a one-time token; the action is done
+// only with that token, and only if nothing changed in between.
+const writerBlock = (d) => (["WRITE", "MAINTAIN", "ADMIN"].includes(d.viewer_permission) ? ""
+  : `Needs write access; you have ${String(d.viewer_permission || "unknown").toLowerCase()}.`);
+async function previewAct(repo, payload, btn) {
+  if (btn) btn.disabled = true;
+  const body = Object.assign({ repo, viewer: state.session.viewer }, payload);
+  try {
+    const p = await api("/api/action/preview", { method: "POST", body });
+    const text = [`${p.summary}?`, "", `What happens: ${p.effect}.`,
+      ...(p.warnings.length ? ["", ...p.warnings.map((w) => `Note: ${w}.`)] : []),
+      "", `GitHub calls, as ${state.session.viewer}:`, ...p.calls.map((c) => `  ${c}`),
+      ...(p.comment ? ["", "The comment:", "", p.comment] : [])].join("\n");
+    if (!window.confirm(text)) { if (btn) btn.disabled = false; return null; }
+    const out = await api("/api/action", { method: "POST", body: Object.assign(body, { confirm: p.confirm }) });
+    notice(`Done: ${out.done}.`);
+    await loadRepo(repo, true);
+    return out;
+  } catch (e) {
+    notice(`Not done: ${e.message}`);
+    if (btn) btn.disabled = false;
+    loadRepo(repo, true);
+    return null;
+  }
+}
+
 async function loadInbox(repo, fresh) {
   try { state.inbox[repo] = await api(`/api/repo/${repo}/inbox${fresh ? "?fresh=1" : ""}`); }
   catch (e) { state.inbox[repo] = { error: e.message }; }
@@ -350,15 +377,70 @@ function issueList(list, emptyText, actions) {
     actions ? h("span", { class: "actions inline" }, actions(i)) : null)));
 }
 
-function runsTable(list) {
+function runsTable(list, cancel) {
   if (!list) return empty("Could not read the Actions runs.");
   if (!list.length) return empty("None.");
   return h("div", { class: "scroll" }, h("table", { class: "grid" },
-    h("thead", {}, h("tr", {}, ["Agent", "Run", "Event", "State", "Started"].map((c) => h("th", {}, c)))),
+    h("thead", {}, h("tr", {}, ["Agent", "Run", "Event", "State", "Started", cancel ? "" : null].filter((c) => c !== null).map((c) => h("th", {}, c)))),
     h("tbody", {}, list.map((r) => h("tr", {},
       h("td", {}, r.agent), h("td", {}, link(r.url, r.name || String(r.id))), h("td", {}, r.event),
       h("td", {}, r.status === "completed" ? pill(r.conclusion || "done", r.conclusion === "success" ? "ok" : (r.conclusion === "failure" ? "bad" : "")) : pill(r.status, "attn")),
-      h("td", { class: "muted" }, ago(r.created_at)))))));
+      h("td", { class: "muted" }, ago(r.created_at)),
+      cancel ? h("td", {}, cancel(r)) : null)))));
+}
+
+function switchesBlock(repo, d) {
+  const why = d.vars ? writerBlock(d) : "Cannot read this repository's variables.";
+  const row = (name, label, on, offText, onText) => {
+    const cur = d.vars ? d.vars[name] : undefined;
+    const isOn = cur === "true";
+    return h("li", {}, h("strong", {}, label), " ",
+      !d.vars ? pill("unknown", "warn") : (isOn ? pill(on, "ok") : pill(offText, "off")),
+      h("span", { class: "muted" }, ` ${name} = ${cur === undefined ? "?" : (cur === null ? "not set" : cur)}`),
+      h("span", { class: "actions inline" }, actBtn(isOn ? `Turn ${label.toLowerCase()} off` : `Turn ${label.toLowerCase()} on`, why,
+        (b) => previewAct(repo, { type: "set_variable", name, value: isOn ? "false" : "true" }, b), isOn ? "quiet" : "primary")),
+      h("div", { class: "gate" }, onText));
+  };
+  return h("ul", { class: "items" },
+    row("AGENTS_ENABLED", "Agents", "on", "off", "Off stops the coder, fixer, merge gate, sweep and triage; the inbox, the Claude review of new PRs, the PR guard and the digest still run."),
+    row("AGENT_AUTO_MERGE", "Auto-merge", "live", "dry run", "Off, the merge gate only reports what it would merge."));
+}
+
+function cancelBtn(repo, d) {
+  return (r) => actBtn("Cancel", writerBlock(d), (b) => previewAct(repo, { type: "cancel_run", run: r.id }, b));
+}
+
+// A verdict on an agent PR, as the merge gate and the fixer read one from a person with write access.
+// Request changes needs a note, kept as a draft across re-renders.
+function verdictActions(repo, d, p) {
+  const key = `${repo}#${p.number}`;
+  const draft = state.drafts[key];
+  const why = writerBlock(d);
+  return [
+    actBtn("Approve…", why, (b) => previewAct(repo, { type: "review_verdict", pr: p.number, verdict: "approve" }, b), "primary"),
+    actBtn(draft ? "Close the note" : "Request changes…", why, () => {
+      if (draft) delete state.drafts[key]; else state.drafts[key] = { note: "", fixer: true };
+      renderDetail();
+    }),
+    actBtn("Run review", why, (b) => previewAct(repo, { type: "dispatch", workflow: "review", pr: p.number }, b)),
+    actBtn("Run merge gate", why, (b) => previewAct(repo, { type: "dispatch", workflow: "merge", pr: p.number }, b)),
+  ];
+}
+function verdictForm(repo, p) {
+  const key = `${repo}#${p.number}`;
+  const draft = state.drafts[key];
+  if (!draft) return null;
+  const note = h("textarea", { rows: 4, maxlength: 2000, placeholder: "What to change (plain text: no HTML, no ``` fences). The fixer works from this.",
+    oninput: (e) => { draft.note = e.target.value; } });
+  note.value = draft.note;
+  const fixer = h("input", { type: "checkbox", onchange: (e) => { draft.fixer = e.target.checked; } });
+  fixer.checked = draft.fixer;
+  return h("form", { class: "verdict", onsubmit: async (e) => {
+    e.preventDefault();
+    const done = await previewAct(repo, { type: "review_verdict", pr: p.number, verdict: "request-changes", note: draft.note, start_fixer: draft.fixer },
+      e.currentTarget.querySelector("button"));
+    if (done) { delete state.drafts[key]; renderDetail(); }
+  } }, note, h("label", {}, fixer, " Start the fixer on it"), h("button", { type: "submit", class: "small" }, "Request changes…"));
 }
 
 function ledgerTables(d) {
@@ -439,12 +521,15 @@ function prBlock(repo, d) {
       "; each PR's line is from the newest run that reported it.") : null,
     gate && gate.error ? h("p", { class: "warn" }, `Merge gate report unreadable: ${gate.error}`) : null,
     gate && gate.note ? h("p", { class: "muted" }, `Merge gate: ${gate.note}.`) : null,
+    h("div", { class: "actions" }, actBtn("Run the merge gate on every agent PR", writerBlock(d),
+      (b) => previewAct(repo, { type: "dispatch", workflow: "merge" }, b))),
     h("ul", { class: "items" }, d.prs.map((p) => h("li", {},
       link(p.url, `PR #${p.number} ${p.title}`), " ",
       p.labels.filter((l) => l.startsWith("agent:") && l !== "agent:pr").map((l) => pill(l, "label")),
       h("span", { class: "muted" }, ` · opened ${ago(p.created_at)}`),
       h("span", { class: "actions inline" }, prActions(repo, d, p)),
-      gateLine(gate, p.number))))];
+      gateLine(gate, p.number),
+      verdictForm(repo, p))))];
 }
 
 function prActions(repo, d, p) {
@@ -465,7 +550,7 @@ function prActions(repo, d, p) {
   out.push(p.labels.includes("agent:hold")
     ? labelBtn(repo, d, p.number, "remove", "agent:hold", "Release", "The fixer and the merge gate pick it up again.")
     : labelBtn(repo, d, p.number, "add", "agent:hold", "Hold", HOLD));
-  return out;
+  return out.concat(verdictActions(repo, d, p));
 }
 
 function gateLine(gate, n) {
@@ -487,10 +572,14 @@ function renderDetail() {
       h("button", { type: "button", class: "quiet small", onclick: () => { state.selected = ""; renderDetail(); renderRepos(); } }, "Close")),
     (d.errors || []).length ? h("div", { class: "notice" }, h("strong", {}, "Could not read everything:"),
       h("ul", {}, d.errors.map((e) => h("li", {}, e)))) : null,
+    h("h3", {}, "Switches"), switchesBlock(repo, d),
     h("h3", {}, "Inbox requests"), inboxBlock(repo, d),
     h("h3", {}, "Agent PRs"), prBlock(repo, d),
-    h("h3", {}, "Running now"), runsTable(d.active_runs),
-    h("h3", {}, "Queue"), issueList(i && i.ready, "Nothing is queued for the coder.", (x) => [
+    h("h3", {}, "Running now"), runsTable(d.active_runs, cancelBtn(repo, d)),
+    h("h3", {}, "Queue"),
+    i && i.ready && i.ready.length ? h("div", { class: "actions" }, actBtn("Start the coder on the next one", writerBlock(d),
+      (b) => previewAct(repo, { type: "dispatch", workflow: "coder" }, b))) : null,
+    issueList(i && i.ready, "Nothing is queued for the coder.", (x) => [
       labelBtn(repo, d, x.number, "remove", "agent:ready", "Unqueue", "The coder no longer picks it."),
       x.labels.includes("agent:hold") ? null : labelBtn(repo, d, x.number, "add", "agent:hold", "Hold", HOLD)]),
     h("h3", {}, "In progress"), issueList(i && i.in_progress, "Nothing."),

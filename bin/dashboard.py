@@ -9,8 +9,10 @@ ledger branch, its issues and PRs, its Actions runs and variables, read the way 
 scripts read them (agent-digest.sh, agent-state.sh, agent-lib.sh).
 
 Reading writes nothing. Its writes to GitHub are the page's buttons, each a fixed shape built here
-and done with your own login after you confirm: an inbox command posted on the inbox issue, or one of
-a few agent label changes (see "actions" below). Locally it writes only its list of repositories, in
+and done with your own login after you confirm: an inbox command posted on the inbox issue, one of a
+few agent label changes, and, after a preview of the exact calls, starting or cancelling an agent
+workflow run, a review verdict on an agent PR, or turning AGENTS_ENABLED or AGENT_AUTO_MERGE on or
+off (see "actions" below). Locally it writes only its list of repositories, in
 ${XDG_CONFIG_HOME:-~/.config}/gatehand/dashboard.json.
 
 Security (docs/dashboard.md): it listens on 127.0.0.1 only; every /api/ request must carry the
@@ -416,7 +418,10 @@ def read_repo(repo):
     d["policy"] = {
         "botLogin": bot, "baseBranch": policy.get("baseBranch") or default, "ledgerBranch": ledger,
         "runnerRef": runner, "inboxMarker": policy.get("inboxMarker") or "<!-- agent-inbox -->",
-        "roles": {k: {"runsPerDay": v.get("runsPerDay"), "maxOpenPrs": v.get("maxOpenPrs")}
+        "reviewMarker": policy.get("reviewMarker") or "<!-- verify-pr-review -->",
+        "branchTypes": policy.get("branchTypes") if isinstance(policy.get("branchTypes"), list) else None,
+        "roles": {k: {"runsPerDay": v.get("runsPerDay"), "maxOpenPrs": v.get("maxOpenPrs"),
+                      "maxReviewFixes": v.get("maxReviewFixes")}
                   for k, v in roles.items() if isinstance(v, dict)},
         "requiredChecks": policy.get("requiredChecks") if isinstance(policy.get("requiredChecks"), list) else None,
     }
@@ -775,6 +780,384 @@ def do_label(repo, d, body):
     return {"done": "%s %s %s #%d" % ("added" if op == "add" else "removed", label, "on" if op == "add" else "from", n)}
 
 
+# --- actions with a preview: runs, verdicts, switches ------------------------------------------------
+#
+# These change what the agents do next: start or stop a run, give the merge gate a verdict, turn the
+# agents or auto-merge on or off. So the page asks for a preview first (the exact GitHub calls, the
+# comment, what to expect) and gets a one-time confirm token. The action is done only if, planned
+# again from fresh state, it is exactly what was previewed: a PR whose head moved, a variable someone
+# changed, a run that ended or a waiting run that appeared all refuse, and the page previews again.
+
+CONFIRM_TTL = 300
+NOTE_MAX = 2000
+FIXER_SOURCE = "comment-<the id of the review comment above>"  # filled in once the comment is posted
+SWITCHES = {
+    "AGENTS_ENABLED": {
+        "true": "the agents run again: the coder on its schedule, the fixer, the merge gate, the sweep and triage",
+        "false": "the coder, fixer, merge gate, sweep and triage skip their runs from now on; runs already going finish. "
+                 "The inbox, the Claude review of new PRs, the PR guard and the digest still run",
+    },
+    "AGENT_AUTO_MERGE": {
+        "true": "the merge gate merges an agent PR once CI, the review and every rule agree",
+        "false": "the merge gate goes back to a dry run: it reports what it would merge and merges nothing",
+    },
+}
+DISPATCH_FILES = {"coder": "agent-coder.yml", "review": "claude-code-review.yml", "merge": "agent-merge.yml",
+                  "fixer": "agent-fixup.yml"}
+WAITING_STATES = ("queued", "pending", "waiting", "requested")
+
+
+def need_writer(repo, d, what):
+    if d.get("viewer_permission") not in WRITERS:
+        raise ApiError(403, "%s needs write access to %s; you have %s"
+                       % (what, repo, str(d.get("viewer_permission") or "unknown").lower()))
+
+
+def pos_int(v, what):
+    if not isinstance(v, int) or isinstance(v, bool) or v <= 0:
+        raise ApiError(400, "%s must be a positive number" % what)
+    return v
+
+
+def call(method, path, body=None):
+    return {"method": method, "path": path, "body": body}
+
+
+def dispatch_call(repo, wf, ref, inputs):
+    body = {"ref": ref}
+    if inputs:
+        body["inputs"] = inputs
+    return call("POST", "repos/%s/actions/workflows/%s/dispatches" % (repo, DISPATCH_FILES[wf]), body)
+
+
+def agents_on(d, what):
+    """Refuse what the workflow would skip: every agent workflow but the inbox and the review runs only
+    with AGENTS_ENABLED exactly true."""
+    if d.get("vars") is None:
+        raise ApiError(409, "cannot read AGENTS_ENABLED, so cannot tell whether %s would run" % what)
+    if d["vars"].get("AGENTS_ENABLED") != "true":
+        raise ApiError(409, "the agents are off (AGENTS_ENABLED is not true), so %s would be skipped: turn them on first" % what)
+
+
+def runner_ok(d, what):
+    """The coder and the fixer refuse a run unless the runner ref carries main's workflow
+    (agent-state.sh ref_state)."""
+    if not d.get("policy_ok"):
+        raise ApiError(409, "cannot read policy.json, so the runner ref is unknown")
+    if d["policy"]["runnerRef"] == (d.get("default_branch") or "main"):
+        raise ApiError(409, "%s would refuse to run: policy.runnerRef is the default branch" % what)
+    state = d.get("runner_ref")
+    if state != "ok":
+        raise ApiError(409, "%s would refuse to run: %s" % (what, {
+            "stale": "%s is behind main; fast-forward it" % d["policy"]["runnerRef"],
+            "missing": "there is no %s branch" % d["policy"]["runnerRef"],
+        }.get(state, "cannot tell whether %s is current" % d["policy"]["runnerRef"])))
+
+
+def open_pr(repo, n):
+    pr = gh_or_404(["api", "repos/%s/pulls/%d" % (repo, n)])
+    if not pr:
+        raise ApiError(404, "#%d is not a PR in %s" % (n, repo))
+    if pr.get("state") != "open":
+        raise ApiError(409, "PR #%d is not open" % n)
+    return pr
+
+
+def pr_labels(pr):
+    return {(l or {}).get("name") for l in pr.get("labels") or []}
+
+
+def plan_dispatch(repo, d, viewer, body):
+    wf = body.get("workflow")
+    if wf not in ("coder", "review", "merge"):
+        raise ApiError(400, "workflow must be coder, review or merge")
+    need_writer(repo, d, "Starting a workflow")
+    warnings = []
+    if wf == "coder":
+        # The auto pick only. A run named for an issue is the owner's choice and skips the pick's checks,
+        # among them that a writer applied agent:ready (labeler_trusted): the page would vouch for issue
+        # text it does not show. Name an issue on GitHub, next to its text.
+        if body.get("issue") is not None:
+            raise ApiError(400, "the page starts only the auto pick: a run named for an issue skips the check that a "
+                                "writer vouched for its text; start one on GitHub after reading the issue")
+        agents_on(d, "a coder run")
+        runner_ok(d, "The coder")
+        # One waiting run per concurrency group: GitHub cancels the older waiting run for the newer
+        # (agent-state.sh cmd_kick).
+        runs = (gh_json(["api", "repos/%s/actions/workflows/agent-coder.yml/runs?event=workflow_dispatch&per_page=30" % repo])
+                or {}).get("workflow_runs") or []
+        for r in sorted(runs, key=lambda r: r.get("id") or 0):
+            if r.get("status") == "in_progress":
+                warnings.append("%s is running: this run waits for it to finish" % r.get("display_title"))
+            elif r.get("status") in WAITING_STATES:
+                warnings.append("%s is already waiting to start: GitHub cancels it and keeps this one instead"
+                                % r.get("display_title"))
+        return {"summary": "Start the coder on the next queued issue, on %s" % d["policy"]["runnerRef"],
+                "effect": "the coder picks the oldest highest-priority agent:ready issue a writer queued, with every check "
+                          "of a scheduled run, if the gate allows a run (the day's cap, the breaker, open PRs)",
+                "warnings": warnings, "calls": [dispatch_call(repo, "coder", d["policy"]["runnerRef"], {})],
+                "done": "started the coder on the next queued issue"}
+    default = d.get("default_branch") or "main"
+    if wf == "review":
+        n = pos_int(body.get("pr"), "pr")
+        pr = open_pr(repo, n)
+        if ((pr.get("head") or {}).get("repo") or {}).get("full_name") != repo:
+            raise ApiError(409, "PR #%d comes from a fork, and the review workflow refuses a fork's PR" % n)
+        sha = (pr.get("head") or {}).get("sha") or ""
+        return {"summary": "Run the Claude review of PR #%d (head %s)" % (n, sha[:9]),
+                "effect": "Claude reviews the PR's current head and posts its verdict; while the agents are on, the merge "
+                          "gate waits for it and a Request changes starts the fixer",
+                "warnings": warnings, "calls": [dispatch_call(repo, "review", default, {"pr": str(n)})],
+                "done": "started the Claude review of PR #%d" % n}
+    agents_on(d, "the merge gate")
+    n = body.get("pr")
+    inputs = {}
+    if n is not None:
+        n = pos_int(n, "pr")
+        open_pr(repo, n)
+        inputs = {"pr": str(n)}
+    live = (d.get("vars") or {}).get("AGENT_AUTO_MERGE") == "true"
+    what = "PR #%d" % n if inputs else "every open agent PR"
+    return {"summary": "Run the merge gate on %s" % what,
+            "effect": ("it merges %s if CI, the review and every rule agree" if live
+                       else "a dry run (AGENT_AUTO_MERGE is not true): it reports what it would do with %s and merges nothing") % what,
+            "warnings": warnings, "calls": [dispatch_call(repo, "merge", default, inputs)],
+            "done": "started the merge gate on " + what}
+
+
+def plan_cancel(repo, d, viewer, body):
+    need_writer(repo, d, "Cancelling a run")
+    n = pos_int(body.get("run"), "run")
+    run = gh_or_404(["api", "repos/%s/actions/runs/%d" % (repo, n)])
+    if not run:
+        raise ApiError(404, "run %d is not in %s" % (n, repo))
+    agent = WORKFLOWS.get(run.get("path"))
+    if agent is None:
+        raise ApiError(400, "run %d is not one of Gatehand's workflows" % n)
+    if run.get("status") == "completed":
+        raise ApiError(409, "run %d has already finished" % n)
+    effect = {
+        "coder": "the run stops; its last job releases the issue and records the attempt (the hourly sweep does "
+                 "that once the lock expires if the job cannot). Once the agent's job has finished, a cancel does not "
+                 "stop publishing: the PR still opens",
+        "fixer": "the run stops; its last job unlocks the PR and, seeing a person cancelled it, does not retry. Once the "
+                 "agent's job has finished, a cancel does not stop publishing: the fix is still pushed, and a fix that "
+                 "pushed nothing may be retried",
+    }.get(agent, "the run stops; the next one starts from where things are")
+    return {"summary": "Cancel %s (%s)" % (run.get("display_title") or "run %d" % n, run.get("status")),
+            "effect": effect, "warnings": [],
+            "calls": [call("POST", "repos/%s/actions/runs/%d/cancel" % (repo, n))], "done": "cancelled run %d" % n}
+
+
+def verdict_note(note):
+    """A person's Request changes note as plain text that cannot move the verdict under it: no HTML
+    (a `<details>` or `<!--` makes both of agent-state.sh's verdict readers give up, an unclosed tag
+    puts the verdict out of sight) and no code fence (it would swallow the verdict)."""
+    if not isinstance(note, str):
+        raise ApiError(400, "note must be text")
+    note = note.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    if not note.strip():
+        raise ApiError(400, "say what to change: the fixer works from this note")
+    if len(note) > NOTE_MAX:
+        raise ApiError(400, "the note is longer than %d characters" % NOTE_MAX)
+    if re.search(r"[\x00-\x08\x0b-\x1f\x7f]", note):
+        raise ApiError(400, "the note has control characters")
+    if "<" in note or "```" in note or "~~~" in note:
+        raise ApiError(400, "the note cannot hold HTML (<) or a code fence (``` or ~~~); write those on GitHub")
+    return note
+
+
+def verdict_comment(marker, viewer, sha, verdict, note):
+    """The review comment: the marker, who and which head, the note, and `### Verdict` last, so it is
+    the heading both of agent-state.sh's readers take."""
+    parts = [marker, "Review by %s, from the Gatehand dashboard, of head `%s`." % (viewer, sha)]
+    if note:
+        parts += ["", "### What to change", "", note]
+    parts += ["", "### Verdict", "", "Approve" if verdict == "approve" else "Request changes", ""]
+    return "\n".join(parts)
+
+
+def fixer_ref_ok(repo, d):
+    """The fixer's own gate compares agent-fixup.yml on the runner ref and the default branch
+    (agent-fixup.sh, WORKFLOW_FILE=agent-fixup.yml ref_state)."""
+    if not d.get("policy_ok"):
+        raise ApiError(409, "cannot read policy.json, so the runner ref is unknown")
+    runner, default = d["policy"]["runnerRef"], d.get("default_branch") or "main"
+    if runner == default:  # ref_state: "default", and the gate says wrong-ref
+        raise ApiError(409, "the fixer would refuse to run: policy.runnerRef is the default branch")
+    path = "repos/%s/contents/.github/workflows/agent-fixup.yml?ref=%s"
+    a = gh_or_404(["api", path % (repo, urllib.parse.quote(runner, safe=""))])
+    b = gh_or_404(["api", path % (repo, urllib.parse.quote(default, safe=""))])
+    if not a:
+        raise ApiError(409, "the fixer would refuse to run: there is no agent-fixup.yml on %s" % runner)
+    if not b or a.get("sha") != b.get("sha"):
+        raise ApiError(409, "the fixer would refuse to run: %s's agent-fixup.yml is not %s's; fast-forward it" % (runner, default))
+
+
+def fixer_gate(d):
+    """The rest of the fixer's gate (agent-state.sh gate_decide): its breaker and its daily cap."""
+    if d.get("breakers") is None or d.get("stats") is None:
+        raise ApiError(409, "cannot read the ledger, so cannot tell whether the fixer's breaker or daily cap allow a run")
+    b = d["breakers"].get("fixer")
+    if isinstance(b, dict) and b.get("tripped_at"):
+        raise ApiError(409, "the fixer is stopped (its breaker tripped): resume it first")
+    cap = (d["policy"]["roles"].get("fixer") or {}).get("runsPerDay")
+    today = (d["stats"].get("fixer") or {}).get("today") or 0
+    if isinstance(cap, int) and not isinstance(cap, bool) and today >= cap:
+        raise ApiError(409, "the fixer has used today's %d runs" % cap)
+
+
+def fixer_refusal(d, pr):
+    """agent-fixup.sh pr_refusal: why the fixer would not touch this PR, or ''."""
+    bot = d["policy"]["botLogin"]
+    slug = bot[:-len("[bot]")] if bot.endswith("[bot]") else bot
+    labels = pr_labels(pr)
+    types = d["policy"].get("branchTypes") or []
+    head = (pr.get("head") or {}).get("ref") or ""
+    if (pr.get("user") or {}).get("login") not in (slug, "app/" + slug, slug + "[bot]"):
+        return "it is not the agent bot's PR"
+    if pr.get("draft"):
+        return "it is a draft"
+    if ((pr.get("head") or {}).get("repo") or {}).get("full_name") != d["repo"]:
+        return "it is from a fork"
+    if (pr.get("base") or {}).get("ref") != d["policy"]["baseBranch"]:
+        return "it is not against %s" % d["policy"]["baseBranch"]
+    if not any(re.fullmatch(r"%s/agent-[a-z0-9-]+" % re.escape(str(t)), head) for t in types):
+        return "branch %s is not an agent branch" % head
+    stuck = sorted({"agent:hold", "agent:blocked", "agent:needs-human", "agent:fixing"} & labels)
+    if stuck:
+        return "it has %s" % " and ".join(stuck)
+    return ""
+
+
+def review_fixes(repo, n, bot):
+    """agent-fixup.sh fix_locks <pr> review: the review fixes the bot started on the PR, less those
+    its finalize voided because they never reached the model. Only the bot's comments count."""
+    items, _ = rest_pages("repos/%s/issues/%d/comments" % (repo, n), 30)
+    bodies = "\n".join(c.get("body") or "" for c in items if (c.get("user") or {}).get("login") == bot)
+    voided = set(re.findall(r"<!-- agent:fix-no-attempt run=([0-9A-Za-z]+) -->", bodies))
+    runs = re.findall(r"<!-- agent:fix-lock kind=review [^\n]*? run=([0-9A-Za-z]+) ", bodies)
+    return len([r for r in runs if r not in voided])
+
+
+def plan_verdict(repo, d, viewer, body):
+    need_writer(repo, d, "A review verdict")
+    if not d.get("policy_ok"):
+        raise ApiError(409, "cannot read policy.json, so the review marker and the bot are unknown")
+    bot = d["policy"]["botLogin"]
+    if viewer.lower() in {bot.lower(), bot.lower().replace("[bot]", "")}:
+        raise ApiError(403, "a verdict by the agent bot never counts")
+    verdict = body.get("verdict")
+    if verdict not in ("approve", "request-changes"):
+        raise ApiError(400, "verdict must be approve or request-changes")
+    n = pos_int(body.get("pr"), "pr")
+    pr = open_pr(repo, n)
+    if "agent:pr" not in pr_labels(pr):
+        raise ApiError(409, "PR #%d is not an agent PR (no agent:pr label)" % n)
+    sha = (pr.get("head") or {}).get("sha") or ""
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise ApiError(502, "could not read PR #%d's head" % n)
+    note = None
+    if verdict == "approve":
+        if "agent:fixing" in pr_labels(pr):
+            # A push is on its way: the verdict could land after it and count for a head nobody read.
+            raise ApiError(409, "the fixer is working on PR #%d: approve once its push is in and you have read it" % n)
+        if body.get("note"):
+            raise ApiError(400, "an Approve takes no note")
+        if body.get("start_fixer"):
+            raise ApiError(400, "the fixer answers a Request changes, not an Approve")
+    else:
+        note = verdict_note(body.get("note"))
+    comment = verdict_comment(d["policy"]["reviewMarker"], viewer, sha, verdict, note)
+    calls = [call("POST", "repos/%s/issues/%d/comments" % (repo, n), {"body": comment})]
+    warnings = []
+    live = (d.get("vars") or {}).get("AGENT_AUTO_MERGE") == "true"
+    if verdict == "approve":
+        effect = ("the merge gate counts it as the newest review of %s: with CI green and every rule met it merges PR #%d"
+                  % (sha[:9], n)) if live else (
+            "the merge gate counts it as the newest review of %s; auto-merge is off, so it only reports that it would merge" % sha[:9])
+        done = "approved PR #%d at %s" % (n, sha[:9])
+    else:
+        effect = "the merge gate holds PR #%d until a newer review approves" % n
+        done = "requested changes on PR #%d at %s" % (n, sha[:9])
+        if not body.get("start_fixer"):
+            # agent-fixup.sh route_reviews, after any Claude review run, fixes every agent PR whose newest
+            # review asks for changes: a person's included.
+            effect += ("; the fixer may still take your note up after the next Claude review run in %s, which routes "
+                       "every agent PR whose newest review asks for changes" % repo)
+        else:
+            # A person's comment does not route the fixer by itself (agent-fixup.yml routes after a Claude
+            # review run); a dispatch naming the comment does, and the fixer checks it is still the newest.
+            agents_on(d, "the fixer")
+            fixer_gate(d)
+            fixer_ref_ok(repo, d)
+            why = fixer_refusal(d, pr)
+            if why:
+                raise ApiError(409, "the fixer would not take PR #%d: %s" % (n, why))
+            cap = (d["policy"]["roles"].get("fixer") or {}).get("maxReviewFixes")
+            cap = cap if isinstance(cap, int) and not isinstance(cap, bool) else 1
+            if review_fixes(repo, n, bot) >= cap:
+                raise ApiError(409, "the fixer has used its %d review fix(es) on PR #%d: it would block the PR and ask you "
+                                    "in the inbox instead" % (cap, n))
+            calls.append(dispatch_call(repo, "fixer", d["policy"]["runnerRef"],
+                                       {"pr": str(n), "kind": "review", "source": FIXER_SOURCE}))
+            effect += ", and the fixer works on your note (within its review-fix cap)"
+            done += ", and started the fixer"
+    warnings.append("A push to PR #%d after this makes the verdict stale: the gate needs a review newer than the head" % n)
+    return {"summary": "%s PR #%d at head %s, as %s" % ("Approve" if verdict == "approve" else "Request changes on", n, sha[:9], viewer),
+            "effect": effect, "warnings": warnings, "calls": calls, "comment": comment, "done": done}
+
+
+def plan_variable(repo, d, viewer, body):
+    name, value = body.get("name"), body.get("value")
+    if name not in SWITCHES:
+        raise ApiError(400, "name must be %s" % " or ".join(sorted(SWITCHES)))
+    if value not in ("true", "false"):
+        raise ApiError(400, "value must be \"true\" or \"false\"")
+    need_writer(repo, d, "Changing %s" % name)
+    if d.get("vars") is None:
+        raise ApiError(409, "cannot read %s's variables, so cannot tell what %s is now" % (repo, name))
+    cur = d["vars"].get(name)
+    if cur == value:
+        raise ApiError(409, "%s is already %s" % (name, cur))
+    c = (call("POST", "repos/%s/actions/variables" % repo, {"name": name, "value": value}) if cur is None
+         else call("PATCH", "repos/%s/actions/variables/%s" % (repo, name), {"name": name, "value": value}))
+    return {"summary": "Set %s from %s to %s" % (name, "unset" if cur is None else cur, value),
+            "effect": SWITCHES[name][value], "warnings": [], "calls": [c], "done": "set %s to %s" % (name, value)}
+
+
+PLANNERS = {"dispatch": plan_dispatch, "cancel_run": plan_cancel, "review_verdict": plan_verdict,
+            "set_variable": plan_variable}
+
+
+def run_calls(calls):
+    """Make the planned calls in order. One that fails after another succeeded says what was done."""
+    done, comment_id = [], None
+    for c in calls:
+        b = c["body"]
+        if b and (b.get("inputs") or {}).get("source") == FIXER_SOURCE:
+            b = dict(b, inputs=dict(b["inputs"], source="comment-%d" % comment_id))
+        args = ["api", "-X", c["method"], c["path"]] + (["--input", "-"] if b is not None else [])
+        try:
+            out = gh_json(args, stdin=json.dumps(b) if b is not None else None)
+        except GhError as e:
+            if done:
+                raise ApiError(502, "done: %s; then failed: %s %s: %s" % ("; ".join(done), c["method"], c["path"], e))
+            raise
+        if c["path"].endswith("/comments"):
+            comment_id = (out or {}).get("id")
+            if not isinstance(comment_id, int):
+                raise ApiError(502, "posted the comment, but GitHub did not say its id, so nothing else was done")
+        done.append("%s %s" % (c["method"], c["path"]))
+    return done
+
+
+def call_text(c):
+    if c["path"].endswith("/comments"):
+        return "%s %s (the comment below)" % (c["method"], c["path"])
+    return "%s %s%s" % (c["method"], c["path"], " " + json.dumps(c["body"], sort_keys=True) if c["body"] is not None else "")
+
+
 # --- discovery and the repository list ---------------------------------------------------------------
 
 DISCOVER_Q = """query($cursor:String){viewer{repositories(first:100,after:$cursor,
@@ -907,6 +1290,8 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
         self.config = config
         self.cache = Cache()
         self.last_seen = time.monotonic()
+        self.confirms = {}  # one-time confirm token -> (expires, what was previewed)
+        self.confirms_lock = threading.Lock()
         self.hosts = {"127.0.0.1:%d" % self.server_address[1], "localhost:%d" % self.server_address[1]}
 
 
@@ -1048,26 +1433,66 @@ class Handler(http.server.BaseHTTPRequestHandler):
         got = cache.get("inbox:" + repo, lambda: read_inbox(repo, d["inbox"]["number"], bot, owner), fresh)
         return self.send(200, dict(got, inbox=d["inbox"]))
 
-    def action(self, body):
+    def fresh_state(self, body):
+        """The repository, the login gh acts as now and the repository read afresh: every action is
+        decided on these, never on what the page saw."""
         repo = body.get("repo")
         if not valid_repo(repo) or not self.server.config.has(repo):
             raise ApiError(404, "not a repository on this dashboard")
         repo = next(r for r in self.server.config.repos() if r.lower() == repo.lower())
         cache = self.server.cache
-        # Decide on fresh state, and on the login gh will post as now (gh auth switch mid-session).
+        # The login gh will post as now (gh auth switch mid-session).
         viewer = (cache.get("user", lambda: gh_json(["api", "user"]) or {}, fresh=True, ttl=3600) or {}).get("login") or ""
         d = cache.get("repo:" + repo, lambda: read_repo(repo), fresh=True)
         if body.get("viewer") != viewer:  # the page's confirm named the login it will act as
             raise ApiError(409, "gh is now signed in as %s, not %s as this page says: reload the page" % (viewer, body.get("viewer")))
+        return repo, viewer, d
+
+    def plan(self, repo, viewer, d, body):
+        p = PLANNERS[body["type"]](repo, d, viewer, body)
+        # What a confirm token stands for: this plan, for this repository and login.
+        return p, json.dumps([repo, viewer, p], sort_keys=True)
+
+    def preview(self, body):
+        if body.get("type") not in PLANNERS:
+            raise ApiError(400, "type must be %s" % ", ".join(sorted(PLANNERS)))
+        repo, viewer, d = self.fresh_state(body)
+        p, key = self.plan(repo, viewer, d, body)
+        token = secrets.token_urlsafe(16)
+        now = time.monotonic()
+        with self.server.confirms_lock:
+            for t in [t for t, (exp, _) in self.server.confirms.items() if exp < now]:
+                del self.server.confirms[t]
+            self.server.confirms[token] = (now + CONFIRM_TTL, key)
+        self.send(200, {"summary": p["summary"], "effect": p["effect"], "warnings": p["warnings"],
+                        "calls": [call_text(c) for c in p["calls"]], "comment": p.get("comment"), "confirm": token,
+                        "expires_in": CONFIRM_TTL})
+
+    def action(self, body):
         kind = body.get("type")
-        if kind == "inbox_command":
-            out = do_inbox_command(repo, d, viewer, body)
-        elif kind == "label":
-            out = do_label(repo, d, body)
-        else:
-            raise ApiError(400, "type must be inbox_command or label")
-        for k in ("repo:", "inbox:", "gate:"):
-            cache.drop(k + repo)
+        if kind in PLANNERS:
+            # The token is spent whatever happens next: a refused confirm is previewed again.
+            with self.server.confirms_lock:
+                got = self.server.confirms.pop(str(body.get("confirm") or ""), None)
+            if got is None or got[0] < time.monotonic():
+                raise ApiError(409, "no preview for this, or it has expired: preview it again")
+        repo, viewer, d = self.fresh_state(body)
+        try:
+            if kind == "inbox_command":
+                out = do_inbox_command(repo, d, viewer, body)
+            elif kind == "label":
+                out = do_label(repo, d, body)
+            elif kind in PLANNERS:
+                p, key = self.plan(repo, viewer, d, body)
+                if not hmac.compare_digest(key.encode(), got[1].encode()):
+                    raise ApiError(409, "this has changed since the preview (a new head, a run, a variable): preview it again")
+                run_calls(p["calls"])
+                out = {"done": p["done"]}
+            else:
+                raise ApiError(400, "type must be inbox_command, label or %s" % ", ".join(sorted(PLANNERS)))
+        finally:  # a write that failed half way changed something too
+            for k in ("repo:", "inbox:", "gate:"):
+                self.server.cache.drop(k + repo)
         sys.stderr.write("dashboard: %s %s: %s\n" % (viewer, repo, out.get("posted") or out.get("done")))
         self.send(200, dict(out, ok=True))
 
@@ -1101,6 +1526,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = self.body_json()
         if path == "/api/action":
             return self.action(body)
+        if path == "/api/action/preview":
+            return self.preview(body)
         if path != "/api/repos":
             raise ApiError(404, "not found")
         op, repo = body.get("op"), body.get("repo")

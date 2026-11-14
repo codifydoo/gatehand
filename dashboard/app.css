@@ -78,4 +78,8 @@ code { font-size: 12.5px; }
   .bar, main, footer { padding-left: 16px; padding-right: 16px; }
   input { min-width: 0; flex: 1; }
 }
+form.verdict { display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: 640px; margin-top: 6px; }
+form.verdict label { font-size: 12.5px; }
+form.verdict button { align-self: flex-start; }
+textarea { font: inherit; padding: 6px 8px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); width: 100%; }
 a.button-link { display: inline-block; font-size: 12px; padding: 1px 8px; border: 1px solid var(--line); border-radius: 7px; color: var(--fg); }

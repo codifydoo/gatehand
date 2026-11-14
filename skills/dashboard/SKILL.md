@@ -1,6 +1,6 @@
 ---
 name: dashboard
-description: Open the Gatehand dashboard, a local page showing every repository where the Gatehand agents are installed - what they are doing, open inbox requests, blocked issues, agent PRs and why the merge gate holds them, the queue, runs, cost and breakers - with buttons to answer inbox requests, rerun, pause or resume, hold and unqueue. Use when the user asks for an overview of their agents, what is waiting for them, agent activity across repositories, or to answer the agents without typing comments.
+description: Open the Gatehand dashboard, a local page showing every repository where the Gatehand agents are installed - what they are doing, open inbox requests, blocked issues, agent PRs and why the merge gate holds them, the queue, runs, cost and breakers - with buttons to answer inbox requests, rerun, pause or resume, hold and unqueue, start or cancel agent runs, approve or request changes on agent PRs, and turn the agents or auto-merge on and off. Use when the user asks for an overview of their agents, what is waiting for them, agent activity across repositories, or to answer the agents without typing comments.
 ---
 
 # Open the Gatehand dashboard

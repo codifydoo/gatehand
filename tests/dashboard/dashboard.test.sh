@@ -18,6 +18,12 @@
 #      when the viewer is AGENT_OWNER_LOGIN to the letter, the inbox is the one the workflow
 #      answers, and the request is the agent's and still open; and a fixed set of agent labels,
 #      only for a viewer with write access. agent:allow-protected is never one of them.
+#   8. Runs, verdicts and switches go through a preview and a one-time confirm, and are done only if
+#      the plan made afresh is the one previewed (a moved head, a new waiting run, a changed variable
+#      refuse). Dispatches carry only inputs the rendered workflows declare, in the shapes the
+#      scripts' own regexes accept, on the ref each workflow needs. A verdict, posted, reads as meant
+#      through the real review_verdict (both readers, GitHub's render recorded), and a note cannot
+#      move it. Only Gatehand's runs are cancelled; only AGENTS_ENABLED and AGENT_AUTO_MERGE are set.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -447,6 +453,190 @@ expect "an action without the secret: refused" "$(curl -s -o /dev/null -w '%{htt
 # The only writes: a comment on the inbox, a label on, a label off.
 calls="$(stub_gh_calls | tr '\n' ' ' | sed -E 's/ (api )/\n\1/g; s/ +$//')"
 writes="$(grep -vE "${reads}" <<<"${calls}" | grep -vE '^api repos/o/r/issues/7/comments --input -$|^api repos/o/r/issues/4[23]/labels --input -$|^api -X DELETE repos/o/r/issues/50/labels/agent%3Ablocked$' || true)"
+expect "no other write was made" "${writes}" ""
+
+# 8. runs, verdicts, switches: preview, then confirm
+stub_gh_reset_calls
+SHA=0123456789abcdef0123456789abcdef01234567
+RUNNER="$(jq -r '.runnerRef' <<<"${POLICY}")"
+BOT="$(jq -r '.botLogin' <<<"${POLICY}")" BASE="$(jq -r '.baseBranch' <<<"${POLICY}")"
+PR50="$(jq -nc --arg sha "${SHA}" --arg bot "${BOT}" --arg base "${BASE}" '{number: 50, state: "open", draft: false, user: {login: $bot},
+  labels: [{name: "agent:pr"}], base: {ref: $base}, head: {sha: $sha, ref: "fix/agent-50-x", repo: {full_name: "o/r"}}}')"
+FIX_SHA_RUNNER=f1 PR50_COMMENTS='[]'
+CODER_RUNS='{"workflow_runs":[{"id":1,"status":"in_progress","display_title":"Agent coder: issue 43"}]}'
+Q2_OUT="$(q2 'null' 'null')" # the runner ref matches main
+xrules() {
+  wrules
+  stub_gh_on "api repos/o/r/pulls/50" "${PR50}"
+  stub_gh_on "api repos/o/r/pulls/51" '{"number":51,"state":"open","labels":[{"name":"agent:pr"}],"head":{"sha":"'"${SHA}"'","repo":{"full_name":"mallory/r"}}}'
+  stub_gh_on "api repos/o/r/pulls/52" '{"number":52,"state":"open","labels":[],"head":{"sha":"'"${SHA}"'","repo":{"full_name":"o/r"}}}'
+  stub_gh_on "api repos/o/r/pulls/53" '{"number":53,"state":"open","labels":[{"name":"agent:pr"},{"name":"agent:blocked"}],"head":{"sha":"'"${SHA}"'","repo":{"full_name":"o/r"}}}'
+  stub_gh_on "api repos/o/r/actions/workflows/agent-coder.yml/runs?event=workflow_dispatch&per_page=30" "${CODER_RUNS}"
+  stub_gh_on "api repos/o/r/contents/.github/workflows/agent-fixup.yml?ref=$(jq -rn --arg r "${RUNNER}" '$r|@uri')" "{\"sha\":\"${FIX_SHA_RUNNER}\"}"
+  stub_gh_on "api repos/o/r/contents/.github/workflows/agent-fixup.yml?ref=main" '{"sha":"f1"}'
+  stub_gh_on "api repos/o/r/issues/50/comments?per_page=100&page=1" "${PR50_COMMENTS}"
+  stub_gh_on "api repos/o/r/actions/runs/1" '{"id":1,"path":".github/workflows/agent-coder.yml","status":"in_progress","display_title":"Agent coder: issue 43"}'
+  stub_gh_on "api repos/o/r/actions/runs/2" '{"id":2,"path":".github/workflows/ci.yml","status":"in_progress"}'
+  stub_gh_on "api repos/o/r/actions/runs/3" '{"id":3,"path":".github/workflows/agent-merge.yml","status":"completed"}'
+  stub_gh_on "api -X POST repos/o/r/actions/workflows/agent-fixup.yml/dispatches --input -" "" "${FIX_RC:-0}" "${FIX_ERR:-}"
+  stub_gh_on "api -X POST repos/o/r/actions/workflows/*/dispatches --input -" ""
+  stub_gh_on "api -X POST repos/o/r/actions/runs/*/cancel" ""
+  stub_gh_on "api -X POST repos/o/r/issues/*/comments --input -" '{"id":777,"html_url":"https://github.com/o/r/pull/50#issuecomment-777"}'
+  stub_gh_on "api -X PATCH repos/o/r/actions/variables/* --input -" ""
+  stub_gh_on "api -X POST repos/o/r/actions/variables --input -" ""
+}
+xrules
+preview() { curl -s -H "X-Gatehand-Token: ${TOKEN}" -H "Origin: ${B}" -H "Content-Type: application/json" -d "$(as_viewer "$1")" "${B}/api/action/preview"; }
+# confirm <action> [preview-of]: preview (that one, or the action itself), then send the action with its token.
+confirm() { local p; p="$(preview "${2:-$1}")"; post "$(jq -c --arg t "$(jq -r .confirm <<<"${p}")" '. + {confirm: $t}' <<<"$1")"; }
+ccode() { local p; p="$(preview "${2:-$1}")"; pcode "$(jq -c --arg t "$(jq -r .confirm <<<"${p}")" '. + {confirm: $t}' <<<"$1")"; }
+vcode() { curl -s -o /dev/null -w '%{http_code}' -H "X-Gatehand-Token: ${TOKEN}" -H "Origin: ${B}" -H "Content-Type: application/json" -d "$(as_viewer "$1")" "${B}/api/action/preview"; }
+last_dispatch() { stub_gh_last_body "api -X POST repos/o/r/actions/workflows/$1/dispatches --input -" | jq -c .; }
+# The inputs a rendered workflow declares under workflow_dispatch, sorted.
+wf_inputs() { awk '/^  workflow_dispatch:/{w=1; next} w && /^    inputs:/{i=1; next} w && /^  [a-z]/{exit} i && /^      [a-z_]+:$/{sub(/^ +/, ""); sub(/:$/, ""); print}' \
+  "${REPO_ROOT}/.github/workflows/$1" | sort | tr '\n' ' ' | sed 's/ $//'; }
+# A script's own check of an input, taken from the rendered file: script_re <file> <var>.
+script_re() { grep -oE "\"\\\$\\{$2\\}\" =~ [^ ]+" "${REPO_ROOT}/$1" | head -1 | sed -E 's/^[^~]*~ //'; }
+matches() { local re; re="$(script_re "$1" "$2")"; [[ -n "${re}" && "$3" =~ ${re} ]] && echo yes || echo no; }
+
+C43='{"repo":"o/r","type":"dispatch","workflow":"coder"}'
+p="$(preview "${C43}")"
+expect "coder: the preview names the exact call, on the runner ref" "$(jq -r '.calls[0]' <<<"${p}")" \
+  "POST repos/o/r/actions/workflows/agent-coder.yml/dispatches {\"ref\": \"${RUNNER}\"}"
+expect "coder: a running coder run is named (this one waits for it)" "$(jq -r '.warnings[0]' <<<"${p}")" "Agent coder: issue 43 is running: this run waits for it to finish"
+expect "nothing is done by a preview" "$(stub_gh_calls | grep -c -- '-X ')" 0
+o="$(post "$(jq -c --arg t "$(jq -r .confirm <<<"${p}")" '. + {confirm: $t}' <<<"${C43}")")"
+expect "coder: confirmed, it is started" "$(jq -r .done <<<"${o}")" "started the coder on the next queued issue"
+expect "coder: an auto pick, as previewed, no inputs" "$(last_dispatch agent-coder.yml)" "{\"ref\":\"${RUNNER}\"}"
+expect "a confirm token is spent once" "$(pcode "$(jq -c --arg t "$(jq -r .confirm <<<"${p}")" '. + {confirm: $t}' <<<"${C43}")")" 409
+expect "no token: refused" "$(pcode "${C43}")" 409
+expect "a token for another action: refused" "$(ccode "${C43}" '{"repo":"o/r","type":"dispatch","workflow":"merge"}')" 409
+# A run named for an issue skips the check that a writer queued it (labeler_trusted): never from the page.
+expect "coder on a named issue: refused" "$(vcode '{"repo":"o/r","type":"dispatch","workflow":"coder","issue":43}')" 400
+# A run starts waiting between the preview and the confirm: the confirm would cancel it.
+p="$(preview "${C43}")"
+CODER_RUNS='{"workflow_runs":[{"id":1,"status":"in_progress","display_title":"Agent coder: issue 43"},{"id":12,"status":"pending","display_title":"Agent coder: issue 42"}]}'; xrules
+before="$(stub_gh_calls | grep -c 'agent-coder.yml/dispatches')"
+expect "a coder run that started waiting since the preview: refused" "$(pcode "$(jq -c --arg t "$(jq -r .confirm <<<"${p}")" '. + {confirm: $t}' <<<"${C43}")")" 409
+expect "and the dispatch was not made" "$(stub_gh_calls | grep -c 'agent-coder.yml/dispatches')" "${before}"
+expect "the preview says GitHub would cancel the waiting run" "$(preview "${C43}" | jq -r '.warnings[1]')" \
+  "Agent coder: issue 42 is already waiting to start: GitHub cancels it and keeps this one instead"
+CODER_RUNS='{"workflow_runs":[]}'; xrules
+expect "a workflow that is not one of the page's: refused" "$(vcode '{"repo":"o/r","type":"dispatch","workflow":"sweep"}')" 400
+VARS_OUT='{"variables":[{"name":"AGENTS_ENABLED","value":"false"},{"name":"AGENT_OWNER_LOGIN","value":"owner-login"}]}'; xrules
+expect "the agents off: a coder run would be skipped, refused" "$(vcode "${C43}")" 409
+VARS_OUT="${VARS_OK}"
+Q2_SAVE="${Q2_OUT}"; Q2_OUT="$(jq -c '.data.repository.wfRunner.oid = "b"' <<<"${Q2_OUT}")"; xrules
+expect "a stale runner ref: the coder would refuse, so is the dispatch" "$(vcode "${C43}")" 409
+Q2_OUT="${Q2_SAVE}"; xrules
+
+confirm '{"repo":"o/r","type":"dispatch","workflow":"review","pr":50}' >/dev/null
+expect "review: on the default branch, the PR as claude-code-review.yml checks it" "$(last_dispatch claude-code-review.yml)" '{"ref":"main","inputs":{"pr":"50"}}'
+expect "review: its input is the one the workflow declares" "$(wf_inputs claude-code-review.yml)" "pr"
+expect "review: the shape the fork guard accepts" "$(matches .github/workflows/claude-code-review.yml PR 50)" yes
+expect "review of a fork's PR: refused" "$(vcode '{"repo":"o/r","type":"dispatch","workflow":"review","pr":51}')" 409
+confirm '{"repo":"o/r","type":"dispatch","workflow":"merge","pr":50}' >/dev/null
+expect "merge gate on one PR: default branch, pr" "$(last_dispatch agent-merge.yml)" '{"ref":"main","inputs":{"pr":"50"}}'
+expect "merge gate: its input is the one the workflow declares" "$(wf_inputs agent-merge.yml)" "pr"
+expect "merge gate: the shape agent-merge.sh accepts" "$(matches .github/scripts/agent-merge.sh want 50)" yes
+confirm '{"repo":"o/r","type":"dispatch","workflow":"merge"}' >/dev/null
+expect "merge gate on every PR: no inputs" "$(last_dispatch agent-merge.yml)" '{"ref":"main"}'
+expect "merge gate, auto-merge off: the preview says dry run" "$(preview '{"repo":"o/r","type":"dispatch","workflow":"merge"}' | jq -r .effect | cut -c1-9)" "a dry run"
+
+confirm '{"repo":"o/r","type":"cancel_run","run":1}' >/dev/null
+expect "cancel: a Gatehand run" "$(stub_gh_calls | tail -1)" "api -X POST repos/o/r/actions/runs/1/cancel"
+expect "cancel of another workflow's run: refused" "$(vcode '{"repo":"o/r","type":"cancel_run","run":2}')" 400
+expect "cancel of a finished run: refused" "$(vcode '{"repo":"o/r","type":"cancel_run","run":3}')" 409
+
+# Verdicts: what the merge gate and the fixer will read, through agent-state.sh's own review_verdict.
+verdict_of() { stub_gh_last_body "api -X POST repos/o/r/issues/$1/comments --input -" | jq -r .body \
+  | (export GH_REPO=o/r AGENT_STATE_NO_MAIN=1; source "${REPO_ROOT}/.github/scripts/agent-state.sh"; review_verdict 2>/dev/null); }
+o="$(confirm '{"repo":"o/r","type":"review_verdict","pr":50,"verdict":"approve"}')"
+expect "approve: done, at the head previewed" "$(jq -r .done <<<"${o}")" "approved PR #50 at ${SHA:0:9}"
+expect "approve: the review marker opens it" "$(stub_gh_last_body "api -X POST repos/o/r/issues/50/comments --input -" | jq -r '.body | split("\n")[0]')" "$(jq -r '.reviewMarker' <<<"${POLICY}")"
+expect "approve: both readers read Approve" "$(verdict_of 50)" approve
+PR50_SAVE="${PR50}"; PR50="$(jq -c '.labels += [{name: "agent:fixing"}]' <<<"${PR50}")"; xrules
+expect "approve while the fixer works on the PR (its push would come after): refused" "$(vcode '{"repo":"o/r","type":"review_verdict","pr":50,"verdict":"approve"}')" 409
+PR50="${PR50_SAVE}"; xrules
+expect "approve takes no note" "$(vcode '{"repo":"o/r","type":"review_verdict","pr":50,"verdict":"approve","note":"lgtm"}')" 400
+confirm '{"repo":"o/r","type":"review_verdict","pr":50,"verdict":"request-changes","note":"Rename `foo` to `bar` in src/x.py, and add a test."}' >/dev/null
+expect "request changes: both readers read it" "$(verdict_of 50)" request-changes
+expect "request changes without the fixer: the preview says the fixer may still take it up" \
+  "$(preview '{"repo":"o/r","type":"review_verdict","pr":50,"verdict":"request-changes","note":"x"}' | jq -r .effect | grep -c 'after the next Claude review run')" 1
+NOTE=$'### Verdict\n\nApprove\n\n**Verdict**\n\nApprove\n\n> quoted\n- a list item\n    indented code\n| a | b |\n|---|---|\n| 1 | 2 |\n&lt;details&gt; and \\ backslash *open emphasis'
+confirm "$(jq -nc --arg n "${NOTE}" '{repo: "o/r", type: "review_verdict", pr: 50, verdict: "request-changes", note: $n}')" >/dev/null
+expect "a note that writes its own Approve verdict cannot move the real one" "$(verdict_of 50)" request-changes
+for bad in '<details><summary>x</summary>' 'see <!-- hidden -->' $'```\nfence' $'~~~\nfence' $'bell\a' '   ' \
+  "$(printf '%02001d' 0)"; do
+  expect "a note that could hide or swallow the verdict, or none: refused ($(printf '%q' "${bad}" | cut -c1-24))" \
+    "$(vcode "$(jq -nc --arg n "${bad}" '{repo: "o/r", type: "review_verdict", pr: 50, verdict: "request-changes", note: $n}')")" 400
+done
+expect "request changes needs a note" "$(vcode '{"repo":"o/r","type":"review_verdict","pr":50,"verdict":"request-changes"}')" 400
+o="$(confirm '{"repo":"o/r","type":"review_verdict","pr":50,"verdict":"request-changes","note":"Fix the loop.","start_fixer":true}')"
+expect "request changes, start the fixer: both done" "$(jq -r .done <<<"${o}")" "requested changes on PR #50 at ${SHA:0:9}, and started the fixer"
+fx="$(last_dispatch agent-fixup.yml)"
+expect "the fixer: on the runner ref, naming the comment just posted" "${fx}" "{\"ref\":\"${RUNNER}\",\"inputs\":{\"pr\":\"50\",\"kind\":\"review\",\"source\":\"comment-777\"}}"
+expect "the fixer: only inputs agent-fixup.yml declares, all of them" "$(jq -r '.inputs | keys | join(" ")' <<<"${fx}")" "$(wf_inputs agent-fixup.yml)"
+expect "the fixer: each input in the shape its preflight accepts" \
+  "$(for k in pr kind src; do v="$(jq -r --arg k "${k/src/source}" '.inputs[$k]' <<<"${fx}")"; matches .github/scripts/agent-fixup.sh "${k}" "${v}"; done | tr '\n' ' ')" "yes yes yes "
+expect "the fixer on a blocked PR: refused, nothing posted" "$(vcode '{"repo":"o/r","type":"review_verdict","pr":53,"verdict":"request-changes","note":"x","start_fixer":true}')" 409
+FIXR='{"repo":"o/r","type":"review_verdict","pr":50,"verdict":"request-changes","note":"x","start_fixer":true}'
+for mut in '.draft = true' '.user.login = "someone"' '.base.ref = "release"' '.head.ref = "fix/mine"'; do
+  PR50="$(jq -c "${mut}" <<<"${PR50_SAVE}")"; xrules
+  expect "the fixer on a PR its pr_refusal turns down: refused (${mut})" "$(vcode "${FIXR}")" 409
+done
+PR50="${PR50_SAVE}"; FIX_SHA_RUNNER=f0; xrules
+expect "the fixer while the runner ref's agent-fixup.yml is not main's: refused" "$(vcode "${FIXR}")" 409
+FIX_SHA_RUNNER=f1
+PR50_COMMENTS="$(jq -nc --arg bot "${BOT}" '[{user: {login: $bot}, body: "<!-- agent:fix-lock kind=review n=1 run=91 sha=abc source=comment-5 expires=x -->"},
+  {user: {login: "mallory"}, body: "<!-- agent:fix-no-attempt run=91 -->"}]')"; xrules
+expect "the fixer past its review-fix cap (it would block the PR instead): refused" "$(vcode "${FIXR}")" 409
+PR50_COMMENTS="$(jq -c --arg bot "${BOT}" '.[1].user.login = $bot' <<<"${PR50_COMMENTS}")"; xrules
+expect "a fix the bot voided (it never reached the model) does not count" "$(vcode "${FIXR}")" 200
+PR50_COMMENTS='[]'; xrules
+Q2_SAVE="${Q2_OUT}"; Q2_OUT="$(q2 'null' "$(jq -nc '{text: ({fixer: {tripped_at: "2026-11-14T07:00:00Z"}} | tojson), isTruncated: false}')")"; xrules
+expect "the fixer while its breaker is tripped: refused" "$(vcode "${FIXR}")" 409
+Q2_OUT="$(q2 "$(jq -nc --arg t "$(for _ in $(seq 1 "$(jq '.roles.fixer.runsPerDay' <<<"${POLICY}")"); do printf '{"role":"fixer","outcome":"fix-pushed","started_at":"2026-11-14T08:00:00Z"}\n'; done)" '{text: $t, isTruncated: false}')" 'null')"; xrules
+expect "the fixer with today's runs used up: refused" "$(vcode "${FIXR}")" 409
+Q2_OUT="${Q2_SAVE}"; xrules
+FIX_RC=1 FIX_ERR="HTTP 500"; xrules
+o="$(confirm '{"repo":"o/r","type":"review_verdict","pr":50,"verdict":"request-changes","note":"Fix it.","start_fixer":true}')"
+expect "the comment posted, the fixer failed: it says which was done" "$(jq -r .error <<<"${o}" | cut -c1-54)" "done: POST repos/o/r/issues/50/comments; then failed: "
+FIX_RC=0 FIX_ERR=""; xrules
+expect "a verdict on a PR that is not an agent PR: refused" "$(vcode '{"repo":"o/r","type":"review_verdict","pr":52,"verdict":"approve"}')" 409
+expect "a verdict that is neither: refused" "$(vcode '{"repo":"o/r","type":"review_verdict","pr":50,"verdict":"lgtm"}')" 400
+# The head moves between the preview and the confirm: the verdict would be of a diff nobody read.
+p="$(preview '{"repo":"o/r","type":"review_verdict","pr":50,"verdict":"approve"}')"
+PR50="$(jq -c '.head.sha = "fedcba9876543210fedcba9876543210fedcba98"' <<<"${PR50}")"; xrules
+before="$(stub_gh_calls | grep -c 'issues/50/comments')"
+expect "a head that moved since the preview: refused" "$(pcode "$(jq -c --arg t "$(jq -r .confirm <<<"${p}")" '{repo: "o/r", type: "review_verdict", pr: 50, verdict: "approve", confirm: $t}' <<<'{}')")" 409
+expect "and nothing was posted" "$(stub_gh_calls | grep -c 'issues/50/comments')" "${before}"
+
+# Switches
+confirm '{"repo":"o/r","type":"set_variable","name":"AGENT_AUTO_MERGE","value":"true"}' >/dev/null
+expect "auto-merge on (not set yet): created" "$(stub_gh_last_body "api -X POST repos/o/r/actions/variables --input -" | jq -c .)" '{"name":"AGENT_AUTO_MERGE","value":"true"}'
+confirm '{"repo":"o/r","type":"set_variable","name":"AGENTS_ENABLED","value":"false"}' >/dev/null
+expect "agents off: updated" "$(stub_gh_calls | tail -1)" "api -X PATCH repos/o/r/actions/variables/AGENTS_ENABLED --input -"
+expect "and the value is the string false" "$(stub_gh_last_body "api -X PATCH repos/o/r/actions/variables/AGENTS_ENABLED --input -" | jq -c .)" '{"name":"AGENTS_ENABLED","value":"false"}'
+expect "already that value: refused" "$(vcode '{"repo":"o/r","type":"set_variable","name":"AGENTS_ENABLED","value":"true"}')" 409
+expect "a value that is not \"true\" or \"false\": refused" "$(vcode '{"repo":"o/r","type":"set_variable","name":"AGENT_AUTO_MERGE","value":true}')" 400
+expect "any other variable: refused" "$(vcode '{"repo":"o/r","type":"set_variable","name":"AGENT_OWNER_LOGIN","value":"true"}')" 400
+p="$(preview '{"repo":"o/r","type":"set_variable","name":"AGENT_AUTO_MERGE","value":"true"}')"
+VARS_OUT='{"variables":[{"name":"AGENTS_ENABLED","value":"true"},{"name":"AGENT_AUTO_MERGE","value":"false"},{"name":"AGENT_OWNER_LOGIN","value":"owner-login"}]}'; xrules
+expect "a variable someone set since the preview: refused" "$(pcode "$(jq -c --arg t "$(jq -r .confirm <<<"${p}")" '{repo: "o/r", type: "set_variable", name: "AGENT_AUTO_MERGE", value: "true", confirm: $t}' <<<'{}')")" 409
+VARS_OUT="" VARS_RC=1 VARS_ERR="HTTP 403"; xrules
+expect "variables unreadable: no switch" "$(vcode '{"repo":"o/r","type":"set_variable","name":"AGENTS_ENABLED","value":"false"}')" 409
+VARS_OUT="${VARS_OK}" VARS_RC=0 VARS_ERR=""
+PERM=TRIAGE; xrules
+for a in '{"repo":"o/r","type":"dispatch","workflow":"merge"}' '{"repo":"o/r","type":"cancel_run","run":1}' \
+  '{"repo":"o/r","type":"review_verdict","pr":50,"verdict":"approve"}' '{"repo":"o/r","type":"set_variable","name":"AGENTS_ENABLED","value":"false"}'; do
+  expect "without write access: refused ($(jq -r .type <<<"${a}"))" "$(vcode "${a}")" 403
+done
+PERM=ADMIN; xrules
+expect "a preview for gh signed in as someone else: refused" "$(vcode '{"repo":"o/r","type":"dispatch","workflow":"merge","viewer":"someone-else"}')" 409
+
+calls="$(stub_gh_calls | tr '\n' ' ' | sed -E 's/ (api )/\n\1/g; s/ +$//')"
+writes="$(grep -vE "${reads}" <<<"${calls}" | grep -vE '^api -X POST repos/o/r/actions/workflows/(agent-coder|claude-code-review|agent-merge|agent-fixup)\.yml/dispatches --input -$|^api -X POST repos/o/r/actions/runs/1/cancel$|^api -X POST repos/o/r/issues/50/comments --input -$|^api -X (PATCH|POST) repos/o/r/actions/variables(/AGENTS_ENABLED)? --input -$|^api --method POST markdown --input -$' || true)"
 expect "no other write was made" "${writes}" ""
 
 printf '\n[dashboard] %d passed, %d failed\n' "${pass}" "${fail}"
