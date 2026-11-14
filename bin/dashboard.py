@@ -63,6 +63,13 @@ WORKFLOWS = {
     ".github/workflows/agent-digest.yml": "digest",
     ".github/workflows/agent-triage.yml": "triage",
 }
+# The scheduled ones, by their policy.json `schedules` key. The installed file's cron is the truth:
+# policy.json's takes effect only once the workflows are re-rendered.
+SCHEDULED = {"coder": "agent-coder.yml", "merge": "agent-merge.yml", "sweep": "agent-sweep.yml",
+             "digest": "agent-digest.yml", "triage": "agent-triage.yml"}
+# The per-role limits the page shows beside the action that spends another run.
+ROLE_LIMITS = ("runsPerDay", "maxOpenPrs", "maxReviewFixes", "maxAttemptsPerIssue", "maxCiFixes",
+               "breakerThreshold", "timeoutMinutes")
 VARIABLES = ("AGENTS_ENABLED", "AGENT_AUTO_MERGE", "AGENT_OWNER_LOGIN", "AGENT_INBOX_ISSUE")
 OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
@@ -168,6 +175,117 @@ def now_utc():
 
 def iso(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def cron_field(s, lo, hi):
+    """The values one cron field matches: *, N, N-M, lists, and /step on any of them (the operators
+    GitHub documents). ValueError on anything else, so a field it cannot read is never a guess."""
+    vals = set()
+    for part in s.split(","):
+        rng, slash, step = part.partition("/")
+        if slash and not (re.fullmatch(r"[0-9]+", step) and int(step) > 0):  # ASCII digits only
+            raise ValueError("bad step in %r" % s)
+        step = int(step) if slash else 1
+        if rng == "*":
+            a, b = lo, hi
+        elif re.fullmatch(r"[0-9]+-[0-9]+", rng):
+            a, b = (int(x) for x in rng.split("-"))
+        elif re.fullmatch(r"[0-9]+", rng):
+            a, b = int(rng), (hi if slash else int(rng))
+        else:
+            raise ValueError("cannot read %r" % s)
+        if not lo <= a <= b <= hi:
+            raise ValueError("%r is out of %d-%d" % (s, lo, hi))
+        vals.update(range(a, b + 1, step))
+    return vals
+
+
+CRON_SEARCH_DAYS = 366 * 9  # a 29 February schedule can wait eight years (2096 to 2104)
+
+
+def next_cron_run(cron, now):
+    """The first minute after `now` (UTC) that a five-field cron matches; None if none within
+    CRON_SEARCH_DAYS. As POSIX cron: when both day of month and day of week are restricted, a day
+    matching either runs. ValueError for a cron it cannot read."""
+    f = cron.split()
+    if len(f) != 5:
+        raise ValueError("%r is not five fields" % cron)
+    mins, hours = sorted(cron_field(f[0], 0, 59)), sorted(cron_field(f[1], 0, 23))
+    dom, months = cron_field(f[2], 1, 31), cron_field(f[3], 1, 12)
+    dow = {x % 7 for x in cron_field(f[4], 0, 7)}  # 0 and 7 are both Sunday
+    either = not f[2].startswith("*") and not f[4].startswith("*")
+    start = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    for i in range(CRON_SEARCH_DAYS):
+        day = start.date() + timedelta(days=i)
+        if day.month not in months:
+            continue
+        on_dom, on_dow = day.day in dom, day.isoweekday() % 7 in dow
+        if not ((on_dom or on_dow) if either else (on_dom and on_dow)):
+            continue
+        for h in hours:
+            for m in mins:
+                t = datetime(day.year, day.month, day.day, h, m, tzinfo=timezone.utc)
+                if t >= start:
+                    return t
+    return None
+
+
+ON_RE = re.compile(r"""^(?:on|"on"|'on')\s*:\s*(.*)$""")
+# A list item, as GitHub requires: `cron:` without the `- ` is a mapping, and the workflow never runs.
+# A plain value cannot open with an anchor, alias, tag, block scalar or flow value: those do not read.
+CRON_LINE_RE = re.compile(r"""^\s*-\s*cron\s*:\s*(?:"([^"]*)"|'([^']*)'|([^\s"'#&*!|>\[{][^#]*?))\s*(?:#.*)?$""")
+
+
+def workflow_crons(text):
+    """The cron strings under a workflow file's top-level `on: schedule:`; [] when it has none.
+    A line reader for the block style Gatehand renders: any other shape of `on:` or `schedule:`
+    (flow style, an anchor, alias or tag, a key it does not expect) raises ValueError, so it reads as
+    unknown, never as none."""
+    lines = text.lstrip("﻿").splitlines()
+    live = lambda l: l.strip() and not l.lstrip().startswith("#")
+    indent = lambda l: len(l) - len(l.lstrip(" "))
+    start = next((i for i, l in enumerate(lines) if ON_RE.match(l)), None)
+    if start is None:
+        return []
+    inline = ON_RE.match(lines[start]).group(1).split("#", 1)[0].strip()
+    if inline[:1] in ("&", "*", "!"):  # on: &a, on: *a, on: !!map: what it holds is not on these lines
+        raise ValueError("`on:` uses an anchor, alias or tag")
+    if inline:  # on: push, on: [push, schedule], on: {...}
+        if "schedule" in inline:
+            raise ValueError("`on:` is not in block style")
+        return []
+    block = []
+    for l in lines[start + 1:]:
+        if live(l) and indent(l) == 0:
+            break
+        block.append(l)
+    keys = [l for l in block if live(l)]
+    if not keys:
+        return []
+    child = indent(keys[0])
+    for i, l in enumerate(block):
+        m = re.match(r"""^ {%d}(?:schedule|"schedule"|'schedule')\s*:\s*(.*)$""" % child, l)
+        if not m:
+            if live(l) and indent(l) == child and "schedule" in l.split("#", 1)[0]:  # a key shape not foreseen
+                raise ValueError("cannot read %r under `on:`" % l.strip()[:80])
+            continue
+        if m.group(1).split("#", 1)[0].strip():
+            raise ValueError("`schedule:` is not in block style")
+        crons = []
+        for item in block[i + 1:]:
+            if not live(item):
+                continue
+            # The items may sit at the key's own indent ("- cron:" under "schedule:"), valid YAML.
+            if indent(item) < child or (indent(item) == child and not item.lstrip().startswith("-")):
+                break
+            c = CRON_LINE_RE.match(item)
+            if not c:
+                raise ValueError("cannot read %r under `schedule:`" % item.strip()[:80])
+            crons.append(next(g for g in c.groups() if g is not None).strip())
+        if not crons:
+            raise ValueError("`schedule:` has no cron")
+        return crons
+    return []
 
 
 # --- what the agents' scripts compute, ported ---------------------------------------------------------
@@ -333,7 +451,9 @@ def waiting_items(d):
 REPO_Q1 = """query($owner:String!,$name:String!){repository(owner:$owner,name:$name){
 nameWithOwner url viewerPermission isArchived defaultBranchRef{name}
 policy:object(expression:"HEAD:.github/agents/policy.json"){...on Blob{text isTruncated}}
-lock:object(expression:"HEAD:.github/agents/install.lock.json"){...on Blob{text isTruncated}}}}"""
+lock:object(expression:"HEAD:.github/agents/install.lock.json"){...on Blob{text isTruncated}}
+""" + "".join('wf_%s:object(expression:"HEAD:.github/workflows/%s"){...on Blob{text isTruncated}}\n' % kv
+              for kv in SCHEDULED.items()) + "}}"
 
 REPO_Q2 = """query($owner:String!,$name:String!,$cur:String!,$prev:String!,$breaker:String!,$wfRunner:String!,$wfMain:String!){
 repository(owner:$owner,name:$name){
@@ -420,11 +540,43 @@ def read_repo(repo):
         "runnerRef": runner, "inboxMarker": policy.get("inboxMarker") or "<!-- agent-inbox -->",
         "reviewMarker": policy.get("reviewMarker") or "<!-- verify-pr-review -->",
         "branchTypes": policy.get("branchTypes") if isinstance(policy.get("branchTypes"), list) else None,
-        "roles": {k: {"runsPerDay": v.get("runsPerDay"), "maxOpenPrs": v.get("maxOpenPrs"),
-                      "maxReviewFixes": v.get("maxReviewFixes")}
-                  for k, v in roles.items() if isinstance(v, dict)},
+        # A limit policy.json does not set is null, never a default.
+        "roles": {k: {x: v.get(x) for x in ROLE_LIMITS} for k, v in roles.items() if isinstance(v, dict)},
         "requiredChecks": policy.get("requiredChecks") if isinstance(policy.get("requiredChecks"), list) else None,
     }
+
+    # Schedules, from the workflow files on the default branch, in UTC as GitHub runs them: null for
+    # a workflow with no schedule (or not installed: triage is optional); "unknown", and said so,
+    # for one that cannot be read.
+    d["schedules"] = {}
+    for key, f in SCHEDULED.items():
+        path = ".github/workflows/" + f
+        try:
+            blob = r.get("wf_" + key)
+            # GraphQL gives no text for a binary blob, and {} for a tree: unreadable, not empty.
+            if blob is not None and not blob.get("isTruncated") and not isinstance(blob.get("text"), str):
+                raise ValueError("not a text file")
+            text = blob_text(repo, blob, default, path)
+            crons = workflow_crons(text) if text is not None else []
+        except (GhError, ValueError) as e:
+            d["errors"].append("%s: %s; its schedule is unknown" % (path, e))
+            d["schedules"][key] = "unknown"
+            continue
+        if not crons:
+            d["schedules"][key] = None
+            continue
+        nexts = []
+        for c in crons:
+            try:
+                t = next_cron_run(c, now)
+                if t is None:
+                    raise ValueError("%r matches no day in the next %d years" % (c, CRON_SEARCH_DAYS // 366))
+                nexts.append(t)
+            except ValueError as e:
+                d["errors"].append("%s: cron %s; its next run is unknown" % (path, e))
+                nexts = None
+                break
+        d["schedules"][key] = {"cron": crons, "next_run": iso(min(nexts)) if nexts else None}
 
     # 2. The ledger (this month and last, enough for seven days), the breaker, the runner ref.
     months = sorted({now.strftime("%Y-%m"), (now - timedelta(days=7)).strftime("%Y-%m")})
