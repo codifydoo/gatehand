@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Dashboard: a failed read says why, as one cause from a fixed set (`sso`, `signed_out`,
+  `rate_limited` with the time the limit resets, `not_found`, `no_access`, `unknown`), in each
+  repository's new `unreadable` list, beside `error` in a failed request's answer, and for a scan
+  that could not see everything in `scan_unreadable` beside its notes. The page does
+  not show it yet. Installed repositories need no update: the dashboard runs from the package.
 - The dashboard is laid out as a sidebar and views instead of one long page: Needs you, Activity,
   Week, a Repositories list, and per repository four tabs (Pipeline, Agents, Runs and spend,
   Settings). The view is in the address, so a reload or a link keeps it, and the number waiting for

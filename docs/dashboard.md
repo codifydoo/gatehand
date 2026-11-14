@@ -83,6 +83,43 @@ repository, never as zero, "off" or "nothing waits": Needs you says what it coul
 as the digest does. Without the repository's variables (a login with less than write access) or its
 `policy.json`, it does not guess which issue is the inbox.
 
+### Why a read failed
+
+Each failed read also says why, as one cause from a fixed set, so the page can offer the one thing
+that helps instead of Refresh. The server sends it:
+
+- per repository, in `unreadable`: one entry per part whose `gh` read failed (`repository`,
+  `policy.json`, `install.lock.json`, `ledger`, `ledger runs`, `ledger breaker.json`, `variables`,
+  `issues`, `runs`), as `{"part", "cause", "error"}`, where `error` is the same text as that part's
+  line in `errors`. A line in `errors` that is not a failed read (a file that does not parse,
+  Gatehand not installed, no inbox issue, more than 500 open issues) has no entry;
+- on a request that failed as a whole (the repository, its inbox, the merge gate's report, the
+  session), in the 502 answer beside `error`; and a first scan that failed, as `scan_cause` beside
+  `scan_error`;
+- for a scan that could not see everything, in `scan_unreadable` beside `scan_notes` (the session
+  and the answer to "Find repositories"): one `{"cause", "error"}` per note that is a failed read
+  (an organisation's SAML enforcement hiding its repositories, say), where `error` is the note. The
+  notes "stopped after 3000 repositories" and "kept N repositories found by an earlier scan" have
+  none. They are kept with the list in `dashboard.json` until the next scan, so a `resets_at` there
+  may be in the past.
+
+| `cause` | Means | Matched on what `gh` prints |
+|---|---|---|
+| `signed_out` | `gh` has no login, or its token was revoked or expired | exit code 4, `gh auth login`, or `HTTP 401` |
+| `sso` | an organisation requires SAML SSO authorization for your token | `Authorize in your web browser:` (gh prints it when GitHub sends an SSO challenge), or `SAML enforcement` in GitHub's message |
+| `rate_limited` | a primary or secondary rate limit; also `resets_at` | `HTTP 429`, `API rate limit exceeded`, `secondary rate limit` (or its older name, `abuse detection mechanism`), or a GraphQL `RATE_LIMITED` error |
+| `not_found` | not there, or hidden from your login (GitHub answers both alike) | `HTTP 404`, a GraphQL `NOT_FOUND` error, or a repository GitHub returns as null |
+| `no_access` | your login can see it but not read this | `HTTP 403`, or a GraphQL `FORBIDDEN` error, when none of the above matched |
+| `unknown` | anything else: a server error, a timeout, a message not listed here | — |
+
+The first three are tried in that order, then a GraphQL error's type, then `HTTP 404` and
+`HTTP 403`: a SAML or rate-limit refusal, which GitHub also sends as a 403, is never `no_access`.
+`resets_at` is when the exhausted limit (`core` for REST, `graphql` for GraphQL) resets, from
+`GET /rate_limit` (which costs nothing against the limit; read at most every 30 seconds); it is
+`null` when that limit is not exhausted (a secondary limit, whose end GitHub does not say), has
+reset since it was read, or cannot be read. A cause is never guessed: what matches nothing is
+`unknown`.
+
 The inbox requests on a repository's Pipeline come from the agent bot's own request comments and can list a
 request the "Open requests" checklist missed (that list is a best-effort summary; the comments are
 the record). Needs you takes its open requests from the checklist, so the same list counts for every
