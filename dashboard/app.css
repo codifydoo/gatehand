@@ -89,6 +89,7 @@ details.gh > div { font-size: 12.5px; margin-top: 4px; overflow-wrap: anywhere; 
 @media (max-width: 1000px) {
   .needs-split { grid-template-columns: minmax(0, 1fr); }
   .pane { position: static; max-height: none; }
+  .pane.in-place { border-radius: 0 0 10px 10px; border-top: 0; margin-bottom: 8px; box-shadow: inset 3px 0 0 var(--accent); }
 }
 .tabs { display: flex; gap: 18px; flex-wrap: wrap; border-bottom: 1px solid var(--line); margin: 10px 0 4px; }
 .tabs a { padding: 6px 0; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
@@ -140,10 +141,12 @@ div.req details.req, div.req > details { border: 0; padding: 0; margin: 0; }
 .actions.inline { display: inline-flex; margin: 0 0 0 8px; vertical-align: middle; }
 .gate { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
 code { font-size: 12.5px; }
+.side-toggle { display: none; }
 @media (max-width: 760px) {
   .shell { grid-template-columns: 1fr; }
-  .side { position: static; max-height: none; min-height: 0; flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--line); }
-  .side .side-head { width: 100%; }
+  .side { position: static; max-height: none; min-height: 0; border-right: 0; border-bottom: 1px solid var(--line); padding: 6px 8px; }
+  .side-toggle { display: block; text-align: left; width: 100%; border: 0; padding: 4px 8px; }
+  .side:not(.open) > :not(.side-toggle) { display: none; }
 }
 @media (max-width: 640px) {
   .bar, main { padding-left: 16px; padding-right: 16px; }

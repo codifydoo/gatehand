@@ -66,7 +66,9 @@ request still open", until the request is answered.
 
 A row opens beside the list, in the item pane; the address keeps it (`#/needs?open=…`), and with
 none named the top row is opened and put in the address, so a newer row arriving does not take the
-pane from you. A request's pane is the place to answer it:
+pane from you. In a window narrower than about 1000 px the item opens in place, under
+its row, and that row is scrolled to the top (tapping it again closes the item); below about 760 px the sidebar folds into one line
+naming where you are, and ☰ opens it. A request's pane is the place to answer it:
 
 - a header line (repository, request id, kind, role, age), the title, and for a request about an
   issue the stage it is stuck at;

@@ -410,7 +410,13 @@ function renderSide() {
   const item = (route, on, text, badge, badgeKind, cls, title) => routeLink(route,
     { class: `${cls || "side-item"}${on ? " on" : ""}`, "aria-current": on ? "page" : null, title: title || null },
     h("span", { class: "side-label" }, text), badge ? h("span", { class: `badge ${badgeKind || ""}` }, badge) : null);
+  // On a narrow window the sidebar folds into one line naming where you are; ☰ opens it.
+  const here = { needs: ["Needs you", c.needsText], activity: ["Activity", c.runningText], week: ["Week", c.costText],
+    repos: ["Repositories", String(repos.length)], repo: [routeRepo() ? label(routeRepo()) : "Repository", ""] }[r.view] || ["", ""];
+  $("side").classList.toggle("open", !!state.sideOpen);
   replace($("side"),
+    h("button", { type: "button", class: "side-toggle quiet", "aria-expanded": state.sideOpen ? "true" : "false",
+      onclick: (e) => { state.sideOpen = !state.sideOpen; $("side").classList.toggle("open", state.sideOpen); e.currentTarget.setAttribute("aria-expanded", String(state.sideOpen)); } }, "☰ ", h("strong", {}, here[0]), here[1] ? ` ${here[1]}` : ""),
     item("/needs", r.view === "needs", "Needs you", c.needsText, c.needs ? "attn" : (c.needsUnknown ? "warn" : "")),
     item("/activity", r.view === "activity", "Activity", c.runningText),
     item("/week", r.view === "week", "Week", c.costText),
@@ -422,6 +428,8 @@ function renderSide() {
     // Already on #/repos the address does not change, so the link goes to the form itself.
     item("/repos", false, `Find · add${ex.length ? ` · ${ex.length} hidden` : ""}`, null, null, "side-foot"));
   $("side").lastChild.addEventListener("click", () => { if (state.route.view === "repos") $("add-repo").focus(); });
+  // Any link in the folded sidebar folds it again, the current view's included (no hashchange then).
+  $("side").onclick = (e) => { if (e.target.closest("a") && state.sideOpen) { state.sideOpen = false; $("side").classList.remove("open"); $("side").firstChild.setAttribute("aria-expanded", "false"); } };
   document.title = c.needsText === "0" ? "Gatehand" : `(${c.needsText}) Gatehand`;
 }
 
@@ -439,7 +447,8 @@ function needRow(r, isNew, on) {
       `${short(r.repo)} · ${KIND_LABEL[r.kind]}${r.at ? ` · ${ago(r.at)}` : ""}`, isNew ? h("span", { class: "new" }, "NEW") : null),
     h("div", { class: "ltitle" }, h("strong", {}, r.title), r.text ? ` ${r.text}` : ""),
     h("div", { class: "lhint" }, r.hint)];
-  return routeLink(needsRoute(state.route.kind, r.key), { class: `lrow${on ? " on" : ""}`, title: r.repo,
+  // On a narrow window the open row, tapped again, closes its item.
+  return routeLink(needsRoute(state.route.kind, on && NARROW.matches ? "-" : r.key), { class: `lrow${on ? " on" : ""}`, title: r.repo,
     "aria-current": on ? "true" : null }, kids);
 }
 
@@ -469,7 +478,8 @@ function needsView() {
   // item). Rows in a folded group come after the others, as they are shown.
   const shownRows = kind ? of(kind) : [...rows.filter((r) => !FOLDED[r.kind]), ...Object.keys(FOLDED).flatMap(of)];
   const want = state.route.open;
-  const sel = want ? shownRows.find((r) => r.key === want) || null : shownRows[0] || null;
+  const closed = want === "-"; // closed by tapping its row on a narrow window
+  const sel = closed ? null : (want ? shownRows.find((r) => r.key === want) || null : shownRows[0] || null);
   // The top row, once open, is pinned in the address: a newer row arriving does not take the pane
   // from under you, and once it is answered the pane says what happened instead of moving on.
   // Only while the address itself still says Needs you with nothing open: a navigation not yet handled wins.
@@ -478,7 +488,12 @@ function needsView() {
     state.route.open = sel.key;
     history.replaceState(null, "", `${location.pathname}#${needsRoute(kind, sel.key)}`);
   }
-  const row = (r) => needRow(r, isNew(r), sel === r);
+  const pane = sel ? itemPane(sel) : (want && !closed ? gonePane(want, c) : null);
+  // A narrow window: the open item expands in place, under its row, as in a mail app; otherwise it
+  // sits beside the list.
+  const narrow = NARROW.matches;
+  const paneBox = (inPlace) => h("section", { class: `pane card${inPlace ? " in-place" : ""}`, id: "pane", "aria-label": "Item" }, pane);
+  const row = (r) => (narrow && sel === r && pane ? [needRow(r, isNew(r), true), paneBox(true)] : needRow(r, isNew(r), sel === r));
   let list;
   if (kind) {
     list = of(kind).map(row);
@@ -494,15 +509,25 @@ function needsView() {
     x.notes.map((n) => h("div", {}, n)),
     routeLink(repoRoute(repo), {}, `Open ${repo}`)));
   const any = rows.length && (!kind || of(kind).length);
-  const pane = sel ? itemPane(sel) : (want ? gonePane(want, c) : null);
+  const aside = pane && !(narrow && sel); // beside the list, or (narrow, the item gone) above it
   return [viewHead("Needs you", ...summary), chips,
-    h("div", { class: `needs-split${pane ? "" : " no-pane"}` },
+    h("div", { class: `needs-split${aside && !narrow ? "" : " no-pane"}` },
+      narrow && aside ? paneBox(false) : null,
       h("div", { class: "needs-list" }, any ? list
         : empty(c.needsLoading && !rows.length ? "Loading…"
           : (kind ? "None of these." : (c.unread.length ? "Nothing that could be read needs you." : "Nothing needs you."))),
       kind ? null : unread),
-      pane ? h("section", { class: "pane card", id: "pane", "aria-label": "Item" }, pane) : null)];
+      aside && !narrow ? paneBox(false) : null)];
 }
+// The width below which the list and the pane do not fit side by side (app.css has the same number).
+const NARROW = window.matchMedia("(max-width: 1000px)");
+NARROW.addEventListener("change", () => {
+  if (state.route.view !== "needs") return;
+  renderView();
+  // The pane moved (beside the list, or under its row): a field you are typing in stays in view.
+  const a = document.activeElement;
+  if (a && $("pane") && $("pane").contains(a)) a.scrollIntoView({ block: "nearest" });
+});
 
 // --- the item pane: the one place to act on a row ------------------------------------------------------
 // Every pane: a header line and the title; then, as its kind has them, a stage track, why it is stuck
@@ -1692,6 +1717,7 @@ async function loadExtras(repo, fresh) {
 function onRoute() {
   const was = state.route.view;
   const wasOpen = state.route.open;
+  state.sideOpen = false; // a link in the folded sidebar was followed: fold it again
   state.route = parseRoute();
   // Another item opened: a confirm left open on the last one closes; what was posted from it stays.
   if (state.route.open !== wasOpen) state.pane = { key: "", confirm: "", text: "", fixer: true, preview: null };
@@ -1702,12 +1728,11 @@ function onRoute() {
   state.selected = repo;
   renderAll();
   if (opened) loadExtras(repo, false);
-  // Opening an item keeps the list where it is; where the pane sits under the list, it is brought into view.
+  // Opening an item keeps the list where it is; on a narrow window, where the item opens under its
+  // row, that row is brought to the top.
   if (state.route.view === "needs" && was === "needs") {
-    const pane = $("pane");
-    if (pane && named && getComputedStyle(pane.parentNode).gridTemplateColumns.split(" ").length < 2) {
-      window.scrollTo(0, pane.getBoundingClientRect().top + window.scrollY - document.querySelector(".bar").offsetHeight - 8);
-    }
+    const on = document.querySelector(".needs-list .lrow.on");
+    if (on && named && NARROW.matches) window.scrollTo(0, on.getBoundingClientRect().top + window.scrollY - document.querySelector(".bar").offsetHeight - 8);
   } else window.scrollTo(0, 0);
 }
 
