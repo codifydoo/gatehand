@@ -62,6 +62,40 @@ repository, open or not: a request the checklist missed is only on the Pipeline 
 breaker was reset with `/resume` while its breaker request stays open still has a row, "breaker
 request still open", until the request is answered.
 
+### The item pane
+
+A row opens beside the list, in the item pane; the address keeps it (`#/needs?open=…`), and with
+none named the top row is opened and put in the address, so a newer row arriving does not take the
+pane from you. A request's pane is the place to answer it:
+
+- a header line (repository, request id, kind, role, age), the title, and for a request about an
+  issue the stage it is stuck at;
+- why it is stuck and what happens next, in the words of the request the agent filed;
+- what the agent wrote, from its request comment, shown as plain text;
+- where an answer must go first, as a link to GitHub: for `blocked`, a comment on the issue itself
+  (the next run reads comments from people with write access, not the inbox); for `failed`, an edit
+  if the issue was unclear; for `untrusted`, re-applying `agent:ready` yourself;
+- the primary action (named for the kind, as in the table below) and Reject…, with the requesting
+  role's runs on the issue and their cost over the last seven days beside them (runs that never
+  reached the agent left out; the cost a floor: a run with no cost recorded adds nothing);
+- the confirm, which opens under the button rather than in a dialog: who it acts as, the exact line
+  posted on the inbox, what the Agent inbox workflow then does, and what to expect (its reply within
+  a minute or two; for a requeue, that a run named for an issue skips the attempt cap, today's runs
+  against the daily cap, and whether the agents are off);
+- the last seven days of ledger rows about the issue and the request itself, as a timeline, and the
+  issue's labels, the inbox and `AGENT_OWNER_LOGIN`, folded.
+
+Where the confirm was, the pane says which of three states it is in: disabled, with the reason (the
+same checks as below); refused, saying nothing was posted and why (the server's own reason, such as
+the request being answered already); or waiting for the Agent inbox workflow, with the line posted
+and a link to it, until its answer arrives. If the dashboard fails after it may have posted, or does
+not answer, the pane says it is not known whether anything was posted. When the answer is in, the row leaves Needs you and the
+pane says what happened. A request whose comment was not read (the inbox could not be read, or it is
+older than the newest 1,000 comments) is not answered from the pane: it links to the inbox.
+
+The other rows (a stopped role, a PR, an issue, to merge, to close) open a pane that says what to do
+and links to the repository tab, or GitHub, where it is done; their own panes come later.
+
 ### Limits and schedules
 
 `/api/repo/<owner>/<name>` also carries the figures the page shows beside an action that spends
@@ -85,7 +119,7 @@ so the agents see exactly what they would see if you had done it on GitHub, and 
 
 | Button | Where | What it does | Who it counts from |
 |---|---|---|---|
-| Approve (named for the request: "Requeue and rerun", "Reset the breaker", "Mark as seen"…), Reject… | each open inbox request | posts `/approve REQ-…` or `/reject REQ-… <reason>` on the inbox issue | `AGENT_OWNER_LOGIN` only |
+| Approve (named for the request: "Requeue and rerun", "Reset the breaker", "Mark as seen"…), Reject… | each open inbox request on the Pipeline tab, and a request row's item pane in Needs you (requests about a PR or a breaker are answered on the Pipeline tab for now) | posts `/approve REQ-…` or `/reject REQ-… <reason>` on the inbox issue | `AGENT_OWNER_LOGIN` only |
 | Rerun coder | blocked issues | posts `/rerun coder #N` | `AGENT_OWNER_LOGIN` only |
 | Pause, Resume | each role, on a repository's Agents tab | posts `/pause <role>` or `/resume <role>` | `AGENT_OWNER_LOGIN` only |
 | Unqueue | the queue | removes `agent:ready` from an issue | people with write access |

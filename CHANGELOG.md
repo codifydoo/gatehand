@@ -14,6 +14,11 @@
   passed the merge gate while auto-merge is a dry run, folded under "to merge", since a person has
   to merge them. A row you have not seen before is marked NEW. Suggested issues are no longer in
   Needs you; they stay on the repository's Pipeline tab.
+- A row of Needs you opens in an item pane beside the list, the top one open on arrival. A request's
+  pane says why it is stuck, shows what the agent wrote, links to the step on GitHub that comes
+  first (such as commenting on the blocked issue), and answers it with a confirm that opens in the
+  pane, naming the exact inbox line and what follows. Disabled, refused (nothing posted) and waiting
+  for the Agent inbox workflow are said in the pane. Other rows' panes link to where they are done.
 - Dashboard: the repository payload carries each role's `maxAttemptsPerIssue`, `maxCiFixes`,
   `breakerThreshold` and `timeoutMinutes` (null when `policy.json` does not set one), and each
   scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
