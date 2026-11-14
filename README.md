@@ -1,3 +1,5 @@
+<img src="site/favicon.svg" alt="" width="72" height="72">
+
 # Gatehand
 
 Formerly `repo-agents`.
