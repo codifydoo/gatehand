@@ -115,8 +115,19 @@ changed after its preview is previewed again before anything is sent. A PR's run
 the last seven days are beside the buttons; Claude review runs are not in the ledger. If labels are
 taken off one by one and a later one is refused, the pane says which were done.
 
-The other rows (an issue, to merge, to close) open a pane that says what to do and links to the
-repository tab, or GitHub, where it is done; their own panes come later.
+A blocked issue with no open request has a pane that says so (it was answered, or never filed), that
+the coder picks only `agent:ready` issues, and offers "Rerun coder" (`/rerun coder #N`) with the issue's
+coder runs and cost beside it, and Hold or Release; Rerun is disabled, with the reason, while the issue
+has an open `untrusted` request, or carries `agent:hold` (a run named for a held issue does not take it).
+If the issue also carries `agent:ready`, the pane says the coder may take it on its next scheduled run.
+The server refuses a second command until the inbox workflow replies; after that, a rerun from a page
+not yet refreshed would be posted again, since a rerun names no request.
+
+The two folded groups open link-only panes, since the page merges nothing and closes nothing. "To
+merge" says the gate found nothing in the way and auto-merge is a dry run, shows the gate's line, and
+links to merge the PR on GitHub or to turn auto-merge on in Settings; Hold, Run review, Run merge gate
+and Request changes… stay available, quieter. "To close" says a merge is not a deploy and links to
+close the issue on GitHub once the fix is live.
 
 ## What you can do from it
 
@@ -126,11 +137,11 @@ so the agents see exactly what they would see if you had done it on GitHub, and 
 | Button | Where | What it does | Who it counts from |
 |---|---|---|---|
 | Approve (named for the request: "Requeue and rerun", "Reset the breaker", "Mark as seen"…), Reject… | each open inbox request on the Pipeline tab, and the item pane of its row in Needs you (a request about a PR is in the PR's pane, a breaker request in the role's) | posts `/approve REQ-…` or `/reject REQ-… <reason>` on the inbox issue | `AGENT_OWNER_LOGIN` only |
-| Rerun coder | blocked issues | posts `/rerun coder #N` | `AGENT_OWNER_LOGIN` only |
+| Rerun coder | blocked issues, on the Pipeline tab and in the issue's pane | posts `/rerun coder #N` | `AGENT_OWNER_LOGIN` only |
 | Pause, Resume | each role, on a repository's Agents tab; Resume also in a stopped role's pane | posts `/pause <role>` or `/resume <role>` | `AGENT_OWNER_LOGIN` only |
 | Unqueue | the queue | removes `agent:ready` from an issue | people with write access |
 | Read and queue on GitHub | candidates | opens the issue; you add `agent:ready` there | people with write access |
-| Hold, Release | issues and agent PRs | adds or removes `agent:hold` | people with write access |
+| Hold, Release | issues and agent PRs, on the Pipeline tab and in their panes | adds or removes `agent:hold` | people with write access |
 | Hand back to the merge gate | agent PRs with `agent:blocked` or `agent:needs-human`, on the Pipeline tab and in the PR's pane | removes those labels, once you have fixed the PR yourself | people with write access |
 | Turn agents on/off, Turn auto-merge on/off | a repository's Settings tab | sets `AGENTS_ENABLED` or `AGENT_AUTO_MERGE` to `true` or `false` | people who may set Actions variables |
 | Start the coder on the next one | the queue | dispatches an auto-pick `agent-coder.yml` run on `policy.runnerRef` | people with write access |

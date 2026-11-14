@@ -69,6 +69,9 @@ details.fold > .lrow { padding-left: 24px; }
 .step > div { flex: 1; min-width: 0; }
 .step .num { flex: none; width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line); font-size: 12px; text-align: center; line-height: 18px; color: var(--muted); }
 .beside { font-size: 12px; align-self: center; }
+a.cta { display: inline-block; padding: 5px 12px; border-radius: 7px; border: 1px solid var(--accent); background: var(--accent); color: #fff; }
+a.cta:hover { text-decoration: none; filter: brightness(1.08); }
+a.cta.quiet { background: transparent; color: var(--fg); border-color: var(--line); }
 .confirm { border: 1px solid var(--accent); border-radius: 8px; padding: 10px 12px; margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
 .confirm input { width: 100%; min-width: 0; }
 .state { border-radius: 8px; padding: 8px 12px; margin-top: 8px; font-size: 13px; }

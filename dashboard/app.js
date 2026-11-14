@@ -518,12 +518,11 @@ const cap1 = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
 function itemPane(r) {
   if (state.pane.key !== r.key) state.pane = { key: r.key, confirm: "", text: "", fixer: true, preview: null };
-  const pane = { request: requestPane, role: rolePane, pr: prPane }[r.kind] || framePane;
+  const pane = { request: requestPane, role: rolePane, pr: prPane, issue: issuePane, merge: mergePane, close: closePane }[r.kind] || framePane;
   return pane(r);
 }
 
-// Rows whose own pane is not built yet (issue, to merge, to close): what the row says, and where to
-// act on it today.
+// A row of a kind with no pane of its own: what the row says, and where to act on it.
 function framePane(r) {
   const tab = r.route && /\/agents$/.test(r.route) ? "Agents" : "Pipeline";
   return [h("div", { class: "pane-head" }, [r.repo, KIND_LABEL[r.kind], r.at ? ago(r.at) : ""].filter(Boolean).join(" · ")),
@@ -674,7 +673,8 @@ function inboxOff(d, full, msg, needFull) {
   return answerBlock(d);
 }
 
-function paneActions(r, acts, beside) {
+function paneActions(r, acts, beside, opts) {
+  const quiet = !!(opts && opts.quiet); // no primary here: the main step is a link to GitHub
   const p = state.pane;
   // An outcome older than the row's latest change (a PR stuck again since) is old news.
   if (state.paneMsg[r.key] && r.at && Date.parse(r.at) > (state.paneMsg[r.key].at || Infinity) + 60000) delete state.paneMsg[r.key]; // a minute for clocks
@@ -689,7 +689,7 @@ function paneActions(r, acts, beside) {
     if (a.preview && !a.field) fetchPreview(r, a);
   };
   const buttons = h("div", { class: "actions" },
-    acts.map((a, i) => h("button", { type: "button", class: i ? "quiet" : null, disabled: !!a.off || busy, title: a.off || null, onclick: open(a) }, a.text)),
+    acts.map((a, i) => h("button", { type: "button", class: i || quiet ? "quiet" : null, disabled: !!a.off || busy, title: a.off || null, onclick: open(a) }, a.text)),
     beside ? h("span", { class: "muted beside" }, beside) : null);
   const a = acts.find((x) => x.id === p.confirm);
   const first = acts[0];
@@ -697,7 +697,7 @@ function paneActions(r, acts, beside) {
   if (a && (busy || !a.off)) below = paneConfirm(r, a, busy);
   else if (busy) below = h("div", { class: "state waiting" }, "Working…");
   else if (msg) below = paneState(msg);
-  else if (first && first.off) {
+  else if (first && first.off && !quiet) {
     below = h("div", { class: `state ${first.off === POSTED ? "waiting" : "off"}` }, first.off,
       first.off === NOT_READ && d.inbox ? [" ", link(d.inbox.url, `Inbox #${d.inbox.number} ↗`)] : null);
   }
@@ -918,6 +918,49 @@ function rolePane(r) {
         full && full.url ? [" · ", link(full.url, "the request comment ↗")] : null))];
 }
 
+// The quieter actions on an open agent PR: Hold or Release, Run review, Run merge gate, and the
+// verdicts (Approve… only where it can still matter).
+function prSideActs(r, d, p, o) {
+  const n = p.number;
+  const writer = writerBlock(d);
+  const held = p.labels.includes("agent:hold");
+  return [
+    labelAct(r, { id: "hold", number: n, text: held ? "Release" : "Hold", title: `${held ? "Release" : "Hold"} PR #${n}?`, off: labelBlock(d),
+      labels: [[held ? "remove" : "add", "agent:hold"]], postText: held ? "Take agent:hold off" : "Add agent:hold",
+      lines: [["Then", held ? "The fixer and the merge gate pick it up again." : HOLD]], doneText: `Done: ${held ? "took agent:hold off" : "added agent:hold to"} PR #${n}.` }),
+    previewAct2(r, { id: "review", text: "Run review", title: `Run the Claude review of PR #${n}?`, off: writer, payload: () => ({ type: "dispatch", workflow: "review", pr: n }) }),
+    previewAct2(r, { id: "gate", text: "Run merge gate", title: `Run the merge gate on PR #${n}?`, off: writer, payload: () => ({ type: "dispatch", workflow: "merge", pr: n }) }),
+    o.approve ? previewAct2(r, { id: "verdict-approve", text: "Approve…", title: `Approve PR #${n}?`, off: writer,
+      payload: () => ({ type: "review_verdict", pr: n, verdict: "approve" }) }) : null,
+    previewAct2(r, { id: "verdict-changes", text: "Request changes…", title: `Request changes on PR #${n}?`, off: writer,
+      field: { id: "verdict-note", label: "What to change", note: true, max: 2000,
+        placeholder: "What to change (plain text: no HTML, no ``` fences). The fixer works from this." },
+      extra: (pane) => { const box = h("input", { type: "checkbox", onchange: (e) => { pane.fixer = e.target.checked; } }); box.checked = pane.fixer; return h("label", {}, box, " Start the fixer on it"); },
+      payload: (pane) => ({ type: "review_verdict", pr: n, verdict: "request-changes", note: pane.text, start_fixer: pane.fixer }) }),
+  ].filter(Boolean);
+}
+
+// The merge gate's report for a repository, read for a pane if Needs you did not need it; once a pane
+// has shown it, it is read again on each refresh (loadExtras), not only when Needs you needs it.
+function gateFor(repo) {
+  const gate = state.gate[repo];
+  const asked = state.gateAsked.has(repo);
+  state.gateAsked.add(repo);
+  if (!gate && !asked) {
+    api(`/api/repo/${repo}/gate`).then((x) => { state.gate[repo] = x; }, (e) => { state.gate[repo] = { error: e.message }; }).then(renderAll);
+  }
+  return gate;
+}
+const gateWord = (gate, g) => kv("Gate's last word", g ? [g.text, " · ", link(g.url, `${ago(g.at)} ↗`)]
+  : (gate && gate.error ? `could not read the merge gate's report: ${gate.error}` : (gate ? "none in its newest runs" : "reading…")));
+// Runs per role over the last seven days, for the line beside a pane's buttons.
+function runsBeside(rows, prefix, noReviews) {
+  if (!rows) return `${prefix}: the ledger could not be read`;
+  const byRole = {};
+  for (const x of rows) if (x.counted !== false) (byRole[x.role] = byRole[x.role] || []).push(x);
+  return `${prefix}: ${Object.entries(byRole).map(([role, xs]) => `${role} ${xs.length} ${xs.length === 1 ? "run" : "runs"} ${runsCost(xs)}`).join(" · ") || "no runs"}${noReviews ? "" : " · reviews not recorded"}`;
+}
+
 // --- the PR pane: an agent PR held for a person, or with a request about it -----------------------------
 state.gateAsked = new Set();
 function prPane(r) {
@@ -934,14 +977,7 @@ function prPane(r) {
   const kinds = reqs.map(kindOf);
   const stuck = p ? p.labels.filter((l) => STUCK.includes(l)) : [];
   const issueN = (reqs.find((q) => q.issue) || {}).issue || null;
-  // The merge gate's last word on it: read for this pane if Needs you did not need it.
-  const gate = state.gate[repo];
-  // Once a pane has shown it, it is read again on each refresh (loadExtras), not only when Needs you needs it.
-  const asked = state.gateAsked.has(repo);
-  state.gateAsked.add(repo);
-  if (!gate && !asked) {
-    api(`/api/repo/${repo}/gate`).then((x) => { state.gate[repo] = x; }, (e) => { state.gate[repo] = { error: e.message }; }).then(renderAll);
-  }
+  const gate = gateFor(repo);
   const g = gate && gate.prs && gate.prs[String(n)];
   const fixerReq = reqs.find((q) => kindOf(q) === "fixer");
   const why = kinds.includes("merger") ? "The merge gate cannot bring it up to date with its base branch."
@@ -954,7 +990,6 @@ function prPane(r) {
     : (kinds.includes("review") ? "Nothing until the review runs."
       : (stuck.length ? "Nothing until someone fixes it and hands it back. The merge gate then checks it on its next run."
         : "It is back with the merge gate. The request stays open until you mark it as seen."));
-  const writer = writerBlock(d);
   const acts = [];
   if (stuck.length) {
     acts.push(labelAct(r, { id: "handback", number: n, text: "Hand back to the merge gate", title: `Hand PR #${n} back to the merge gate?`, off: labelBlock(d),
@@ -971,27 +1006,10 @@ function prPane(r) {
       off: inboxOff(d, full, msg, true), req: q.id, cmd: () => `/approve ${q.id}`, payload: () => ({ command: "approve", req: q.id }),
       then: effect, expect: "Its reply on the inbox within a minute or two." }));
   }
-  if (p) {
-    const held = p.labels.includes("agent:hold");
-    acts.push(labelAct(r, { id: "hold", number: n, text: held ? "Release" : "Hold", title: `${held ? "Release" : "Hold"} PR #${n}?`, off: labelBlock(d),
-      labels: [[held ? "remove" : "add", "agent:hold"]], postText: held ? "Take agent:hold off" : "Add agent:hold",
-      lines: [["Then", held ? "The fixer and the merge gate pick it up again." : HOLD]], doneText: `Done: ${held ? "took agent:hold off" : "added agent:hold to"} PR #${n}.` }));
-    acts.push(previewAct2(r, { id: "review", text: "Run review", title: `Run the Claude review of PR #${n}?`, off: writer, payload: () => ({ type: "dispatch", workflow: "review", pr: n }) }));
-    acts.push(previewAct2(r, { id: "gate", text: "Run merge gate", title: `Run the merge gate on PR #${n}?`, off: writer, payload: () => ({ type: "dispatch", workflow: "merge", pr: n }) }));
-    acts.push(previewAct2(r, { id: "verdict-approve", text: "Approve…", title: `Approve PR #${n}?`, off: writer,
-      payload: () => ({ type: "review_verdict", pr: n, verdict: "approve" }) }));
-    acts.push(previewAct2(r, { id: "verdict-changes", text: "Request changes…", title: `Request changes on PR #${n}?`, off: writer,
-      field: { id: "verdict-note", label: "What to change", note: true, max: 2000,
-        placeholder: "What to change (plain text: no HTML, no ``` fences). The fixer works from this." },
-      extra: (pane) => { const box = h("input", { type: "checkbox", onchange: (e) => { pane.fixer = e.target.checked; } }); box.checked = pane.fixer; return h("label", {}, box, " Start the fixer on it"); },
-      payload: (pane) => ({ type: "review_verdict", pr: n, verdict: "request-changes", note: pane.text, start_fixer: pane.fixer }) }));
-  }
+  if (p) acts.push(...prSideActs(r, d, p, { approve: true }));
   // Ledger rows about the PR, and the coder's on the issue it is for.
   const rows = d.runs ? d.runs.filter((x) => x.pr === n || (issueN && x.issue === issueN && x.role === "coder")) : null;
-  const byRole = {};
-  for (const x of rows || []) if (x.counted !== false) (byRole[x.role] = byRole[x.role] || []).push(x);
-  const beside = rows ? `Last 7 days: ${Object.entries(byRole).map(([role, xs]) => `${role} ${xs.length} ${xs.length === 1 ? "run" : "runs"} ${runsCost(xs)}`).join(" · ") || "no runs"} · reviews not recorded`
-    : "Last 7 days: the ledger could not be read";
+  const beside = runsBeside(rows, "Last 7 days");
   const stage = missing ? null : kinds.includes("merger") ? track(3, "Merge gate · can't update") : (kinds.includes("review") ? track(2, "In review · no review") : track(2, "In review · held"));
   const fulls = reqs.map(fullOf).filter(Boolean);
 
@@ -1002,8 +1020,7 @@ function prPane(r) {
     stage,
     kv("Why it's stuck", why),
     kv("What happens next", next),
-    kv("Gate's last word", g ? [g.text, " · ", link(g.url, `${ago(g.at)} ↗`)]
-      : (gate && gate.error ? `could not read the merge gate's report: ${gate.error}` : (gate ? "none in its newest runs" : "reading…"))),
+    gateWord(gate, g),
     fulls.length ? h("div", { class: "said" }, h("div", { class: "muted" }, "What the agent wrote (plain text from GitHub)"),
       fulls.map((f) => h("pre", { class: "body" }, f.body))) : null,
     stuck.length && p ? step("1", h("strong", {}, kinds.includes("merger") ? "Merge its base branch into it yourself. " : "Fix the PR yourself. "),
@@ -1016,6 +1033,100 @@ function prPane(r) {
     h("details", fold("gh"), h("summary", {}, "GitHub detail"),
       h("div", {}, p ? [`labels: ${p.labels.join(", ") || "none"} · `, link(p.url, `PR #${n}`), " · "] : "",
         d.inbox ? link(d.inbox.url, `inbox #${d.inbox.number}`) : "no inbox"))];
+}
+
+// --- the issue pane: a blocked issue with no open request -----------------------------------------------
+function issuePane(r) {
+  const repo = r.repo;
+  const d = state.repos[repo];
+  const n = r.issue;
+  const issue = Object.values(d.issues || {}).flat().find((i) => i && i.number === n) || null;
+  const got = state.inbox[repo];
+  // An `untrusted` request the checklist missed: /rerun re-labels as the bot, which vouches for
+  // nothing, so the run would be refused again (as rerunBtn says on the Pipeline tab).
+  const untrusted = got && got.requests && got.requests.some((x) => x.kind === "untrusted" && !x.answered && x.issue === n);
+  const s = d.stats && d.stats.coder;
+  const expect = ["Its reply on the inbox within a minute or two."];
+  if (s) expect.push(s.cap === null || s.cap === undefined ? `${s.today} coder runs today.` : `Today ${s.today} of ${s.cap} coder runs are used.`);
+  if (d.vars && d.vars.AGENTS_ENABLED !== "true") expect.push("The agents are off in this repository, so the run does not start until they are on.");
+  const acts = [
+    inboxAct(r, { id: "rerun", text: "Rerun coder", title: `Rerun the coder on #${n}?`,
+      off: issue && issue.labels.includes("agent:hold")
+        ? `#${n} carries agent:hold: Release it first. A run named for it would not take a held issue.`
+        : untrusted ? `#${n}'s text was changed by someone without write access: read it on GitHub and re-apply agent:ready there, then Acknowledge its untrusted request; a rerun before that would be refused.`
+        : inboxOff(d, null, state.paneMsg[r.key], false),
+      cmd: () => `/rerun coder #${n}`, payload: () => ({ command: "rerun", issue: n }),
+      then: `#${n} goes back in the queue (agent:blocked and agent:needs-human come off) and the coder starts on it`, expect: expect.join(" ") }),
+  ];
+  if (issue) {
+    const held = issue.labels.includes("agent:hold");
+    acts.push(labelAct(r, { id: "hold", number: n, text: held ? "Release" : "Hold", title: `${held ? "Release" : "Hold"} #${n}?`, off: labelBlock(d),
+      labels: [[held ? "remove" : "add", "agent:hold"]], postText: held ? "Take agent:hold off" : "Add agent:hold",
+      lines: [["Then", held ? "The agents may pick it up again." : HOLD]], doneText: `Done: ${held ? "took agent:hold off" : "added agent:hold to"} #${n}.` }));
+  }
+  const rows = d.runs ? d.runs.filter((x) => x.issue === n) : null;
+  const coder = (rows || []).filter((x) => x.role === "coder" && x.counted !== false);
+  const beside = rows ? `Last 7 days on #${n}: ${coder.length} coder ${coder.length === 1 ? "run" : "runs"} · ${runsCost(coder)}` : `Last 7 days on #${n}: the ledger could not be read`;
+  return [
+    h("div", { class: "pane-head" }, [repo, `Issue #${n}`, "blocked", r.at ? ago(r.at) : ""].filter(Boolean).join(" · ")),
+    h("h2", {}, r.title, r.text ? h("span", { class: "muted" }, ` ${r.text}`) : null),
+    track(1, "Coder · blocked"),
+    kv("Why it's stuck", [issue ? `It carries ${issue.labels.filter((l) => STUCK.includes(l)).join(" and ") || "a blocking label"}` : "It is blocked",
+      d.inbox_state === "unknown" || !d.inbox
+        ? ". Which issue is the inbox could not be told, so it is not known whether a request about it is open."
+        : ", and no inbox request about it is open: it was answered, or never filed."]),
+    kv("What happens next", issue && issue.labels.includes("agent:ready")
+      ? "It also carries agent:ready, so the coder may take it on its next scheduled run (the lock then takes agent:blocked off)."
+      : (issue && issue.labels.includes("agent:hold") ? "Nothing while it carries agent:hold: the agents leave it alone."
+        : "Nothing. The coder picks only issues labelled agent:ready, and this one is not. It moves when you rerun it, or when it is queued again on GitHub.")),
+    step(null, paneActions(r, acts, beside), h("p", {}, issue ? link(issue.url, `Open #${n} on GitHub ↗`) : null)),
+    timeline(`#${n}`, (rows || []).map(runEvent)),
+    h("details", fold("gh"), h("summary", {}, "GitHub detail"),
+      h("div", {}, issue ? `labels: ${issue.labels.join(", ") || "none"} · ` : "", d.inbox ? link(d.inbox.url, `inbox #${d.inbox.number}`) : "no inbox"))];
+}
+
+// --- the link-only panes: to merge, to close. The page merges nothing and closes nothing. ----------------
+function mergePane(r) {
+  const repo = r.repo;
+  const d = state.repos[repo];
+  const n = r.pr;
+  const p = (d.prs || []).find((x) => x.number === n) || null;
+  const gate = gateFor(repo);
+  const g = gate && gate.prs && gate.prs[String(n)];
+  const rows = d.runs ? d.runs.filter((x) => x.pr === n) : null;
+  return [
+    h("div", { class: "pane-head" }, [repo, `PR #${n}`, "to merge", r.at ? ago(r.at) : ""].filter(Boolean).join(" · ")),
+    h("h2", {}, r.title, r.text ? h("span", { class: "muted" }, ` ${r.text}`) : null),
+    track(3, "Merge gate · would merge"),
+    kv("Why it's waiting", d.vars ? `The merge gate's last run found nothing in its way. Auto-merge is a dry run in ${short(repo)} (AGENT_AUTO_MERGE is not true), so the gate only says it would merge.`
+      : "The merge gate's last run found nothing in its way and was a dry run; this repository's variables could not be read, so whether auto-merge is on now is not known."),
+    kv("What happens next", "Nothing until a person merges it, or auto-merge is turned on. The gate checks it again on its next run."),
+    gateWord(gate, g),
+    step(null, h("div", { class: "actions" }, h("a", { href: r.href, class: "cta" }, "Merge on GitHub ↗"), " ",
+      routeLink(repoRoute(repo, "settings"), { class: "cta quiet" }, "Turn auto-merge on in Settings →")),
+      h("div", { class: "muted" }, "The page has no merge action.")),
+    p ? h("div", {}, h("div", { class: "muted" }, "Or first"), paneActions(r, prSideActs(r, d, p, { approve: false }), runsBeside(rows, "Last 7 days"), { quiet: true })) : null,
+    timeline(`PR #${n}`, [...(rows || []).map(runEvent), ...(g ? [{ at: g.at, text: `Merge gate: ${g.text}`, url: g.url }] : [])]),
+    h("details", fold("gh"), h("summary", {}, "GitHub detail"),
+      h("div", {}, p ? `labels: ${p.labels.join(", ") || "none"}` : "", d.vars ? ` · AGENT_AUTO_MERGE=${d.vars.AGENT_AUTO_MERGE || "(not set)"}` : ""))];
+}
+
+function closePane(r) {
+  const repo = r.repo;
+  const d = state.repos[repo];
+  const n = r.issue;
+  const issue = (d.issues && d.issues.done_pending_deploy || []).find((i) => i.number === n) || null;
+  const rows = d.runs ? d.runs.filter((x) => x.issue === n) : null;
+  return [
+    h("div", { class: "pane-head" }, [repo, `Issue #${n}`, "merged", "to close once live", r.at ? ago(r.at) : ""].filter(Boolean).join(" · ")),
+    h("h2", {}, r.title, r.text ? h("span", { class: "muted" }, ` ${r.text}`) : null),
+    track(4, "Merged · not closed"),
+    kv("Why it's here", "Its PR merged and it carries agent:done-pending-deploy. A merge is not a deploy: the agents never close an issue; you do, once the fix is live."),
+    kv("What happens next", "Nothing. It stays in this group until it is closed."),
+    step(null, h("div", { class: "actions" }, h("a", { href: r.href, class: "cta" }, "Close on GitHub ↗")),
+      h("div", { class: "muted" }, "The page has no close action."), h("div", { class: "muted beside" }, runsBeside(rows, "Last 7 days", true))),
+    timeline(`#${n}`, (rows || []).map(runEvent)),
+    h("details", fold("gh"), h("summary", {}, "GitHub detail"), h("div", {}, issue ? `labels: ${issue.labels.join(", ") || "none"}` : "not among the open issues just read"))];
 }
 
 function activityView() {

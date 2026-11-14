@@ -23,8 +23,9 @@
   newest runs, why the breaker tripped and what it holds up, and resets it from the pane (Reset the
   breaker for its request, or Resume). The PR's says why it is held and the merge gate's last word,
   links to the PR to fix it, and hands it back from the pane; Hold, Run review, Run merge gate,
-  Approve… and Request changes… confirm there too, with the server's preview. Issue, to merge and to
-  close rows still link to where they are done.
+  Approve… and Request changes… confirm there too, with the server's preview.
+- A blocked issue's pane reruns the coder or holds it from the pane. The "to merge" and "to close"
+  panes link to GitHub to merge or close (the page does neither), and to Settings for auto-merge.
 - Nothing installed into repositories changes: no update is needed.
 
 ## 0.7.0 (2026-11-14)
