@@ -150,8 +150,10 @@ function parseRoute() {
   const p = location.hash.replace(/^#/, "");
   const m = /^\/r\/([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+)(?:\/(pipeline|agents|runs|settings))?$/.exec(p);
   if (m) return { view: "repo", repo: `${m[1]}/${m[2]}`, tab: m[3] || "pipeline" };
-  const v = /^\/(needs|activity|week|repos)$/.exec(p);
-  return { view: v ? v[1] : "needs" };
+  const n = /^\/needs(?:\?kind=(request|role|pr|issue|merge|close))?$/.exec(p);
+  if (n) return { view: "needs", kind: n[1] || "" };
+  const v = /^\/(activity|week|repos)$/.exec(p);
+  return v ? { view: v[1] } : { view: "needs", kind: "" };
 }
 const repoRoute = (repo, tab) => `/r/${repo}${tab && tab !== "pipeline" ? `/${tab}` : ""}`;
 // An in-page link. Its route is built here from fixed names and repository names the server already
@@ -168,21 +170,193 @@ function routeRepo() {
   return state.session.repos.find((r) => r.toLowerCase() === state.route.repo.toLowerCase()) || "";
 }
 
+// --- Needs you: one row per thing you act on ---------------------------------------------------------
+// The counting rule. A row's kind is the pane it will open. A request about a PR (the fixer stopped,
+// the merge gate cannot update it, its review never posted) is that PR's row; a stopped role and its
+// breaker request are one row; a blocked issue with an open request is the request's row. The folded
+// groups count too: "to merge" (passed the gate while auto-merge is a dry run) and "to close" (merged,
+// to close once the fix is live). Suggested issues are not here: queueing one is done on GitHub,
+// next to its text, from the Pipeline tab.
+const CHIPS = [["request", "Requests"], ["role", "Stopped"], ["pr", "PRs"], ["issue", "Issues"], ["merge", "To merge"], ["close", "To close"]];
+const KIND_LABEL = { request: "Request", role: "Role", pr: "PR", issue: "Issue", merge: "To merge", close: "To close" };
+const FOLDED = { merge: (n) => `${n} ${n === 1 ? "PR" : "PRs"} to merge · passed the gate, auto-merge is a dry run`,
+  close: (n) => `${n} merged ${n === 1 ? "issue" : "issues"} to close once live` };
+const KIND_VERB = { blocked: "blocked on", failed: "failed on", protected: "needs protected paths for", untrusted: "stopped: changed text on" };
+const STUCK = ["agent:blocked", "agent:needs-human"];
+const roleName = (r) => (r ? r[0].toUpperCase() + r.slice(1) : "Agent");
+const dryRun = (d) => !(d.vars && d.vars.AGENT_AUTO_MERGE === "true");
+// What else is read for Needs you. The inbox, when its checklist lists open requests: a request's kind
+// is only in its comment. The merge gate's report, when an agent PR could be waiting to be merged by hand.
+const needsInbox = (d) => !!(d.inbox && d.inbox.checklist.length);
+const needsGate = (d) => (d.prs || []).length > 0 && dryRun(d);
+
+function needRows(repo) {
+  const d = state.repos[repo];
+  const out = { rows: [], notes: [], loading: false, unknown: false };
+  if (!d || d.loading) { out.loading = true; return out; }
+  if (d.failed) { out.unknown = true; out.notes.push(`Could not read this repository: ${d.failed}`); return out; }
+  for (const w of d.waiting || []) if (w.kind === "unknown") { out.unknown = true; out.notes.push(w.text); }
+  const issues = d.issues || {};
+  const findIssue = (n) => Object.values(issues).flat().find((i) => i && i.number === n) || null;
+  const add = (r) => out.rows.push(Object.assign({ repo }, r));
+  // The open requests are the inbox checklist's unticked lines, the same list for every repository
+  // whether it is on screen or not; the agents tick a line when its request is answered. A request's
+  // kind and time come from its comment. Until the comments are read the requests wait (loading); if
+  // they cannot be read, or a line's comment is not among the newest 1,000, the kind is told from the
+  // line: the fixer's, merger's and review's start "#<PR>:", a breaker's is "circuit breaker tripped".
+  const lines = needsInbox(d) ? d.inbox.checklist : [];
+  const got = state.inbox[repo];
+  const comments = got && got.requests ? got.requests : null;
+  if (lines.length && !comments) {
+    if (got && got.error) { out.unknown = true; out.notes.push(`Inbox requests: ${got.error}`); }
+    else out.loading = true;
+  }
+  const guess = (l) => (/^#\d+:/.test(l.summary) ? "fixer" : (/^circuit breaker tripped/.test(l.summary) ? "breaker" : ""));
+  const asRequest = (l) => {
+    const c = comments ? comments.find((r) => r.id === l.id) : null;
+    return { id: l.id, role: c ? c.role : l.role, issue: c ? c.issue : l.issue, kind: c ? c.kind : guess(l),
+      created_at: c ? c.created_at : "", summary: l.summary };
+  };
+  const onPr = (r) => (["fixer", "merger", "review"].includes(r.kind) ? /^#(\d+):/.exec(r.summary) : null);
+  // Ticking a line is best effort, so a line whose comment says answered is dropped once that is known.
+  const reqs = out.loading ? [] : lines.filter((l) => !(comments && comments.some((r) => r.id === l.id && r.answered))).map(asRequest);
+  // While loading, a PR a line names waits for its PR row, so it does not show as "to merge" first.
+  const linePr = new Set(out.loading ? lines.map((l) => /^#(\d+):/.exec(l.summary)).filter(Boolean).map((m) => Number(m[1])) : []);
+  const prRows = new Map();
+  const prRow = (n) => {
+    if (!prRows.has(n)) {
+      const p = (d.prs || []).find((x) => x.number === n) || null;
+      prRows.set(n, { n, p, reqs: [], at: p ? p.updated_at || p.created_at || "" : "" });
+    }
+    return prRows.get(n);
+  };
+  const roleReq = {};
+  // An issue an open request is about is that request's row, not a blocked issue of its own; decided
+  // from the lines even while the comments load, so no row shows as one kind and then moves.
+  const issueReq = new Set((out.loading ? lines.map((l) => Object.assign(asRequest(l), { kind: guess(l) })) : reqs)
+    .filter((r) => r.issue && r.kind !== "breaker" && !onPr(r)).map((r) => r.issue));
+  for (const r of reqs) {
+    const pr = onPr(r);
+    if (pr) {
+      const x = prRow(Number(pr[1]));
+      x.reqs.push(r);
+      if ((r.created_at || "") > x.at) x.at = r.created_at;
+      continue;
+    }
+    if (r.kind === "breaker") { roleReq[r.role] = r; continue; } // lines are oldest first: the newest wins
+    const i = r.issue ? findIssue(r.issue) : null;
+    add({ kind: "request", key: `${repo}|req|${r.id}`, at: r.created_at || "", req: r,
+      title: `${roleName(r.role)} ${KIND_VERB[r.kind] || (r.kind ? `${r.kind} request` : "request")}${r.issue ? `${KIND_VERB[r.kind] ? "" : " on"} #${r.issue}` : ""}`,
+      text: i ? i.title : r.summary || r.id,
+      hint: r.kind === "blocked" || r.kind === "failed" ? `Answer on #${r.issue}, then Requeue and rerun` : (KIND_APPROVE[r.kind] || ["Answer it"])[0],
+      route: repoRoute(repo) });
+  }
+
+  // Stopped roles, each with its breaker request when there is one. "Reset the breaker" answers the
+  // request and is on the Pipeline tab; Resume, for a role stopped with no request, is on Agents.
+  const known = !!d.breakers; // breaker.json unread: the role's state is not claimed either way
+  const breakers = d.breakers || {};
+  const roles = new Set([...Object.keys(breakers).filter((r) => breakers[r] && breakers[r].tripped_at), ...Object.keys(roleReq)]);
+  for (const role of roles) {
+    const b = breakers[role] || {};
+    const r = roleReq[role] || null;
+    // /resume resets a breaker without answering its request, so a request can outlive the stop.
+    const stopped = !!b.tripped_at;
+    // The Pipeline tab has "Reset the breaker" only for a request whose comment it read.
+    const viaReq = !!(r && comments && comments.some((c) => c.id === r.id));
+    add({ kind: "role", key: `${repo}|role|${role}|${b.tripped_at || (r && r.id)}`, at: b.tripped_at || (r ? r.created_at : "") || "", req: r,
+      title: stopped ? `${roleName(role)} stopped` : `${roleName(role)}: breaker request ${known ? "still open" : "open"}`,
+      text: stopped ? b.reason || (r ? r.summary : "") : (known ? "the role runs again" : "could not read whether it is stopped"),
+      hint: stopped ? `No ${role} runs until it is reset · ${viaReq ? "Reset the breaker" : "Resume"}`
+        : (viaReq ? "Reset the breaker answers the request" : "Answer it on the inbox issue"),
+      route: viaReq || !stopped ? repoRoute(repo) : repoRoute(repo, "agents") });
+  }
+
+  // Agent PRs held for a person, with any request about them.
+  for (const p of d.prs || []) if (p.labels.some((l) => STUCK.includes(l))) prRow(p.number);
+  for (const x of prRows.values()) {
+    const kinds = x.reqs.map((r) => r.kind);
+    const held = x.p && x.p.labels.some((l) => STUCK.includes(l));
+    add({ kind: "pr", key: `${repo}|pr|${x.n}`, at: x.at, pr: x.n, reqs: x.reqs,
+      title: `PR #${x.n} ${kinds.includes("merger") ? "can't be updated from its base" : (kinds.includes("review") ? "has no Claude review" : (held ? "held for a person" : "needs you"))}`,
+      text: x.p ? x.p.title : x.reqs[0].summary,
+      hint: kinds.includes("merger") ? "Merge the base in yourself, then Hand back"
+        : (kinds.includes("review") ? "Run the review once it can" : "Fix it on GitHub, then Hand back"),
+      route: repoRoute(repo) });
+  }
+
+  // Blocked issues with no open request.
+  for (const i of issues.blocked || []) {
+    if (issueReq.has(i.number)) continue;
+    add({ kind: "issue", key: `${repo}|issue|${i.number}`, at: i.updated_at || "", issue: i.number,
+      title: `#${i.number} blocked`, text: i.title, hint: "No open request · Rerun coder", route: repoRoute(repo) });
+  }
+
+  // To merge: the merge gate's last word on a PR nobody holds is "would merge" (a dry run). A PR put on
+  // hold or being fixed since keeps that line until the gate runs again, so it is left out.
+  const gate = state.gate[repo];
+  if (needsGate(d)) {
+    if (gate && gate.error) { out.unknown = true; out.notes.push(`Merge gate report: ${gate.error}`); }
+    else if (!gate) out.loading = true;
+    else {
+      for (const p of d.prs) {
+        const g = gate.prs && gate.prs[String(p.number)];
+        if (prRows.has(p.number) || linePr.has(p.number) || !g || !/^would merge /.test(g.text)
+          || p.labels.some((l) => l === "agent:hold" || l === "agent:fixing")) continue;
+        add({ kind: "merge", key: `${repo}|merge|${p.number}|${g.text.split(" ")[2] || ""}`, at: g.at || "", pr: p.number,
+          title: `PR #${p.number} passed the gate`, text: p.title, hint: "Merge it on GitHub, or turn auto-merge on in Settings", href: p.url });
+      }
+    }
+  }
+
+  // To close: merged, closed by a person once the fix is live.
+  for (const i of issues.done_pending_deploy || []) {
+    add({ kind: "close", key: `${repo}|close|${i.number}`, at: i.updated_at || "", issue: i.number,
+      title: `#${i.number} merged`, text: i.title, hint: "Close it on GitHub once the fix is live", href: i.url });
+  }
+  return out;
+}
+// One repository's Needs you count, as text: "n", "n+" (still loading or partly unread), "?" or "".
+function needText(x) {
+  const n = x.rows.length;
+  if (x.loading && !n) return "…";
+  return n ? `${n}${x.loading || x.unknown ? "+" : ""}` : (x.unknown ? "?" : "");
+}
+
+// NEW: what was not on Needs you the last time you looked at it. Kept in this browser for this
+// address (the dashboard's port), so a dashboard started on another port starts over.
+const SEEN_KEY = "gatehand-seen";
+function loadSeen() {
+  try { return JSON.parse(localStorage.getItem(SEEN_KEY) || "{}") || {}; } catch (_) { return {}; }
+}
+function rememberSeen(rows) {
+  try {
+    const seen = loadSeen();
+    const now = Date.now();
+    for (const r of rows) seen[r.key] = now;
+    for (const [k, t] of Object.entries(seen)) if (now - t > 30 * 864e5) delete seen[k]; // not seen for 30 days
+    localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
+  } catch (_) { /* no storage: everything stays NEW */ }
+}
+function lookAgain() { state.seenBefore = new Set(Object.keys(loadSeen())); }
+
 // --- counts: shown once, in the sidebar and the tab title --------------------------------------------
 // A repository still loading, or a part that could not be read, makes a count "n+" (at least n), or
 // "?" when nothing else is known: never a clean number that leaves something out.
 function counts() {
   const repos = state.session ? state.session.repos : [];
-  const c = { needs: 0, needsRepos: 0, needsUnknown: false, unread: [], loading: false,
+  const c = { needs: 0, needsRepos: 0, needsUnknown: false, needsLoading: false, unread: [], loading: false,
     running: 0, runningUnknown: false, cost: 0, costSeen: false, costFloor: false };
   for (const repo of repos) {
+    const x = needRows(repo);
+    c.needs += x.rows.length;
+    if (x.rows.length) c.needsRepos += 1;
+    if (x.loading) c.needsLoading = true;
+    if (x.unknown) { c.needsUnknown = true; c.unread.push(repo); }
     const d = state.repos[repo];
     if (!d || d.loading) { c.loading = true; continue; }
-    if (d.failed) { c.unread.push(repo); c.needsUnknown = c.runningUnknown = c.costFloor = true; continue; }
+    if (d.failed) { c.runningUnknown = c.costFloor = true; continue; }
     const t = totals(d);
-    c.needs += t.waiting;
-    if (t.waiting) c.needsRepos += 1;
-    if (t.unknown.has("waiting")) { c.needsUnknown = true; c.unread.push(repo); }
     c.running += t.active;
     if (t.unknown.has("active")) c.runningUnknown = true;
     if (d.stats) {
@@ -191,22 +365,19 @@ function counts() {
       if ((d.runs || []).some((r) => typeof r.cost_usd !== "number")) c.costFloor = true;
     } else c.costFloor = true;
   }
-  const n = (v, unknown) => (unknown && !v && !c.loading ? "?" : `${v}${c.loading || unknown ? "+" : ""}`);
-  c.needsText = n(c.needs, c.needsUnknown);
-  c.runningText = c.loading || c.running || c.runningUnknown ? `${n(c.running, c.runningUnknown)} running` : "none running";
+  const n = (v, unknown, loading) => (unknown && !v && !loading ? "?" : `${v}${loading || unknown ? "+" : ""}`);
+  c.needsText = n(c.needs, c.needsUnknown, c.needsLoading);
+  c.runningText = c.loading || c.running || c.runningUnknown ? `${n(c.running, c.runningUnknown, c.loading)} running` : "none running";
   // A floor: runs with no cost recorded count for nothing, and Claude review runs are not in the ledger.
   c.costText = c.costSeen || !repos.length ? `${usd(c.cost)}${c.costFloor || c.loading ? "+" : ""}` : (c.loading ? "…" : "?");
   return c;
 }
-function repoBadge(d) {
-  if (!d || d.loading) return ["…", ""];
-  if (d.failed) return ["?", "warn"];
-  const t = totals(d);
-  const n = t.waiting;
-  const unknown = t.unknown.has("waiting");
-  const text = n ? `${n}${unknown ? "+" : ""}` : (unknown ? "?" : "");
-  if (d.breakers && Object.values(d.breakers).some((b) => b && b.tripped_at)) return [text ? `stopped · ${text}` : "stopped", "bad"];
-  return [text, unknown ? "warn" : ""];
+function repoBadge(repo) {
+  const d = state.repos[repo];
+  const x = needRows(repo);
+  const text = needText(x);
+  if (d && d.breakers && Object.values(d.breakers).some((b) => b && b.tripped_at)) return [text ? `stopped · ${text}` : "stopped", "bad"];
+  return [text, x.unknown ? "warn" : ""];
 }
 
 // --- rendering ---------------------------------------------------------------------------------------
@@ -226,7 +397,7 @@ function renderSide() {
     item("/week", r.view === "week", "Week", c.costText),
     item("/repos", r.view === "repos", `Repositories · ${repos.length}`, null, null, "side-head"),
     repos.map((repo) => {
-      const [badge, kind] = repoBadge(state.repos[repo]);
+      const [badge, kind] = repoBadge(repo);
       return item(repoRoute(repo), r.view === "repo" && repo === routeRepo(), label(repo), badge, kind, "side-item repo", repo);
     }),
     // Already on #/repos the address does not change, so the link goes to the form itself.
@@ -242,33 +413,59 @@ function repoHeading(repo) {
   return h("h3", {}, routeLink(repoRoute(repo), {}, repo));
 }
 
+// A row of Needs you. Until the item pane exists it opens the repository tab with the row's buttons;
+// a row with nothing to do on the page (to merge, to close) opens it on GitHub.
+function needRow(r, isNew) {
+  const kids = [
+    h("div", { class: "lmeta" }, h("span", { class: `dot${isNew ? "" : " old"}`, "aria-hidden": "true" }),
+      `${short(r.repo)} · ${KIND_LABEL[r.kind]}${r.at ? ` · ${ago(r.at)}` : ""}`, isNew ? h("span", { class: "new" }, "NEW") : null),
+    h("div", { class: "ltitle" }, h("strong", {}, r.title), r.text ? ` ${r.text}` : ""),
+    h("div", { class: "lhint" }, r.hint)];
+  return r.route ? routeLink(r.route, { class: "lrow", title: r.repo }, kids) : h("a", { href: r.href, class: "lrow", title: r.repo }, kids);
+}
+
 function needsView() {
+  const repos = state.session ? state.session.repos : [];
+  const per = repos.map((repo) => [repo, needRows(repo)]);
+  const rows = per.flatMap(([, x]) => x.rows).sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  const isNew = (r) => !state.seenBefore.has(r.key);
   const c = counts();
-  const blocks = [];
-  for (const repo of state.session ? state.session.repos : []) {
-    const d = state.repos[repo];
-    if (d && d.failed) {
-      blocks.push(h("div", { class: "group" }, repoHeading(repo),
-        h("ul", { class: "items" }, h("li", {}, pill("unknown", "warn"), ` Could not read this repository: ${d.failed}`))));
-      continue;
-    }
-    if (!d || d.loading || !(d.waiting || []).length) continue;
-    // Merged issues to close once live are bookkeeping, not decisions: one folded line for all of them.
-    const line = (w) => h("li", { class: `w-${w.kind}` },
-      pill(w.kind, w.kind === "request" || w.kind === "breaker" ? "attn" : (w.kind === "unknown" ? "warn" : "")), " ", link(w.url, w.text));
-    const now = d.waiting.filter((w) => w.kind !== "deploy");
-    const later = d.waiting.filter((w) => w.kind === "deploy");
-    blocks.push(h("div", { class: "group" }, repoHeading(repo),
-      h("ul", { class: "items" }, now.map(line),
-        later.length ? h("li", {}, h("details", {}, h("summary", {}, pill("deploy"), ` ${later.length} merged issue(s) to close once the fix is live`),
-          h("ul", { class: "items" }, later.map(line)))) : null)));
-  }
+  const kind = state.route.kind || "";
+  const of = (k) => rows.filter((r) => r.kind === k);
+  rememberSeen(kind ? of(kind) : rows); // only what is on screen counts as looked at
+  // A kind's count, like the total, is a floor while something is loading or could not be read.
+  const more = c.needsLoading || c.needsUnknown ? "+" : "";
+  const chip = (k, label, count) => routeLink(k ? `/needs?kind=${k}` : "/needs",
+    { class: `chip${kind === k ? " on" : ""}`, "aria-current": kind === k ? "page" : null }, `${label} ${count}`);
+  const chips = h("div", { class: "chips" }, chip("", "All", c.needsText),
+    CHIPS.filter(([k]) => of(k).length || kind === k).map(([k, label]) => chip(k, label, `${of(k).length}${more}`)));
+  const newCount = rows.filter(isNew).length;
   const summary = [
-    c.loading ? `${c.needs} so far, still loading` : `${c.needs} in ${c.needsRepos} ${c.needsRepos === 1 ? "repository" : "repositories"}`,
-    c.unread.length ? ` · could not read all of ${c.unread.join(", ")}` : ""];
-  return [viewHead("Needs you", ...summary),
-    blocks.length ? blocks
-      : empty(c.loading ? "Loading…" : (c.unread.length ? "Nothing that could be read needs you." : "Nothing. Every agent is either working or idle."))];
+    `${c.needsText} in ${c.needsRepos} ${c.needsRepos === 1 ? "repository" : "repositories"}`,
+    newCount ? ` · ${newCount} new` : "",
+    c.needsLoading ? " · still loading" : "",
+    c.unread.length ? ` · could not read all of ${c.unread.map(short).join(", ")}` : ""];
+
+  let list;
+  if (kind) {
+    list = of(kind).map((r) => needRow(r, isNew(r)));
+  } else {
+    list = [rows.filter((r) => !FOLDED[r.kind]).map((r) => needRow(r, isNew(r))),
+      Object.keys(FOLDED).map((k) => (of(k).length ? h("details", { class: "fold" },
+        h("summary", {}, FOLDED[k](of(k).length), of(k).some(isNew) ? h("span", { class: "new" }, "NEW") : null),
+        of(k).map((r) => needRow(r, isNew(r)))) : null))];
+  }
+  // What could not be read: named, never counted.
+  const unread = per.filter(([, x]) => x.notes.length).map(([repo, x]) => h("div", { class: "lrow unread" },
+    h("div", { class: "lmeta" }, `${short(repo)} · could not read · not counted`),
+    x.notes.map((n) => h("div", {}, n)),
+    routeLink(repoRoute(repo), {}, `Open ${repo}`)));
+  const any = rows.length && (!kind || of(kind).length);
+  return [viewHead("Needs you", ...summary), chips,
+    h("div", { class: "needs-list" }, any ? list
+      : empty(c.needsLoading && !rows.length ? "Loading…"
+        : (kind ? "None of these." : (c.unread.length ? "Nothing that could be read needs you." : "Nothing needs you."))),
+    kind ? null : unread)];
 }
 
 function activityView() {
@@ -316,7 +513,7 @@ function reposView() {
       h("td", {}, d.version || "?"),
       h("td", {}, onOff(d.vars, "AGENTS_ENABLED")),
       h("td", {}, d.vars ? (d.vars.AGENT_AUTO_MERGE === "true" ? pill("live", "ok") : pill("dry run", "off")) : pill("unknown", "warn")),
-      h("td", { class: "n" }, t.waiting || t.unknown.has("waiting") ? pill(shown(t, "waiting"), t.unknown.has("waiting") ? "warn" : "attn") : "0"),
+      h("td", { class: "n" }, ((x, text) => (text && text !== "…" ? pill(text, x.unknown ? "warn" : "attn") : (text || "0")))(needRows(repo), needText(needRows(repo)))),
       h("td", { class: "n" }, d.prs ? t.prs : "?"),
       h("td", { class: "n" }, d.issues ? t.queue : "?"),
       h("td", { class: "n" }, d.active_runs ? t.active : "?"),
@@ -423,7 +620,7 @@ async function previewAct(repo, payload, btn) {
 async function loadInbox(repo, fresh) {
   try { state.inbox[repo] = await api(`/api/repo/${repo}/inbox${fresh ? "?fresh=1" : ""}`); }
   catch (e) { state.inbox[repo] = { error: e.message }; }
-  if (state.selected === repo) renderView();
+  renderAll(); // the requests change Needs you and the sidebar counts, not only this repository's page
 }
 
 // After any inbox command: re-read the inbox every 10 s for two minutes, until the bot has replied
@@ -795,28 +992,31 @@ async function loadRepo(repo, fresh) {
     state.repos[repo] = { failed: e.message };
   }
   renderAll();
-  if (repo === state.selected) loadExtras(repo, fresh);
+  loadExtras(repo, fresh);
 }
 
+// The inbox and the merge gate's report: always for the repository on screen, and for any other when
+// Needs you needs them (needsInbox, needsGate).
 async function loadExtras(repo, fresh) {
   const d = state.repos[repo];
-  if (!d || d.failed) return;
+  if (!d || d.failed || d.loading) return;
   const q = fresh ? "?fresh=1" : "";
+  const open = repo === state.selected;
+  const part = (name) => api(`/api/repo/${repo}/${name}${q}`)
+    .then((r) => { state[name][repo] = r; }, (e) => { state[name][repo] = { error: e.message }; })
+    .then(renderAll);
   const jobs = [];
-  if (d.inbox) {
-    jobs.push(api(`/api/repo/${repo}/inbox${q}`).then((r) => { state.inbox[repo] = r; }, (e) => { state.inbox[repo] = { error: e.message }; }));
-  }
-  if ((d.prs || []).length) {
-    jobs.push(api(`/api/repo/${repo}/gate${q}`).then((r) => { state.gate[repo] = r; }, (e) => { state.gate[repo] = { error: e.message }; }));
-  }
+  if (d.inbox && (open || needsInbox(d))) jobs.push(part("inbox"));
+  if ((d.prs || []).length && (open || needsGate(d))) jobs.push(part("gate"));
   await Promise.all(jobs);
-  if (state.selected === repo) renderView();
 }
 
 // The address changed (a link, Back, a typed URL): show that view, and read the inbox and the merge
 // gate of a repository when it is the one opened.
 function onRoute() {
+  const was = state.route.view;
   state.route = parseRoute();
+  if (state.route.view === "needs" && was !== "needs") lookAgain();
   const repo = routeRepo();
   const opened = repo && repo !== state.selected;
   state.selected = repo;
@@ -872,4 +1072,6 @@ $("add").addEventListener("submit", async (e) => {
 setInterval(() => { if (document.visibilityState === "visible") refresh(false); }, 5 * 60 * 1000);
 // The server stops after a while with no page open; a background tab still counts as open.
 setInterval(() => { if (state.token) api("/api/ping").catch(() => {}); }, 60 * 1000);
+// What Needs you showed when you last looked, read now that everything above is defined.
+lookAgain();
 refresh(false);

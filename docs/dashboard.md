@@ -24,7 +24,7 @@ number of things waiting for you is also in the tab's title.
 
 | Where | What | Read from |
 |---|---|---|
-| Needs you | unticked inbox requests, stopped roles, blocked issues and PRs, `agent:candidate` issues, merged issues to close once live | the inbox issue's "Open requests" list, `state/breaker.json` on the ledger branch, labels; the same list the weekly digest posts |
+| Needs you | one row per thing you act on, newest first: open inbox requests, stopped roles, agent PRs held for a person, blocked issues with no open request; folded below them, agent PRs that passed the merge gate while auto-merge is a dry run ("to merge"), and merged issues to close once live ("to close") | the inbox issue's "Open requests" list and, when it lists any, the request comments themselves (only they say what kind a request is, and whether it was answered; when they cannot be read, or a line's comment is older than the newest 1,000, the kind is told from the line's text); `state/breaker.json` on the ledger branch; labels; and, for a repository in dry run with agent PRs, the merge gate's report |
 | Activity | Gatehand's runs that are running or waiting to start, in every repository | the running and queued Actions runs of Gatehand's nine workflows |
 | Week | each repository's runs over seven days per role: outcomes, runs today against `runsPerDay`, turns, time, cost | the ledger |
 | Repositories | version, `AGENTS_ENABLED`, `AGENT_AUTO_MERGE`, runs today against each role's `runsPerDay`, seven-day cost, breakers, health | `install.lock.json`, the repository's Actions variables, the ledger, the runner ref's copy of `agent-coder.yml` against the default branch's |
@@ -33,8 +33,20 @@ number of things waiting for you is also in the tab's title.
 | A repository, Runs and spend | runs per role over seven days, ledger rows, recent finished runs | the ledger, Actions runs |
 | A repository, Settings | the two switches, who may answer, the inbox, version, whether the runner ref matches the default branch | the repository's Actions variables, `install.lock.json`, `policy.json` |
 
-In the sidebar and the tab's title, a count that leaves out a part it could not read, or a repository
-still loading, shows as "n+" (at least n), or "?" when nothing else is known.
+Needs you counts the way it lists: a request about an agent PR (the fixer stopped, the merge gate
+cannot update it, its review never posted) is that PR's row; a stopped role and its breaker request
+are one row; a blocked issue with an open request is the request's row. The folded groups count. The
+sidebar, the tab's title and "All" are the same number, and the chips above the list (Requests,
+Stopped, PRs, Issues, To merge, To close) add up to it. Suggested (`agent:candidate`) issues are on
+a repository's Pipeline tab, not here: queueing one is done on GitHub, next to its text.
+
+A row marked NEW was not there the last time you looked at Needs you. That is remembered by this
+browser for this address, so a dashboard started on another port (the default picks a free one)
+marks everything NEW once; `--port` keeps it.
+
+In the sidebar, the tab's title and the chips, a count that leaves out a part it could not read, or a
+repository still loading, shows as "n+" (at least n), or "?" when nothing else is known. What could
+not be read is listed under the rows, not counted.
 
 Numbers are computed the way the agents compute them (`agent-digest.sh`, `agent-state.sh`): a ledger
 line that does not parse costs that line only; a run with `counted: false` never reached the model
@@ -45,7 +57,10 @@ as the digest does. Without the repository's variables (a login with less than w
 
 The inbox requests on a repository's Pipeline come from the agent bot's own request comments and can list a
 request the "Open requests" checklist missed (that list is a best-effort summary; the comments are
-the record).
+the record). Needs you takes its open requests from the checklist, so the same list counts for every
+repository, open or not: a request the checklist missed is only on the Pipeline tab. A role whose
+breaker was reset with `/resume` while its breaker request stays open still has a row, "breaker
+request still open", until the request is answered.
 
 ## What you can do from it
 
