@@ -2,7 +2,7 @@
 
 # Gatehand
 
-Formerly `repo-agents`.
+Formerly `repo-agents`. Project site: <https://codifydoo.github.io/gatehand/>
 
 Unattended Claude coding agents for a GitHub repository, as a Claude Code plugin that installs
 plain GitHub Actions workflows into your repo:
