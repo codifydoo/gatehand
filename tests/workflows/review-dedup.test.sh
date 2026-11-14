@@ -122,12 +122,20 @@ gate_after() { # <file> <anchor-regex>
     found && /^      - / { exit }
   ' "$1"
 }
-gate_review="$(gate_after "${WORKFLOW}" '^        id: claude-review$')"
+# Since #1147 the de-dup gate sits on the probe, the first step of the review proper; the review
+# step runs only when the probe says it can be posted, so it inherits the gate.
+gate_review="$(gate_after "${WORKFLOW}" '^        id: probe$')"
+gate_model="$(gate_after "${WORKFLOW}" '^        id: claude-review$')"
+if [[ "${gate_model}" == "steps.probe.outputs.valid == 'true'" ]]; then
+  t_pass "the review step runs only after the probe, so it inherits the probe's gate"
+else
+  t_fail "the review step's if: is '${gate_model}', not the probe's verdict"
+fi
 gate_assert="$(gate_after "${WORKFLOW}" '^      - name: assert the review actually posted a comment$')"
 if [[ -n "${gate_review}" && "${gate_review}" == "${gate_assert}" ]]; then
-  t_pass "the review and assert steps share one identical gate"
+  t_pass "the probe and assert steps share one identical gate"
 else
-  t_fail "review gate and assert gate differ — review:'${gate_review}' assert:'${gate_assert}'"
+  t_fail "probe gate and assert gate differ — probe:'${gate_review}' assert:'${gate_assert}'"
 fi
 if [[ "${gate_review}" == *"workflow_dispatch"* && "${gate_review}" == *"already_reviewed"* ]]; then
   t_pass "the gate skips on a prior review but always honours an explicit dispatch"
