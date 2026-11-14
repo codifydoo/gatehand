@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Gatehand dashboard</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header class="bar">
+  <h1>Gatehand</h1>
+  <span id="viewer" class="muted"></span>
+  <span class="spacer"></span>
+  <span id="updated" class="muted"></span>
+  <span id="rate" class="muted"></span>
+  <button id="refresh" type="button">Refresh</button>
+  <button id="rescan" type="button" class="quiet">Find repositories</button>
+</header>
+<main>
+  <div id="notice" class="notice" hidden></div>
+  <section id="totals" class="tiles" aria-label="Totals"></section>
+
+  <section class="card">
+    <h2>Waiting for you</h2>
+    <div id="waiting"><p class="muted">Loading…</p></div>
+  </section>
+
+  <section class="card">
+    <h2>Repositories</h2>
+    <div class="scroll"><table id="repos" class="grid"></table></div>
+    <form id="add" class="inline">
+      <label for="add-repo">Add a repository</label>
+      <input id="add-repo" name="repo" placeholder="owner/name" autocomplete="off" spellcheck="false" pattern="[A-Za-z0-9-]+/[A-Za-z0-9_.-]+" required>
+      <button type="submit" class="quiet">Add</button>
+      <span id="excluded" class="muted"></span>
+    </form>
+  </section>
+
+  <section id="detail" class="card" hidden></section>
+</main>
+<footer class="muted">Read-only: this page changes nothing on GitHub. Numbers come from each repository's ledger branch, issues, PRs and Actions runs.</footer>
+</body>
+</html>

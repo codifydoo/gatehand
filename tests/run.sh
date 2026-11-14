@@ -37,6 +37,9 @@ if command -v shellcheck >/dev/null; then
 else
   echo "SKIP: shellcheck not installed"
 fi
+# The dashboard's server (bin/dashboard.py): it must at least compile on this python3.
+PYTHONDONTWRITEBYTECODE=1 python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' "${PKG}/bin/dashboard.py" \
+  || { echo "FAIL: bin/dashboard.py does not parse"; rc=1; }
 
 export AGENTS_ROOT="${ROOT}"
 if [[ $# -gt 0 ]]; then suites=("$@"); else suites=("${PKG}"/tests/*/*.test.sh); fi
