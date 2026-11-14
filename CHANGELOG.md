@@ -31,6 +31,15 @@
   scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
   branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only;
   the page does not show them yet (#21, #22).
+- Dashboard: Pause all's record. A `set_variable` that turns `AGENTS_ENABLED` off can carry
+  `"pause_all": true`; once that write succeeds, the repository is kept in a `paused` list in the
+  dashboard's local config file, which `/api/session` returns, so Resume turns on only what Pause
+  all turned off. The list is dropped per repository when the page turns its agents on, or a read
+  finds them on. No new write to GitHub; a config file from before loads unchanged (#29).
+- Dashboard: "Pause all…" in the global bar turns `AGENTS_ENABLED` off in every repository where it
+  is on, after one confirm that lists every repository with its preview; the bar then says "Agents
+  off in n of m" on every screen, names what was refused, and offers "Resume n…", which turns on
+  only what Pause all turned off.
 - Nothing installed into repositories changes: no update is needed.
 
 ## 0.7.0 (2026-11-14)

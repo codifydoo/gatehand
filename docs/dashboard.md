@@ -160,6 +160,7 @@ so the agents see exactly what they would see if you had done it on GitHub, and 
 | Hold, Release | issues and agent PRs, on the Pipeline tab and in their panes | adds or removes `agent:hold` | people with write access |
 | Hand back to the merge gate | agent PRs with `agent:blocked` or `agent:needs-human`, on the Pipeline tab and in the PR's pane | removes those labels, once you have fixed the PR yourself | people with write access |
 | Turn agents on/off, Turn auto-merge on/off | a repository's Settings tab | sets `AGENTS_ENABLED` or `AGENT_AUTO_MERGE` to `true` or `false` | people who may set Actions variables |
+| Pause all…, Resume n… | the global bar | sets `AGENTS_ENABLED` to `false` in every repository where it is `true`, or back to `true` in those Pause all turned off (below) | people who may set Actions variables, per repository |
 | Start the coder on the next one | the queue | dispatches an auto-pick `agent-coder.yml` run on `policy.runnerRef` | people with write access |
 | Approve…, Request changes… | agent PRs | posts a review comment the merge gate and the fixer read (below); Request changes can also start the fixer on it | people with write access, never the agent bot |
 | Run review, Run merge gate | agent PRs | dispatches `claude-code-review.yml` or `agent-merge.yml` on the default branch, for that PR (or every agent PR) | people with write access |
@@ -196,6 +197,29 @@ cancels the older one for the newer). Confirming sends a one-time token, valid f
 server plans the action again from fresh state and does it only if the plan is the one you saw: a PR
 whose head moved, a variable someone changed or a coder run that started waiting in between all
 refuse, and you preview again.
+
+### Pause all
+
+"Pause all…" in the global bar is the "Turn agents off" switch once per repository. The page asks
+the server for one preview per repository where `AGENTS_ENABLED` is `true`, and shows them in one
+confirm that lists every repository: the change, or why it is skipped (already off, cannot be read,
+refused at the preview), and what is running there now. Confirming sends each repository's own
+one-time token, one at a time; each is planned again and refused on its own, so the result is per
+repository. It adds no kind of write to GitHub. The preview and the confirm carry one more field,
+`pause_all`, which is `true` or `false` and nothing else; it is part of the plan the token stands
+for, and it is accepted only for setting `AGENTS_ENABLED` to `false` where it is `true` now.
+
+What is new is a record on this machine: once a repository's own write succeeds, the server adds it
+to `paused` in the dashboard's config file (the one that holds the repository list, below), and
+`/api/session` returns that list. While any repository on it is off, the bar says "Agents off in n of
+m" on every screen, names the repositories that could not be read or were refused, and offers
+"Resume n…": the same confirm in reverse, for only the repositories on the list that are still off.
+A repository that was already off before Pause all (unset counts as off), or was turned off in its
+own Settings, stays off. A repository leaves the list when the page turns its agents on, Resume or
+the switch alike, and when a read that began after the pause finds `AGENTS_ENABLED` is `true`
+(someone turned it on elsewhere); that is the one local write a read can make, and it only ever
+takes a repository off. A repository whose variables cannot be read is skipped and named, never
+counted as paused or as on.
 
 It refuses early what the workflow would skip or refuse: a coder or fixer run while `AGENTS_ENABLED`
 is not `true` or while the runner ref's copy of the workflow is not main's; the fixer on a PR its
@@ -249,7 +273,8 @@ On first start it lists every repository your login can see, through GraphQL, an
 non-archived ones whose default branch has `.github/agents/install.lock.json`. "Find repositories",
 under Repositories, scans again. Add one by hand by `owner/name` there; "Hide" (there, or on a
 repository's Settings tab) keeps one out of later scans too. The list
-lives in `${XDG_CONFIG_HOME:-~/.config}/gatehand/dashboard.json` (mode 0600; `--config` to move it).
+lives in `${XDG_CONFIG_HOME:-~/.config}/gatehand/dashboard.json` (mode 0600; `--config` to move it),
+with the Pause all record. Neither is ever sent to GitHub.
 A scan that cannot see everything (an organisation that requires SAML authorisation for your token,
 more than 3,000 repositories) keeps what it found and says what it missed.
 
@@ -284,7 +309,7 @@ tab it opened can talk to it.
 - It writes to GitHub only through the actions above: a comment on the inbox issue, one of five
   label changes, a dispatch of four workflows, a cancel of a Gatehand run, a verdict comment on an
   agent PR, two variables set to `true` or `false`. Each is a fixed shape the server builds; no
-  request from the page is passed through. Reading writes nothing. `tests/dashboard/dashboard.test.sh`
+  request from the page is passed through. Reading writes nothing to GitHub. `tests/dashboard/dashboard.test.sh`
   pins each point above, runs every command the page can post through the real `parse_commands`, and
   every verdict through the real `review_verdict`.
 
