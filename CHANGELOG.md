@@ -26,6 +26,14 @@
   Approve… and Request changes… confirm there too, with the server's preview.
 - A blocked issue's pane reruns the coder or holds it from the pane. The "to merge" and "to close"
   panes link to GitHub to merge or close (the page does neither), and to Settings for auto-merge.
+- A repository's tabs route instead of acting twice: an open request, a stopped role, a held PR,
+  a blocked issue, a PR to merge and an issue to close link to their item in Needs you. What has no
+  item (pausing a role, the switches, unqueue, hold, starting the coder, running the merge gate,
+  cancelling a run) confirms under its own button, as in a pane, with the same writes as before.
+  Agents shows each role's runs today, failures in a row and open PRs against its limits, when it
+  runs next, and each scheduled workflow's cron, last run and next run; Runs and spend links each
+  ledger row to its item and its run. The Pipeline says when the agents are off, and what to do
+  when nothing is queued. Installed repositories need no update.
 - Dashboard: the repository payload carries each role's `maxAttemptsPerIssue`, `maxCiFixes`,
   `breakerThreshold` and `timeoutMinutes` (null when `policy.json` does not set one), and each
   scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
