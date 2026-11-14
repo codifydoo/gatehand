@@ -1,6 +1,6 @@
 {
   "name": "gatehand",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Unattended Claude coding agents for a GitHub repository: a coder that turns agent:ready issues into PRs, a fixer for red CI and review findings, a Claude review, and a merge gate, with a read-only model job and a separate publish step; plus a local dashboard across every repository that has them.",
   "license": "MIT",
   "author": {

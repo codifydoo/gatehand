@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.0 (2026-11-14)
+
+- The dashboard can now answer the agents. Each open inbox request has its own button (named for
+  what approving it does: "Requeue and rerun", "Reset the breaker", "Mark as seen"…) and "Reject…";
+  blocked issues have "Rerun coder"; each role has "Pause" or "Resume". These post the same
+  `/approve`, `/reject`, `/rerun`, `/pause` and `/resume` comment on the inbox issue that you would
+  type, with your own login, so the `Agent inbox` workflow applies them exactly as before, and only
+  for `AGENT_OWNER_LOGIN`. The server checks the workflow's own conditions first and refuses, with a
+  reason, a command it would ignore: another login, an inbox it would not answer, a request the agent
+  never filed or one already answered.
+- One command at a time: until the `Agent inbox` workflow has answered your last command, the page
+  sends no other (two runs at once would both apply), for up to ten minutes.
+- Labels from the page, for anyone with write access: unqueue an issue (`agent:ready` off), hold or
+  release an issue or agent PR (`agent:hold`), and hand a fixed PR back to the merge gate (removing
+  `agent:blocked` and `agent:needs-human`). The page never adds `agent:ready`, which vouches for issue
+  text it does not show: candidates link to GitHub to be read and queued there. `agent:allow-protected`
+  is never offered.
+- Every write asks you to confirm and says what will happen. Nothing installed into repositories
+  changes: no update is needed.
+
 ## 0.4.0 (2026-11-14)
 
 - New: a local dashboard, `/gatehand:dashboard` or `python3 bin/dashboard.py`. One page for every

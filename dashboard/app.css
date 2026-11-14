@@ -68,9 +68,14 @@ input { font: inherit; padding: 5px 8px; border-radius: 7px; border: 1px solid v
 details.req { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; margin: 6px 0; }
 details summary { cursor: pointer; }
 pre.body { white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; background: var(--bg); padding: 8px 10px; border-radius: 6px; font-size: 12.5px; }
+div.req { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; margin: 6px 0; }
+div.req details.req, div.req > details { border: 0; padding: 0; margin: 0; }
+.actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.actions.inline { display: inline-flex; margin: 0 0 0 8px; vertical-align: middle; }
 .gate { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
 code { font-size: 12.5px; }
 @media (max-width: 640px) {
   .bar, main, footer { padding-left: 16px; padding-right: 16px; }
   input { min-width: 0; flex: 1; }
 }
+a.button-link { display: inline-block; font-size: 12px; padding: 1px 8px; border: 1px solid var(--line); border-radius: 7px; color: var(--fg); }

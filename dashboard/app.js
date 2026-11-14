@@ -212,14 +212,142 @@ function removeBtn(repo) {
   }, "Hide");
 }
 
-function issueList(list, emptyText) {
+// --- actions: every write is done by the server with your own gh login, after a confirm -------------
+// Who may do what is the agents' rule, not this page's: inbox commands count only from
+// AGENT_OWNER_LOGIN, labels only from people with write access. A button that would be ignored is
+// shown disabled with the reason; the server checks again.
+function answerBlock(d) {
+  if (!d.vars) return "Cannot read this repository's variables, so cannot tell who may answer.";
+  const owner = d.vars.AGENT_OWNER_LOGIN;
+  if (!owner) return "AGENT_OWNER_LOGIN is not set: nobody's commands are applied.";
+  const me = state.session && state.session.viewer;
+  if (me !== owner) return `Only ${owner} (AGENT_OWNER_LOGIN) can answer; you are ${me}.`;
+  if (!d.inbox) return "No inbox issue found.";
+  const got = state.inbox[d.repo];
+  // Two inbox runs at once would both apply: one command at a time, until the bot has answered.
+  if (got && got.awaiting_reply) return "Your last command has no answer from the Agent inbox workflow yet.";
+  return "";
+}
+// The server's one_line, exactly: control characters to one space, trimmed, at most n characters.
+// Cut by code points, as Python does, not UTF-16 units.
+const oneLine = (s, n) => Array.from(String(s || "").replace(/[\x00-\x1f\x7f]+/g, " ").trim()).slice(0, n).join("").trimEnd();
+function labelBlock(d) {
+  if (d.inbox_state === "unknown") return "Cannot tell which issue is the inbox, so no label is changed from here.";
+  return ["WRITE", "MAINTAIN", "ADMIN"].includes(d.viewer_permission) ? ""
+    : `Labels count only from people with write access; you have ${String(d.viewer_permission || "unknown").toLowerCase()}.`;
+}
+function actBtn(text, blocked, onclick, kind) {
+  return h("button", { type: "button", class: `small ${kind || "quiet"}`, disabled: !!blocked, title: blocked || null,
+    onclick: (e) => { e.preventDefault(); e.stopPropagation(); onclick(e.currentTarget); } }, text);
+}
+
+async function act(repo, payload, question, btn) {
+  if (!window.confirm(question)) return null;
+  if (btn) btn.disabled = true;
+  try {
+    const out = await api("/api/action", { method: "POST", body: Object.assign({ repo, viewer: state.session.viewer }, payload) });
+    if (out.posted) watchAnswer(repo, payload.req);
+    notice(out.posted
+      ? `Posted “${out.posted}” on the inbox (#${out.inbox}). The Agent inbox workflow applies it within a minute or two; this page checks back.`
+      : `Done: ${out.done}.`);
+    await loadRepo(repo, true);
+    return out;
+  } catch (e) {
+    notice(`Not done: ${e.message}`);
+    if (btn) btn.disabled = false;
+    loadRepo(repo, true);
+    return null;
+  }
+}
+
+async function loadInbox(repo, fresh) {
+  try { state.inbox[repo] = await api(`/api/repo/${repo}/inbox${fresh ? "?fresh=1" : ""}`); }
+  catch (e) { state.inbox[repo] = { error: e.message }; }
+  if (state.selected === repo) renderDetail();
+}
+
+// After any inbox command: re-read the inbox every 10 s for two minutes, until the bot has replied
+// (awaiting_reply off), which also re-enables the other answer buttons.
+function watchAnswer(repo, req) {
+  let left = 12;
+  const tick = async () => {
+    left -= 1;
+    await loadInbox(repo, true); // the inbox only: the merge gate's logs are not worth re-reading every 10 s
+    const got = state.inbox[repo];
+    if (got && got.requests && !got.awaiting_reply) {
+      const r = req && got.requests.find((x) => x.id === req);
+      notice(req && r && !r.answered
+        ? `The Agent inbox workflow replied but did not record ${req} as answered: read its reply on the inbox.`
+        : "The Agent inbox workflow has replied; see the inbox for what was done.");
+      await loadRepo(repo, true);
+      return;
+    }
+    if (left > 0) setTimeout(tick, 10000);
+    else notice("No reply from the Agent inbox workflow after two minutes; check its runs on GitHub.");
+  };
+  setTimeout(tick, 10000);
+}
+
+const KIND_APPROVE = {
+  protected: ["Allow protected paths once and rerun", "the issue goes back in the queue with agent:allow-protected for one attempt, and the coder starts on it"],
+  blocked: ["Requeue and rerun", "the issue goes back in the queue and the coder starts on it"],
+  failed: ["Requeue and rerun", "the issue goes back in the queue and the coder starts on it"],
+  breaker: ["Reset the breaker", "the role's circuit breaker is reset and it runs again"],
+  untrusted: ["Acknowledge", "nothing changes: re-apply agent:ready on the issue yourself, then rerun it"],
+  fixer: ["Mark as seen", "nothing changes: fix the PR yourself and hand it back, or close it"],
+  merger: ["Mark as seen", "nothing changes: merge main into the PR yourself, or close it"],
+  review: ["Mark as seen", "nothing changes: run the review yourself once it can, or close the PR"],
+};
+const SEEN_ONLY = new Set(["fixer", "merger", "review"]);
+
+function requestActions(repo, d, r) {
+  if (r.answered) return null;
+  const blocked = r.pending ? "Your answer is posted; waiting for the Agent inbox workflow to apply it." : answerBlock(d);
+  const [text, effect] = KIND_APPROVE[r.kind] || ["Approve", "the repository's own hook for this kind of request runs"];
+  const approve = actBtn(text, blocked, async (b) => {
+    await act(repo, { type: "inbox_command", command: "approve", req: r.id },
+      `Post “/approve ${r.id}” on the inbox as ${state.session.viewer}?\n\nWhat happens: ${effect}.`, b);
+  }, "primary");
+  if (SEEN_ONLY.has(r.kind)) return h("div", { class: "actions" }, approve);
+  const rejectEffect = r.kind === "breaker" ? `the ${r.role} stays stopped`
+    : KIND_APPROVE[r.kind] ? `#${r.issue} stays as it is, gets the reason as a comment, and loses agent:needs-human`
+      : "the repository's own hook for this kind of request decides";
+  const reject = actBtn("Reject…", blocked, async (b) => {
+    const reason = window.prompt(`Reject ${r.id}. Reason (optional, one line of at most 300 characters):`, "");
+    if (reason === null) return;
+    const line = `/reject ${r.id} ${oneLine(reason, 300)}`.trimEnd();
+    await act(repo, { type: "inbox_command", command: "reject", req: r.id, reason },
+      `Post “${line}” on the inbox as ${state.session.viewer}?\n\nWhat happens: ${rejectEffect}.`, b);
+  });
+  return h("div", { class: "actions" }, approve, reject);
+}
+
+function labelBtn(repo, d, n, op, label, text, why) {
+  return actBtn(text, labelBlock(d), (b) => act(repo, { type: "label", op, label, number: n },
+    `${op === "add" ? "Add" : "Remove"} ${label} ${op === "add" ? "to" : "from"} #${n} as ${state.session.viewer}?\n\n${why}`, b));
+}
+function rerunBtn(repo, d, n) {
+  // An `untrusted` request: someone without write access changed the issue's text since a person
+  // queued it. /rerun re-labels as the bot, which vouches for nothing, so the run would be refused
+  // again: a person reads the issue and re-applies agent:ready on GitHub first.
+  const got = state.inbox[repo];
+  const untrusted = got && got.requests && got.requests.some((r) => r.kind === "untrusted" && !r.answered && r.issue === n);
+  return actBtn("Rerun coder", untrusted
+    ? `#${n}'s text was changed by someone without write access: read it on GitHub and re-apply agent:ready there, then Acknowledge its untrusted request; a rerun before that would be refused.`
+    : answerBlock(d), (b) => act(repo, { type: "inbox_command", command: "rerun", issue: n },
+    `Post “/rerun coder #${n}” on the inbox as ${state.session.viewer}?\n\nWhat happens: #${n} goes back in the queue (agent:blocked and agent:needs-human come off) and the coder starts on it.`, b));
+}
+const HOLD = "Agents never touch an issue or PR while it carries agent:hold.";
+
+function issueList(list, emptyText, actions) {
   if (!list) return empty("Could not read the issues.");
   if (!list.length) return empty(emptyText);
   return h("ul", { class: "items" }, list.map((i) => h("li", {},
     link(i.url, `#${i.number} ${i.title}`), " ",
     i.priority ? pill(i.priority) : null,
     i.labels.filter((l) => l.startsWith("agent:") && !["agent:ready", "agent:pr"].includes(l)).map((l) => pill(l, "label")),
-    h("span", { class: "muted" }, ` · updated ${ago(i.updated_at)}`))));
+    h("span", { class: "muted" }, ` · updated ${ago(i.updated_at)}`),
+    actions ? h("span", { class: "actions inline" }, actions(i)) : null)));
 }
 
 function runsTable(list) {
@@ -257,16 +385,26 @@ function ledgerTables(d) {
   return [h("div", { class: "scroll" }, summary), detail];
 }
 
-function breakerList(d) {
+function breakerList(repo, d) {
   if (d.breakers === null || d.breakers === undefined) return empty("Could not read the breaker state.");
-  const entries = Object.entries(d.breakers).filter(([, b]) => b && typeof b === "object");
-  if (!entries.length) return empty("No breaker has stepped yet.");
-  return h("ul", { class: "items" }, entries.map(([role, b]) => h("li", {},
-    h("strong", {}, role), " ",
-    b.tripped_at ? pill(`stopped since ${String(b.tripped_at).slice(0, 16).replace("T", " ")} UTC`, "bad") : pill("running", "ok"),
-    ` ${b.consecutive || 0} failure(s) in a row`,
-    b.reason ? h("span", { class: "muted" }, ` · ${b.reason}`) : null,
-    b.last_outcome ? h("span", { class: "muted" }, ` · last: ${b.last_outcome}`) : null)));
+  // Every role in policy.json, with its breaker if it has stepped.
+  const roles = [...new Set([...Object.keys((d.policy && d.policy.roles) || {}), ...Object.keys(d.breakers)])].sort();
+  if (!roles.length) return empty("No roles.");
+  return h("ul", { class: "items" }, roles.map((role) => {
+    const b = d.breakers[role] && typeof d.breakers[role] === "object" ? d.breakers[role] : {};
+    const stopped = !!b.tripped_at;
+    const cmd = stopped ? "resume" : "pause";
+    return h("li", {},
+      h("strong", {}, role), " ",
+      stopped ? pill(`stopped since ${String(b.tripped_at).slice(0, 16).replace("T", " ")} UTC`, "bad") : pill("running", "ok"),
+      ` ${b.consecutive || 0} failure(s) in a row`,
+      b.reason ? h("span", { class: "muted" }, ` · ${b.reason}`) : null,
+      b.last_outcome ? h("span", { class: "muted" }, ` · last: ${b.last_outcome}`) : null,
+      d.policy && d.policy.roles && d.policy.roles[role] ? h("span", { class: "actions inline" },
+        actBtn(stopped ? "Resume" : "Pause", answerBlock(d), (btn) => act(repo, { type: "inbox_command", command: cmd, role },
+          `Post “/${cmd} ${role}” on the inbox as ${state.session.viewer}?\n\nWhat happens: ${stopped
+            ? `the ${role}'s circuit breaker is reset and it runs again.` : `the ${role} stops until someone sends /resume ${role}.`}`, btn))) : null);
+  }));
 }
 
 function inboxBlock(repo, d) {
@@ -278,12 +416,15 @@ function inboxBlock(repo, d) {
   if (got.error) return [head, h("p", { class: "bad" }, got.error)];
   const open = got.requests.filter((r) => !r.answered);
   const done = got.requests.filter((r) => r.answered).slice(0, 10);
-  const one = (r) => h("details", { class: "req" },
+  const one = (r) => h("div", { class: "req" }, h("details", {},
     h("summary", {}, h("code", {}, r.id), " ", pill(r.kind), " ", `${r.role} · `,
       r.issue ? link(`${d.url}/issues/${r.issue}`, `#${r.issue}`) : "no issue", h("span", { class: "muted" }, ` · ${ago(r.created_at)}`)),
     h("pre", { class: "body" }, r.body),
-    h("p", {}, link(r.url, "Open on GitHub to answer")));
+    h("p", {}, link(r.url, "The request on GitHub"))),
+    requestActions(repo, d, r));
+  const why = answerBlock(d);
   return [head,
+    open.length && why ? h("p", { class: "muted" }, why) : null,
     got.truncated ? h("p", { class: "warn" }, "Only the newest 1,000 inbox comments were read.") : null,
     open.length ? open.map(one) : empty("No open requests."),
     done.length ? h("details", {}, h("summary", { class: "muted" }, `${done.length} recently answered`), done.map(one)) : null];
@@ -302,7 +443,29 @@ function prBlock(repo, d) {
       link(p.url, `PR #${p.number} ${p.title}`), " ",
       p.labels.filter((l) => l.startsWith("agent:") && l !== "agent:pr").map((l) => pill(l, "label")),
       h("span", { class: "muted" }, ` · opened ${ago(p.created_at)}`),
+      h("span", { class: "actions inline" }, prActions(repo, d, p)),
       gateLine(gate, p.number))))];
+}
+
+function prActions(repo, d, p) {
+  const stuck = p.labels.filter((l) => l === "agent:blocked" || l === "agent:needs-human");
+  const out = [];
+  if (stuck.length) {
+    out.push(actBtn("Hand back to the merge gate", labelBlock(d), async (b) => {
+      if (!window.confirm(`Remove ${stuck.join(" and ")} from PR #${p.number} as ${state.session.viewer}?\n\nDo this once you have fixed the PR yourself: the merge gate and the fixer pick it up again.`)) return;
+      b.disabled = true;
+      for (const label of stuck) {
+        try { await api("/api/action", { method: "POST", body: { repo, viewer: state.session.viewer, type: "label", op: "remove", label, number: p.number } }); }
+        catch (e) { notice(`Not done: ${e.message}`); b.disabled = false; loadRepo(repo, true); return; }
+      }
+      notice(`Done: PR #${p.number} is back with the merge gate.`);
+      loadRepo(repo, true);
+    }));
+  }
+  out.push(p.labels.includes("agent:hold")
+    ? labelBtn(repo, d, p.number, "remove", "agent:hold", "Release", "The fixer and the merge gate pick it up again.")
+    : labelBtn(repo, d, p.number, "add", "agent:hold", "Hold", HOLD));
+  return out;
 }
 
 function gateLine(gate, n) {
@@ -327,14 +490,20 @@ function renderDetail() {
     h("h3", {}, "Inbox requests"), inboxBlock(repo, d),
     h("h3", {}, "Agent PRs"), prBlock(repo, d),
     h("h3", {}, "Running now"), runsTable(d.active_runs),
-    h("h3", {}, "Queue"), issueList(i && i.ready, "Nothing is queued for the coder."),
+    h("h3", {}, "Queue"), issueList(i && i.ready, "Nothing is queued for the coder.", (x) => [
+      labelBtn(repo, d, x.number, "remove", "agent:ready", "Unqueue", "The coder no longer picks it."),
+      x.labels.includes("agent:hold") ? null : labelBtn(repo, d, x.number, "add", "agent:hold", "Hold", HOLD)]),
     h("h3", {}, "In progress"), issueList(i && i.in_progress, "Nothing."),
-    h("h3", {}, "Blocked or waiting on a person"), issueList(i && i.blocked, "Nothing."),
-    h("h3", {}, "Candidates"), issueList(i && i.candidate, "None."),
-    h("h3", {}, "On hold"), issueList(i && i.hold, "None."),
+    h("h3", {}, "Blocked or waiting on a person"), issueList(i && i.blocked, "Nothing.", (x) => [rerunBtn(repo, d, x.number),
+      x.labels.includes("agent:hold") ? null : labelBtn(repo, d, x.number, "add", "agent:hold", "Hold", HOLD)]),
+    // Queueing is done on GitHub, next to the issue's text: agent:ready vouches for that text as it
+    // stands, and this page does not show it.
+    h("h3", {}, "Candidates"), issueList(i && i.candidate, "None.", (x) => x.labels.includes("agent:ready") ? null
+      : h("a", { href: x.url, class: "button-link", title: "agent:ready makes the agents trust the issue's text as it is now: read it, then add the label there." }, "Read and queue on GitHub")),
+    h("h3", {}, "On hold"), issueList(i && i.hold, "None.", (x) => labelBtn(repo, d, x.number, "remove", "agent:hold", "Release", "The agents may work on it again.")),
     h("h3", {}, "Merged, to close once live"), issueList(i && i.done_pending_deploy, "None."),
     h("h3", {}, "Agent runs, last seven days"), ledgerTables(d),
-    h("h3", {}, "Breakers"), breakerList(d),
+    h("h3", {}, "Breakers"), breakerList(repo, d),
     h("h3", {}, "Recent finished runs"), runsTable(d.recent_runs));
 }
 

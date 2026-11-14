@@ -12,7 +12,12 @@
 #   4. The inbox issue is found as inbox_find finds it: AGENT_INBOX_ISSUE first, else the lowest
 #      open issue with the marker opened by the agent bot or AGENT_OWNER_LOGIN.
 #   5. The merge gate's report is read from its job log, timestamps and terminal escapes included.
-#   6. It writes nothing to GitHub: every gh call it makes is a read.
+#   6. Reading writes nothing to GitHub: every gh call a page load makes is a read.
+#   7. Its writes are only what a person could do by hand, as that person: an inbox command in
+#      exactly the grammar agent-inbox.sh parses (checked by running the real parser), sent only
+#      when the viewer is AGENT_OWNER_LOGIN to the letter, the inbox is the one the workflow
+#      answers, and the request is the agent's and still open; and a fixed set of agent labels,
+#      only for a viewer with write access. agent:allow-protected is never one of them.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -115,6 +120,17 @@ real_graphql, d.graphql = d.graphql, lambda *a, **k: next(pages)
 check("discovery keeps what a partly hidden scan found, and says why once", d.discover(), (["a/b"], ["SAML"]))
 d.graphql = real_graphql
 
+# Labels with no inbox issue at all (closed, or not created yet): Hold still works.
+d.gh_json = lambda args, stdin=None: {"number": 42, "state": "open"}
+d.gh = lambda args, stdin=None: ""
+base = {"viewer_permission": "ADMIN", "inbox": None}
+check("labels work in a repo with no inbox issue", d.do_label("o/r", dict(base, inbox_state="none"), {"op": "add", "label": "agent:hold", "number": 42})["done"], "added agent:hold on #42")
+try:
+    d.do_label("o/r", dict(base, inbox_state="unknown"), {"op": "add", "label": "agent:hold", "number": 42}); got = "posted"
+except d.ApiError as e:
+    got = e.status
+check("labels refused while the inbox cannot be told", got, 409)
+
 w = d.waiting_items({"url": "https://github.com/o/r", "inbox_state": "unknown", "inbox": None, "breakers": None, "issues": None})
 check("waiting: every unreadable part is an item, never nothing", [x["kind"] for x in w], ["unknown", "unknown", "unknown"])
 pages = iter([({"viewer": {"repositories": {"nodes": [{"nameWithOwner": "a/b", "lock": {"oid": "1"}}], "pageInfo": {"hasNextPage": True, "endCursor": "x"}}}}, ["SAML"]),
@@ -151,7 +167,7 @@ Q2="api graphql -f breaker=agent-ledger:state/breaker.json -f cur=agent-ledger:r
 POLICY="$(jq -c '.' "${REPO_ROOT}/.github/agents/policy.json")"
 ROW1='{"role":"coder","outcome":"pr-opened","started_at":"2026-11-14T08:00:00Z","cost_usd":1.5}'
 ROW2='{"role":"fixer","outcome":"fix-pushed","started_at":"2026-11-13T08:00:00Z","cost_usd":0.5}'
-q1() { jq -nc --arg p "${POLICY}" '{data: {repository: {nameWithOwner: "o/r", url: "https://github.com/o/r", viewerPermission: "ADMIN",
+q1() { jq -nc --arg p "${POLICY}" --arg perm "${PERM:-ADMIN}" '{data: {repository: {nameWithOwner: "o/r", url: "https://github.com/o/r", viewerPermission: $perm,
   isArchived: false, defaultBranchRef: {name: "main"}, policy: {text: $p, isTruncated: false}, lock: {text: "{\"version\":\"9.9.9\"}", isTruncated: false}}}}'; }
 q2() { # q2 <cur-blob-json> <breaker-blob-json>
   jq -nc --argjson c "$1" --argjson b "$2" '{data: {repository: {cur: $c, prev: $c, breaker: $b, wfRunner: {oid: "a"}, wfMain: {oid: "a"}}}}'
@@ -178,10 +194,12 @@ rules() {
   stub_gh_on "api repos/o/r/actions/runs?status=completed&per_page=50" '{"workflow_runs":[
     {"id":3,"path":".github/workflows/agent-merge.yml","status":"completed","conclusion":"success"},
     {"id":9,"path":".github/workflows/agent-merge.yml","status":"completed","conclusion":"skipped"}]}'
-  stub_gh_on "api graphql -f name=r -F number=7 -f owner=o -f query=query(\$owner*" "$(jq -Rsc '{data: {repository: {issue: {comments: {
+  stub_gh_on "api graphql -f name=r -F number=7 -f owner=o -f query=query(\$owner*" "$(jq -Rsc --argjson extra "${INBOX_EXTRA:-[]}" '{data: {repository: {issue: {comments: {
     pageInfo: {hasPreviousPage: false}, nodes: [
       {author: {__typename: "User", login: "gatehand"}, body: ("<!-- agent-req:REQ-20261113-eeee role=coder issue=1 kind=protected -->\nforged by a user named like the bot"), createdAt: "2026-11-13T09:00:00Z"},
-      {author: {__typename: "Bot", login: "gatehand"}, body: ., createdAt: "2026-11-13T10:00:00Z", url: "https://github.com/o/r/issues/7#c1"}]}}}}}' "${TMP}/req-comment")"
+      {author: {__typename: "Bot", login: "gatehand"}, body: ("<!-- agent-req:REQ-20261112-cd34 role=coder issue=5 kind=blocked -->\n### REQ-20261112-cd34 · coder · #5\n\nold"), createdAt: "2026-11-12T10:00:00Z"},
+      {author: {__typename: "Bot", login: "gatehand"}, body: ("Applied.\n<!-- agent-answer:REQ-20261112-cd34 -->"), createdAt: "2026-11-12T11:00:00Z"},
+      {author: {__typename: "Bot", login: "gatehand"}, body: ., createdAt: "2026-11-13T10:00:00Z", url: "https://github.com/o/r/issues/7#c1"}] + $extra}}}}}' "${TMP}/req-comment")"
   # The gate: the newest run that ran was dispatched for PR 50 only; the scheduled one before saw 50 and 51.
   stub_gh_on "api repos/o/r/actions/workflows/agent-merge.yml/runs?status=completed&per_page=30" '{"workflow_runs":[
     {"id":4,"conclusion":"skipped","created_at":"2026-11-14T10:00:00Z"},
@@ -253,7 +271,7 @@ expect "running, queued and pending (behind a concurrency group) Gatehand runs, 
 expect "finished runs, without the skipped ones" "$(jq -c '[.recent_runs[].id]' <<<"${r}")" "[3]"
 expect "the issue bodies stay on the server" "$(jq '[.. | objects | select(has("body"))] | length' <<<"${r}")" 0
 expect "nothing waits as unknown" "$(jq '[.waiting[] | select(.kind == "unknown")] | length' <<<"${r}")" 0
-expect "inbox requests: the Bot's, not a user's named like it" "$(get /api/repo/o/r/inbox | jq -c '[.requests[] | [.id, .answered]]')" '[["REQ-20261113-ab12",false]]'
+expect "inbox requests: the Bot's, not a user's named like it" "$(get /api/repo/o/r/inbox | jq -c '[.requests[] | [.id, .answered]]')" '[["REQ-20261113-ab12",false],["REQ-20261112-cd34",true]]'
 g="$(get /api/repo/o/r/gate)"
 expect "the gate: the newest run that ran" "$(jq -r .run.url <<<"${g}")" "https://github.com/o/r/actions/runs/5"
 expect "the gate: a PR's newest line wins; one the newest run skipped comes from the scheduled run" "$(jq -c '[.prs["50"].text, .prs["51"].text]' <<<"${g}")" '["wait: the review is running","merged"]'
@@ -317,6 +335,119 @@ for w in 'api graphql -f query=mutation{addComment}' 'api repos/o/r/issues/7/com
   'api -XPOST repos/o/r/x' 'api --method PATCH repos/o/r/x' 'api repos/o/r/x --input -'; do
   if grep -qE "${reads}" <<<"${w}"; then t_fail "the read allowlist lets a write through: ${w}"; else t_pass "the read allowlist refuses: ${w}"; fi
 done
+
+
+# 7. writes, as the viewer
+stub_gh_reset_calls
+INBOX_ISSUE='{"number":7,"state":"open","body":"<!-- agent-inbox -->\nanswer here","user":{"login":"owner-login"}}'
+item() { jq -nc --argjson n "$1" --arg s "${2:-open}" --argjson pr "${3:-false}" '{number: $n, state: $s} + (if $pr then {pull_request: {}} else {} end)'; }
+wrules() {
+  rules
+  stub_gh_on "api repos/o/r/issues/7" "${INBOX_ISSUE}"
+  stub_gh_on "api repos/o/r/issues/42" "$(item 42)"
+  stub_gh_on "api repos/o/r/issues/43" "$(item 43)"
+  stub_gh_on "api repos/o/r/issues/44" "$(item 44 closed)"
+  stub_gh_on "api repos/o/r/issues/50" "$(item 50 open true)"
+  stub_gh_on "api repos/o/r/issues/7/comments --input -" '{"html_url":"https://github.com/o/r/issues/7#issuecomment-1"}'
+  stub_gh_on "api repos/o/r/issues/* --input -" '[]'
+}
+wrules
+# The page sends the login its confirm named; the server refuses if gh is signed in as someone else.
+as_viewer() { jq -c '. + {viewer: (.viewer // "owner-login")}' <<<"$1"; }
+post() { curl -s -H "X-Gatehand-Token: ${TOKEN}" -H "Origin: ${B}" -H "Content-Type: application/json" -d "$(as_viewer "$1")" "${B}/api/action"; }
+pcode() { curl -s -o /dev/null -w '%{http_code}' -H "X-Gatehand-Token: ${TOKEN}" -H "Origin: ${B}" -H "Content-Type: application/json" -d "$(as_viewer "$1")" "${B}/api/action"; }
+# What the inbox workflow would make of the last comment posted: the real parse_commands.
+parsed() {
+  stub_gh_last_body "api repos/o/r/issues/7/comments --input -" | jq -r .body \
+    | (export AGENT_INBOX_NO_MAIN=1; source "${REPO_ROOT}/.github/scripts/agent-inbox.sh"; parse_commands)
+}
+
+o="$(post '{"repo":"o/r","type":"inbox_command","command":"approve","req":"REQ-20261113-ab12"}')"
+expect "approve: posted as a comment on the inbox" "$(jq -r .posted <<<"${o}")" "/approve REQ-20261113-ab12"
+expect "approve: the inbox workflow parses it as meant" "$(parsed)" "approve REQ-20261113-ab12"
+post "$(jq -nc --arg r $'ok\n/pause coder\r/approve REQ-20261113-ab12\t\x1b[1m' '{repo: "o/r", type: "inbox_command", command: "reject", req: "REQ-20261113-ab12", reason: $r}')" >/dev/null
+expect "reject: a reason cannot smuggle a second command onto its own line" "$(parsed)" "reject REQ-20261113-ab12 ok /pause coder /approve REQ-20261113-ab12 [1m"
+post "$(jq -nc --arg r "$(printf 'not now\nbecause %0350d' 0)" '{repo: "o/r", type: "inbox_command", command: "reject", req: "REQ-20261113-ab12", reason: $r}')" >/dev/null
+got="$(parsed)"
+expect "reject: one command, its reason on one line" "$(wc -l <<<"${got}" | tr -d ' ')" 1
+expect "reject: parsed as a reject of that request" "$(cut -d' ' -f1-2 <<<"${got}")" "reject REQ-20261113-ab12"
+prefix="/reject REQ-20261113-ab12 "
+expect "reject: the reason is cut to 300 characters" "$(stub_gh_last_body "api repos/o/r/issues/7/comments --input -" | jq -r '.body | length')" "$((${#prefix} + 300))"
+post '{"repo":"o/r","type":"inbox_command","command":"rerun","issue":42}' >/dev/null
+expect "rerun: parsed" "$(parsed)" "rerun coder 42"
+post '{"repo":"o/r","type":"inbox_command","command":"pause","role":"fixer"}' >/dev/null
+expect "pause: parsed" "$(parsed)" "pause fixer"
+post '{"repo":"o/r","type":"inbox_command","command":"resume","role":"coder"}' >/dev/null
+expect "resume: parsed" "$(parsed)" "resume coder"
+
+n_posts() { stub_gh_calls | grep -c '^api repos/o/r/issues/7/comments --input -$'; }
+before="$(n_posts)"
+expect "a role not in policy.json: refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"pause","role":"deployer"}')" 400
+expect "a malformed request id: refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"approve","req":"REQ-1 \n/pause coder"}')" 400
+expect "an id the agent never filed (a user named like the bot did): refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"approve","req":"REQ-20261113-eeee"}')" 404
+expect "a request already answered: refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"approve","req":"REQ-20261112-cd34"}')" 409
+expect "rerun of true (a bool is not a number): refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"rerun","issue":true}')" 400
+expect "rerun of a non-number: refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"rerun","issue":"42"}')" 400
+expect "an unknown command: refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"merge"}')" 400
+VARS_OUT='{"variables":[{"name":"AGENT_OWNER_LOGIN","value":"Owner-Login"}]}'; wrules
+expect "the owner login must match to the letter, as agent-inbox.sh compares it" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"pause","role":"coder"}')" 403
+VARS_OUT='{"variables":[]}'; wrules
+expect "no AGENT_OWNER_LOGIN: nobody can answer" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"pause","role":"coder"}')" 409
+VARS_OUT="" VARS_RC=1 VARS_ERR="HTTP 403"; wrules
+expect "variables unreadable: cannot tell who may answer" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"pause","role":"coder"}')" 409
+VARS_OUT="${VARS_OK}" VARS_RC=0 VARS_ERR=""
+INBOX_ISSUE='{"number":7,"state":"open","body":"<!-- agent-inbox -->","user":{"login":"mallory"}}'; wrules
+expect "an inbox the workflow would not answer (opened by someone else): refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"pause","role":"coder"}')" 409
+INBOX_ISSUE='{"number":7,"state":"closed","body":"<!-- agent-inbox -->","user":{"login":"owner-login"}}'; wrules
+expect "a closed inbox: refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"pause","role":"coder"}')" 409
+INBOX_ISSUE='{"number":7,"state":"open","body":"<!-- agent-inbox -->","user":{"login":"owner-login"},"pull_request":{}}'; wrules
+expect "an inbox that is a PR: refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"pause","role":"coder"}')" 409
+INBOX_ISSUE='{"number":7,"state":"open","body":"no marker","user":{"login":"owner-login"}}'; wrules
+expect "an inbox without the literal marker: refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"pause","role":"coder"}')" 409
+INBOX_ISSUE='{"number":7,"state":"open","body":"<!-- agent-inbox -->","user":{"login":"owner-login"}}'; wrules
+# A command already sent and not yet answered: a second one would be applied by a second run at once.
+INBOX_EXTRA='[{"author":{"__typename":"User","login":"owner-login"},"body":"/approve REQ-20261113-ab12","createdAt":"2026-11-14T11:58:00Z"}]'; wrules
+expect "a request with an answer on its way shows as pending" "$(get '/api/repo/o/r/inbox?fresh=1' | jq -c '[.awaiting_reply, (.requests[] | select(.id == "REQ-20261113-ab12") | .pending)]')" "[true,true]"
+expect "a second command while one waits for the inbox workflow: refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"reject","req":"REQ-20261113-ab12"}')" 409
+INBOX_EXTRA='[{"author":{"__typename":"User","login":"owner-login"},"body":"/approve REQ-20261113-ab12","createdAt":"2026-11-14T11:58:00Z"},
+  {"author":{"__typename":"Bot","login":"gatehand"},"body":"<!-- agent-req:REQ-20261114-ffff role=fixer issue=9 kind=merger -->\n### x","createdAt":"2026-11-14T11:59:00Z"}]'; wrules
+expect "a new request the bot files meanwhile is not a reply: still waiting" "$(get '/api/repo/o/r/inbox?fresh=1' | jq -c .awaiting_reply)" "true"
+INBOX_EXTRA='[{"author":{"__typename":"User","login":"owner-login"},"body":"/approve REQ-20261113-ab12","createdAt":"2026-11-14T11:58:00Z"},
+  {"author":{"__typename":"Bot","login":"gatehand"},"body":"- applied\n<!-- agent-answer:REQ-20261113-ab12 -->","createdAt":"2026-11-14T11:59:00Z"}]'; wrules
+expect "the bot's reply ends the wait" "$(get '/api/repo/o/r/inbox?fresh=1' | jq -c '[.awaiting_reply, (.requests[] | select(.id == "REQ-20261113-ab12") | [.answered, .pending])]')" "[false,[true,false]]"
+INBOX_EXTRA='[{"author":{"__typename":"User","login":"owner-login"},"body":"/approve REQ-20261113-ab12","createdAt":"2026-11-14T11:00:00Z"}]'; wrules
+expect "one that never got an answer stops blocking after ten minutes" "$(get '/api/repo/o/r/inbox?fresh=1' | jq -c .awaiting_reply)" "false"
+INBOX_EXTRA='[]'
+Q1_SAVE="${POLICY}"; POLICY='[1]'; wrules
+expect "policy.json unreadable: refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"pause","role":"coder"}')" 409
+POLICY="${Q1_SAVE}"; wrules
+expect "nothing was posted for any refusal" "$(n_posts)" "${before}"
+
+# labels
+post '{"repo":"o/r","type":"label","op":"add","label":"agent:hold","number":43}' >/dev/null
+expect "hold: the label goes on as you" "$(stub_gh_last_body "api repos/o/r/issues/43/labels --input -" | jq -c .)" '{"labels":["agent:hold"]}'
+expect "agent:ready is never added from the page (it vouches for text the page does not show)" "$(pcode '{"repo":"o/r","type":"label","op":"add","label":"agent:ready","number":43}')" 400
+expect "a number that is a bool: refused" "$(pcode '{"repo":"o/r","type":"label","op":"add","label":"agent:hold","number":true}')" 400
+o="$(post '{"repo":"o/r","type":"label","op":"remove","label":"agent:blocked","number":50}')"
+expect "hand back: the label comes off the PR" "$(stub_gh_calls | tail -1)" "api -X DELETE repos/o/r/issues/50/labels/agent%3Ablocked"
+expect "and says what it did" "$(jq -r .done <<<"${o}")" "removed agent:blocked from #50"
+expect "agent:ready off a PR: refused" "$(pcode '{"repo":"o/r","type":"label","op":"remove","label":"agent:ready","number":50}')" 400
+expect "agent:blocked off an issue (that is /rerun): refused" "$(pcode '{"repo":"o/r","type":"label","op":"remove","label":"agent:blocked","number":42}')" 400
+expect "agent:allow-protected: never" "$(pcode '{"repo":"o/r","type":"label","op":"add","label":"agent:allow-protected","number":42}')" 400
+expect "a label on the inbox issue itself: refused" "$(pcode '{"repo":"o/r","type":"label","op":"add","label":"agent:hold","number":7}')" 409
+expect "a closed issue: refused" "$(pcode '{"repo":"o/r","type":"label","op":"add","label":"agent:hold","number":44}')" 409
+PERM=TRIAGE; wrules
+expect "without write access a label would not count: refused" "$(pcode '{"repo":"o/r","type":"label","op":"add","label":"agent:hold","number":42}')" 403
+PERM=ADMIN; wrules
+expect "a repository not on the list: refused" "$(pcode '{"repo":"o/plain","type":"label","op":"add","label":"agent:hold","number":42}')" 404
+expect "gh signed in as someone other than the page says: refused" "$(pcode '{"repo":"o/r","type":"label","op":"add","label":"agent:hold","number":42,"viewer":"someone-else"}')" 409
+expect "an unknown action: refused" "$(pcode '{"repo":"o/r","type":"merge"}')" 400
+expect "an action without the secret: refused" "$(curl -s -o /dev/null -w '%{http_code}' -H "Origin: ${B}" -H "Content-Type: application/json" -d '{"repo":"o/r","type":"label","op":"add","label":"agent:hold","number":42}' "${B}/api/action")" 401
+
+# The only writes: a comment on the inbox, a label on, a label off.
+calls="$(stub_gh_calls | tr '\n' ' ' | sed -E 's/ (api )/\n\1/g; s/ +$//')"
+writes="$(grep -vE "${reads}" <<<"${calls}" | grep -vE '^api repos/o/r/issues/7/comments --input -$|^api repos/o/r/issues/4[23]/labels --input -$|^api -X DELETE repos/o/r/issues/50/labels/agent%3Ablocked$' || true)"
+expect "no other write was made" "${writes}" ""
 
 printf '\n[dashboard] %d passed, %d failed\n' "${pass}" "${fail}"
 [[ "${fail}" -eq 0 ]]

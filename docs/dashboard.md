@@ -1,7 +1,8 @@
 # The Gatehand dashboard
 
 One local page for every repository where Gatehand is installed: what the agents are doing now,
-what waits for you, and what they did this week.
+what waits for you, and what they did this week; and buttons for the answers you would otherwise
+type on GitHub.
 
 ```bash
 python3 bin/dashboard.py
@@ -10,8 +11,8 @@ python3 bin/dashboard.py
 or `/gatehand:dashboard` in Claude Code. It needs `gh` signed in and Python 3.9 or later, nothing
 else: no packages, no build, no server of ours. It opens your browser on `127.0.0.1`.
 
-This file is not installed into your repositories; the dashboard runs on your machine and changes
-nothing in them.
+This file is not installed into your repositories; the dashboard runs on your machine, and what it
+changes on GitHub is only what you could change by hand: a comment, a label.
 
 ## What it shows
 
@@ -32,6 +33,43 @@ as the digest does. Without the repository's variables (a login with less than w
 The inbox requests in the detail view come from the agent bot's own request comments and can list a
 request the "Open requests" checklist missed (that list is a best-effort summary; the comments are
 the record).
+
+## What you can do from it
+
+Every button asks you to confirm, says what will happen, and then does it with your own `gh` login,
+so the agents see exactly what they would see if you had done it on GitHub, and apply the same rules.
+
+| Button | Where | What it does | Who it counts from |
+|---|---|---|---|
+| Approve (named for the request: "Requeue and rerun", "Reset the breaker", "Mark as seen"…), Reject… | each open inbox request | posts `/approve REQ-…` or `/reject REQ-… <reason>` on the inbox issue | `AGENT_OWNER_LOGIN` only |
+| Rerun coder | blocked issues | posts `/rerun coder #N` | `AGENT_OWNER_LOGIN` only |
+| Pause, Resume | each role under Breakers | posts `/pause <role>` or `/resume <role>` | `AGENT_OWNER_LOGIN` only |
+| Unqueue | the queue | removes `agent:ready` from an issue | people with write access |
+| Read and queue on GitHub | candidates | opens the issue; you add `agent:ready` there | people with write access |
+| Hold, Release | issues and agent PRs | adds or removes `agent:hold` | people with write access |
+| Hand back to the merge gate | agent PRs with `agent:blocked` or `agent:needs-human` | removes those labels, once you have fixed the PR yourself | people with write access |
+
+A button the agents would ignore from you is shown disabled with the reason. After an inbox command
+the page re-reads the inbox every ten seconds for two minutes until the agent's answer appears; the
+`Agent inbox` workflow does the actual work, exactly as for a typed comment. Until it has answered,
+the page sends no other command (the workflow has no concurrency group, so two runs at once would
+both apply: an Approve sent twice, or an Approve and a Reject); a command that gets no answer for ten
+minutes stops blocking.
+
+The page never adds `agent:ready`. That label vouches for the issue's text as it stands (the agents
+trust everything written before a writer applied it, model-written follow-ups and triage imports
+included), and the page does not show that text, so queueing stays on GitHub next to it. For the
+same reason "Rerun coder" is disabled on an issue with an open `untrusted` request: someone without
+write access changed its text, and a rerun alone would be refused again.
+
+Before posting, the server checks what the inbox workflow will check, and refuses with a reason
+rather than post something that would be ignored: you are `AGENT_OWNER_LOGIN` to the letter; the
+inbox issue is open, carries `<!-- agent-inbox -->` and was opened by the agent bot or the owner; the
+request is one the agent bot filed and nobody has answered yet; no command of yours is still waiting
+for its answer; a role is one in `policy.json`. Labels are never changed on the inbox issue itself. The
+command line it posts is built by the server in exactly the grammar `agent-inbox.sh` parses; a reject
+reason is cut to one line of 300 characters. `agent:allow-protected` is never offered: opening
+protected paths stays behind approving the agent's own `protected` request.
 
 ## Repositories
 
@@ -70,7 +108,10 @@ tab it opened can talk to it.
   `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'`.
 - The token never enters the dashboard's process: every call is a `gh` subprocess with an argument
   list. Issue bodies stay on the server; only what the page shows is sent to it.
-- It writes nothing to GitHub. `tests/dashboard/dashboard.test.sh` pins each point above.
+- It writes to GitHub only through the actions above: a comment on the inbox issue, or one of five
+  label changes, each a fixed shape the server builds; no request from the page is passed through.
+  Reading writes nothing. `tests/dashboard/dashboard.test.sh` pins each point above, and runs every
+  command the page can post through the real `parse_commands`.
 
 ## Options
 
