@@ -13,6 +13,9 @@
   all turned off. The list is dropped per repository when the page turns its agents on, or a read
   finds them on. No new write to GitHub; a config file from before loads unchanged. The page does
   not offer Pause all yet (#29).
+- Project site: `site/` holds five static pages (home, how it works, security, the dashboard, get
+  started), published to GitHub Pages by `.github/workflows/pages.yml` on a push to `main`. Not
+  part of the package: nothing changes in installed repositories.
 
 ## 0.7.0 (2026-11-14)
 
