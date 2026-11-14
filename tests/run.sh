@@ -5,7 +5,8 @@
 set -uo pipefail
 PKG="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT="$(mktemp -d)"
-trap 'rm -rf "${ROOT}"' EXIT
+OUT="$(mktemp -d)"
+trap 'rm -rf "${ROOT}" "${OUT}"' EXIT
 git -C "${ROOT}" init -q -b main
 mkdir -p "${ROOT}/.github/agents"
 # The test policy: the defaults, with every optional workflow on so its tests have files to read.
@@ -43,12 +44,30 @@ PYTHONDONTWRITEBYTECODE=1 python3 -c 'import ast, sys; ast.parse(open(sys.argv[1
 
 export AGENTS_ROOT="${ROOT}"
 if [[ $# -gt 0 ]]; then suites=("$@"); else suites=("${PKG}"/tests/*/*.test.sh); fi
-for t in "${suites[@]}"; do
-  if out="$(bash "${t}" 2>&1)"; then
+# The suites only read AGENTS_ROOT and keep their own state in mktemp directories, so they run in
+# parallel, up to AGENTS_TEST_JOBS at a time (default: one per CPU). Results print in suite order.
+jobs_max="${AGENTS_TEST_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
+[[ "${jobs_max}" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL: AGENTS_TEST_JOBS must be a positive integer"; exit 1; }
+# Background jobs ignore SIGINT, so Ctrl-C would not stop them: terminate the running suites.
+# shellcheck disable=SC2329 # invoked by the trap below
+stop_suites() {
+  local p
+  for p in $(jobs -p); do pkill -TERM -P "${p}" 2>/dev/null; done
+  exit 130
+}
+trap stop_suites INT TERM
+for i in "${!suites[@]}"; do
+  while [[ "$(jobs -rp | wc -l)" -ge "${jobs_max}" ]]; do wait -n; done
+  { bash "${suites[i]}" >"${OUT}/${i}.out" 2>&1; echo "$?" >"${OUT}/${i}.rc"; } &
+done
+wait
+for i in "${!suites[@]}"; do
+  t="${suites[i]}"
+  if [[ "$(cat "${OUT}/${i}.rc")" == 0 ]]; then
     printf 'ok    %s\n' "${t#"${PKG}"/}"
   else
     printf 'FAIL  %s\n' "${t#"${PKG}"/}"
-    printf '%s\n' "${out}" | grep -E 'FAIL|not ok|✗|Error|error' | head -15 | sed 's/^/      /'
+    grep -E 'FAIL|not ok|✗|Error|error' "${OUT}/${i}.out" | head -15 | sed 's/^/      /'
     rc=1
   fi
 done
