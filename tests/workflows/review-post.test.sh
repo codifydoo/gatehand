@@ -218,7 +218,7 @@ run_post $'Here is the review of #9 you asked for.\n'"${REVIEW}"
 expected='GET https://token.example.test/oidc?api-version=2.0&audience=claude-code-github-action none|POST https://api.anthropic.com/api/github/github-app-token-exchange none|POST https://api.example.test/repos/acme/repo/issues/7/comments app|DELETE https://api.example.test/installation/token app|GET https://api.example.test/repos/acme/repo/issues/7/comments?per_page=100&page=1 job|'
 [[ "$(calls)" == "${expected}" ]] && t_pass "post 1: OIDC, exchange, one comment on this run's PR, revoke, then the check with the job's token" \
   || t_fail "post 1: calls were $(calls)"
-[[ "$(jq -c . "${TMP}/exchange")" == '{"permissions":{"pull_requests":"write"}}' ]] && t_pass "post 1: the exchange asks for pull_requests write only" \
+[[ "$(jq -c . "${TMP}/exchange")" == '{"permissions":{"contents":"read","pull_requests":"write"}}' ]] && t_pass "post 1: the exchange asks for contents read and pull_requests write only" \
   || t_fail "post 1: the exchange asked for '$(cat "${TMP}/exchange")'"
 no_secret_in_argv && t_pass "post 1: no token or request value is in curl's argv" || t_fail "post 1: a secret is in argv"
 

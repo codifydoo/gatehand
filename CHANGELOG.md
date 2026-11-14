@@ -23,7 +23,7 @@
   - `/verify-pr` ends with the review as its final message, saved as an artifact; a new
     `post-review` job, which runs no model and checks out nothing, posts it from the marker line on
     to the run's PR as `claude[bot]`, with a Claude App token it mints itself (OIDC, then Anthropic's
-    token exchange, asking for `pull_requests: write` only) and revokes, then asserts the comment
+    token exchange, asking for `contents: read` and `pull_requests: write` only) and revokes, then asserts the comment
     landed. It posts nothing that lacks the marker, is over 60000 bytes or carries text shaped like a
     credential. When the exchange refuses because the PR edits the review workflow, or Claude never
     ran, it posts the "Claude did not review this PR" note instead;

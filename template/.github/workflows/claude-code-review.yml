@@ -362,7 +362,8 @@ jobs:
   # final message and posts it to this run's PR, never one the text names, as the Claude App, whose
   # login (the review bot) the de-dup, the merge gate and the fixer read. The token comes from
   # exchanging this job's OIDC token at Anthropic, as claude-code-action itself does when it is
-  # given no github_token, for pull_requests write only; it is used for one comment and revoked.
+  # given no github_token, for contents read and pull_requests write only (the exchange refuses a
+  # narrowed set without contents); it is used for one comment and revoked.
   # The exchange refuses when this file differs from the default branch's copy ("workflow
   # validation"): a PR that edits it gets the "not reviewed" note instead. The merge gate and the
   # fixer read a review's time window from the claude-review job's start to this job's end
@@ -465,7 +466,7 @@ jobs:
           answer="$(mktemp)"
           status="$(printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "${oidc}" \
             | curl -K - -sS --retry 3 --retry-delay 5 -o "${answer}" -w '%{http_code}' -X POST \
-              --data '{"permissions":{"pull_requests":"write"}}' \
+              --data '{"permissions":{"contents":"read","pull_requests":"write"}}' \
               'https://api.anthropic.com/api/github/github-app-token-exchange')" || code=$?
           [[ "${code}" -eq 0 ]] || { echo "::error::the Claude App token exchange could not be reached (curl ${code})"; exit 1; }
           json="$(cat "${answer}")"
@@ -479,7 +480,9 @@ jobs:
               skip_note 'The review ran, but the Claude App posts only for the default branch'"'"'s copy of `.github/workflows/claude-code-review.yml`, and this PR edits it.'
               exit 0
             fi
-            echo "::error::the Claude App token exchange answered ${status}; nothing was posted"
+            # The server's own message (a refusal carries no token), on one line and cut short.
+            said="$(jq -r '.error.message // .message // empty' <<<"${json}" 2>/dev/null | tr -d '\r' | tr '\n' ' ' | cut -c1-300 || true)"
+            echo "::error::the Claude App token exchange answered ${status} (${said:-no message}); nothing was posted"
             exit 1
           fi
           tok="$(jq -r '.token // .app_token // empty' <<<"${json}" 2>/dev/null || true)"
