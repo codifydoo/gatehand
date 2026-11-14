@@ -17,23 +17,50 @@ repository variable.
 
 ## What it shows
 
+A sidebar leads to every view, with its count beside it: Needs you, Activity, Week, then one row per
+repository. The view is in the address (`#/needs`, `#/activity`, `#/week`, `#/repos`,
+`#/r/owner/name/pipeline|agents|runs|settings`), so a reload or a link lands on the same screen. The
+number of things waiting for you is also in the tab's title.
+
 | Where | What | Read from |
 |---|---|---|
-| Totals | repositories, items waiting for you, open agent PRs, queued issues, runs now, runs and cost over seven days | everything below, added up |
-| Waiting for you | unticked inbox requests, stopped roles, blocked issues and PRs, `agent:candidate` issues, merged issues to close once live | the inbox issue's "Open requests" list, `state/breaker.json` on the ledger branch, labels; the same list the weekly digest posts |
+| Needs you | one row per thing you act on, newest first: open inbox requests, stopped roles, agent PRs held for a person, blocked issues with no open request; folded below them, agent PRs that passed the merge gate while auto-merge is a dry run ("to merge"), and merged issues to close once live ("to close") | the inbox issue's "Open requests" list and, when it lists any, the request comments themselves (only they say what kind a request is, and whether it was answered; when they cannot be read, or a line's comment is older than the newest 1,000, the kind is told from the line's text); `state/breaker.json` on the ledger branch; labels; and, for a repository in dry run with agent PRs, the merge gate's report |
+| Activity | Gatehand's runs that are running or waiting to start, in every repository | the running and queued Actions runs of Gatehand's nine workflows |
+| Week | each repository's runs over seven days per role: outcomes, runs today against `runsPerDay`, turns, time, cost | the ledger |
 | Repositories | version, `AGENTS_ENABLED`, `AGENT_AUTO_MERGE`, runs today against each role's `runsPerDay`, seven-day cost, breakers, health | `install.lock.json`, the repository's Actions variables, the ledger, the runner ref's copy of `agent-coder.yml` against the default branch's |
-| A repository | its inbox requests in full, agent PRs with the merge gate's last word on each, running and recent runs, the queue by priority, in progress, blocked, candidates, on hold, ledger rows | the inbox issue's newest 1,000 comments (the agent bot's only), the job logs of the newest three `Agent merge` runs that ran (a PR's newest line wins, so a run dispatched for one PR does not hide the others), the running, queued and finished Actions runs of Gatehand's nine workflows |
+| A repository, Pipeline | its inbox requests in full, agent PRs with the merge gate's last word on each, the queue by priority, in progress, blocked, candidates, on hold, merged to close | the inbox issue's newest 1,000 comments (the agent bot's only), the job logs of the newest three `Agent merge` runs that ran (a PR's newest line wins, so a run dispatched for one PR does not hide the others), labels |
+| A repository, Agents | each role's breaker, runs running now | the ledger, Actions runs |
+| A repository, Runs and spend | runs per role over seven days, ledger rows, recent finished runs | the ledger, Actions runs |
+| A repository, Settings | the two switches, who may answer, the inbox, version, whether the runner ref matches the default branch | the repository's Actions variables, `install.lock.json`, `policy.json` |
+
+Needs you counts the way it lists: a request about an agent PR (the fixer stopped, the merge gate
+cannot update it, its review never posted) is that PR's row; a stopped role and its breaker request
+are one row; a blocked issue with an open request is the request's row. The folded groups count. The
+sidebar, the tab's title and "All" are the same number, and the chips above the list (Requests,
+Stopped, PRs, Issues, To merge, To close) add up to it. Suggested (`agent:candidate`) issues are on
+a repository's Pipeline tab, not here: queueing one is done on GitHub, next to its text.
+
+A row marked NEW was not there the last time you looked at Needs you. That is remembered by this
+browser for this address, so a dashboard started on another port (the default picks a free one)
+marks everything NEW once; `--port` keeps it.
+
+In the sidebar, the tab's title and the chips, a count that leaves out a part it could not read, or a
+repository still loading, shows as "n+" (at least n), or "?" when nothing else is known. What could
+not be read is listed under the rows, not counted.
 
 Numbers are computed the way the agents compute them (`agent-digest.sh`, `agent-state.sh`): a ledger
 line that does not parse costs that line only; a run with `counted: false` never reached the model
 and is not a run for the daily cap. A part it cannot read is shown as `?` and listed under the
-repository, never as zero, "off" or "nothing waits": "Waiting for you" says what it could not read,
+repository, never as zero, "off" or "nothing waits": Needs you says what it could not read,
 as the digest does. Without the repository's variables (a login with less than write access) or its
 `policy.json`, it does not guess which issue is the inbox.
 
-The inbox requests in the detail view come from the agent bot's own request comments and can list a
+The inbox requests on a repository's Pipeline come from the agent bot's own request comments and can list a
 request the "Open requests" checklist missed (that list is a best-effort summary; the comments are
-the record).
+the record). Needs you takes its open requests from the checklist, so the same list counts for every
+repository, open or not: a request the checklist missed is only on the Pipeline tab. A role whose
+breaker was reset with `/resume` while its breaker request stays open still has a row, "breaker
+request still open", until the request is answered.
 
 ### Limits and schedules
 
@@ -60,16 +87,16 @@ so the agents see exactly what they would see if you had done it on GitHub, and 
 |---|---|---|---|
 | Approve (named for the request: "Requeue and rerun", "Reset the breaker", "Mark as seen"…), Reject… | each open inbox request | posts `/approve REQ-…` or `/reject REQ-… <reason>` on the inbox issue | `AGENT_OWNER_LOGIN` only |
 | Rerun coder | blocked issues | posts `/rerun coder #N` | `AGENT_OWNER_LOGIN` only |
-| Pause, Resume | each role under Breakers | posts `/pause <role>` or `/resume <role>` | `AGENT_OWNER_LOGIN` only |
+| Pause, Resume | each role, on a repository's Agents tab | posts `/pause <role>` or `/resume <role>` | `AGENT_OWNER_LOGIN` only |
 | Unqueue | the queue | removes `agent:ready` from an issue | people with write access |
 | Read and queue on GitHub | candidates | opens the issue; you add `agent:ready` there | people with write access |
 | Hold, Release | issues and agent PRs | adds or removes `agent:hold` | people with write access |
 | Hand back to the merge gate | agent PRs with `agent:blocked` or `agent:needs-human` | removes those labels, once you have fixed the PR yourself | people with write access |
-| Turn agents on/off, Turn auto-merge on/off | Switches | sets `AGENTS_ENABLED` or `AGENT_AUTO_MERGE` to `true` or `false` | people who may set Actions variables |
+| Turn agents on/off, Turn auto-merge on/off | a repository's Settings tab | sets `AGENTS_ENABLED` or `AGENT_AUTO_MERGE` to `true` or `false` | people who may set Actions variables |
 | Start the coder on the next one | the queue | dispatches an auto-pick `agent-coder.yml` run on `policy.runnerRef` | people with write access |
 | Approve…, Request changes… | agent PRs | posts a review comment the merge gate and the fixer read (below); Request changes can also start the fixer on it | people with write access, never the agent bot |
 | Run review, Run merge gate | agent PRs | dispatches `claude-code-review.yml` or `agent-merge.yml` on the default branch, for that PR (or every agent PR) | people with write access |
-| Cancel | Running now | cancels a run of one of Gatehand's nine workflows | people with write access |
+| Cancel | Activity, and a repository's Agents tab | cancels a run of one of Gatehand's nine workflows | people with write access |
 
 A button the agents would ignore from you is shown disabled with the reason. After an inbox command
 the page re-reads the inbox every ten seconds for two minutes until the agent's answer appears; the
@@ -170,8 +197,9 @@ nothing may be retried).
 ## Repositories
 
 On first start it lists every repository your login can see, through GraphQL, and keeps the
-non-archived ones whose default branch has `.github/agents/install.lock.json`. "Find repositories"
-scans again. Add one by hand by `owner/name`; "Hide" keeps one out of later scans too. The list
+non-archived ones whose default branch has `.github/agents/install.lock.json`. "Find repositories",
+under Repositories, scans again. Add one by hand by `owner/name` there; "Hide" (there, or on a
+repository's Settings tab) keeps one out of later scans too. The list
 lives in `${XDG_CONFIG_HOME:-~/.config}/gatehand/dashboard.json` (mode 0600; `--config` to move it),
 with the Pause all record. Neither is ever sent to GitHub.
 A scan that cannot see everything (an organisation that requires SAML authorisation for your token,

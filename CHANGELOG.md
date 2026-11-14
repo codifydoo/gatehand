@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- The dashboard is laid out as a sidebar and views instead of one long page: Needs you, Activity,
+  Week, a Repositories list, and per repository four tabs (Pipeline, Agents, Runs and spend,
+  Settings). The view is in the address, so a reload or a link keeps it, and the number waiting for
+  you is in the tab's title. The total tiles are gone: what waits for you, runs going and the week's cost sit
+  in the sidebar; open PRs, queued issues and run counts are per repository, on Repositories and Week. Every list and
+  button is still there, and sends exactly what it did.
+- Needs you is one list with one row per thing you act on, newest first, with chips to filter it
+  (Requests, Stopped, PRs, Issues, To merge, To close) that add up to its count. A request about an
+  agent PR shows as that PR; a stopped role and its breaker request are one row. New: agent PRs that
+  passed the merge gate while auto-merge is a dry run, folded under "to merge", since a person has
+  to merge them. A row you have not seen before is marked NEW. Suggested issues are no longer in
+  Needs you; they stay on the repository's Pipeline tab.
 - Dashboard: the repository payload carries each role's `maxAttemptsPerIssue`, `maxCiFixes`,
   `breakerThreshold` and `timeoutMinutes` (null when `policy.json` does not set one), and each
   scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
@@ -16,6 +28,7 @@
 - Project site: `site/` holds five static pages (home, how it works, security, the dashboard, get
   started), published to GitHub Pages by `.github/workflows/pages.yml` on a push to `main`. Not
   part of the package: nothing changes in installed repositories.
+- Nothing installed into repositories changes: no update is needed.
 
 ## 0.7.0 (2026-11-14)
 
