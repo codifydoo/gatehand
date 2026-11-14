@@ -37,8 +37,11 @@
 - Dashboard: the repository payload carries each role's `maxAttemptsPerIssue`, `maxCiFixes`,
   `breakerThreshold` and `timeoutMinutes` (null when `policy.json` does not set one), and each
   scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
-  branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only;
-  the page does not show them yet (#21, #22).
+  branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only
+  (#21, #22); a repository's Agents tab shows them.
+- Project site: `site/` holds five static pages (home, how it works, security, the dashboard, get
+  started), published to GitHub Pages by `.github/workflows/pages.yml` on a push to `main`. Not
+  part of the package: nothing changes in installed repositories.
 - Nothing installed into repositories changes: no update is needed.
 
 ## 0.7.0 (2026-11-14)
