@@ -17,6 +17,9 @@ const $ = (id) => document.getElementById(id);
   }
   if (m) history.replaceState(null, "", location.pathname);
 })();
+// The view is in the address after the secret is taken out of it; no view named means Needs you.
+state.route = parseRoute();
+if (!/^#\//.test(location.hash)) history.replaceState(null, "", `${location.pathname}#/needs`);
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -141,77 +144,376 @@ function health(d) {
   return out.length ? out : pill("ok", "ok");
 }
 
-// --- rendering ---------------------------------------------------------------------------------------
-function renderTotals() {
-  const all = Object.values(state.repos).filter((d) => d && !d.loading);
-  const t = { unknown: new Set() };
-  for (const one of all.map(totals)) {
-    for (const k of KEYS) t[k] = (t[k] || 0) + (one[k] || 0);
-    one.unknown.forEach((k) => t.unknown.add(k));
-  }
-  const tile = (label, key, fmt, kind) => h("div", { class: `tile ${kind || ""}`, title: t.unknown.has(key) ? "? : part of this could not be read" : null },
-    h("div", { class: "num" }, shown(t, key, fmt)), h("div", { class: "label" }, label));
-  replace($("totals"),
-    h("div", { class: "tile" }, h("div", { class: "num" }, String(state.session ? state.session.repos.length : 0)), h("div", { class: "label" }, "repositories")),
-    tile("waiting for you", "waiting", null, t.waiting || t.unknown.has("waiting") ? "attn" : ""),
-    tile("open agent PRs", "prs"),
-    tile("queued issues", "queue"),
-    tile("running now", "active"),
-    tile("runs, 7 days", "runs"),
-    tile("cost, 7 days", "cost", usd));
+// --- routes: the address holds the view, so a reload or a shared link lands on the same screen -------
+const TABS = [["pipeline", "Pipeline"], ["agents", "Agents"], ["runs", "Runs and spend"], ["settings", "Settings"]];
+function parseRoute() {
+  const p = location.hash.replace(/^#/, "");
+  const m = /^\/r\/([A-Za-z0-9-]+)\/([A-Za-z0-9_.-]+)(?:\/(pipeline|agents|runs|settings))?$/.exec(p);
+  if (m) return { view: "repo", repo: `${m[1]}/${m[2]}`, tab: m[3] || "pipeline" };
+  const n = /^\/needs(?:\?kind=(request|role|pr|issue|merge|close))?$/.exec(p);
+  if (n) return { view: "needs", kind: n[1] || "" };
+  const v = /^\/(activity|week|repos)$/.exec(p);
+  return v ? { view: v[1] } : { view: "needs", kind: "" };
+}
+const repoRoute = (repo, tab) => `/r/${repo}${tab && tab !== "pipeline" ? `/${tab}` : ""}`;
+// An in-page link. Its route is built here from fixed names and repository names the server already
+// checked against owner/name, never from text GitHub returned.
+function routeLink(route, attrs, ...kids) {
+  const el = h("a", attrs, ...kids);
+  el.setAttribute("href", `#${route}`);
+  return el;
+}
+const go = (route) => { location.hash = route; };
+// The repository the address names, spelled as the dashboard's list spells it; "" if it is not on it.
+function routeRepo() {
+  if (state.route.view !== "repo" || !state.session) return "";
+  return state.session.repos.find((r) => r.toLowerCase() === state.route.repo.toLowerCase()) || "";
 }
 
-function renderWaiting() {
-  const blocks = [];
-  let gaps = false;
-  for (const repo of state.session ? state.session.repos : []) {
-    const d = state.repos[repo];
-    if (d && d.failed) {
-      gaps = true;
-      blocks.push(h("div", { class: "group" }, h("h3", {}, repo),
-        h("ul", { class: "items" }, h("li", {}, pill("unknown", "warn"), ` Could not read this repository: ${d.failed}`))));
+// --- Needs you: one row per thing you act on ---------------------------------------------------------
+// The counting rule. A row's kind is the pane it will open. A request about a PR (the fixer stopped,
+// the merge gate cannot update it, its review never posted) is that PR's row; a stopped role and its
+// breaker request are one row; a blocked issue with an open request is the request's row. The folded
+// groups count too: "to merge" (passed the gate while auto-merge is a dry run) and "to close" (merged,
+// to close once the fix is live). Suggested issues are not here: queueing one is done on GitHub,
+// next to its text, from the Pipeline tab.
+const CHIPS = [["request", "Requests"], ["role", "Stopped"], ["pr", "PRs"], ["issue", "Issues"], ["merge", "To merge"], ["close", "To close"]];
+const KIND_LABEL = { request: "Request", role: "Role", pr: "PR", issue: "Issue", merge: "To merge", close: "To close" };
+const FOLDED = { merge: (n) => `${n} ${n === 1 ? "PR" : "PRs"} to merge · passed the gate, auto-merge is a dry run`,
+  close: (n) => `${n} merged ${n === 1 ? "issue" : "issues"} to close once live` };
+const KIND_VERB = { blocked: "blocked on", failed: "failed on", protected: "needs protected paths for", untrusted: "stopped: changed text on" };
+const STUCK = ["agent:blocked", "agent:needs-human"];
+const roleName = (r) => (r ? r[0].toUpperCase() + r.slice(1) : "Agent");
+const dryRun = (d) => !(d.vars && d.vars.AGENT_AUTO_MERGE === "true");
+// What else is read for Needs you. The inbox, when its checklist lists open requests: a request's kind
+// is only in its comment. The merge gate's report, when an agent PR could be waiting to be merged by hand.
+const needsInbox = (d) => !!(d.inbox && d.inbox.checklist.length);
+const needsGate = (d) => (d.prs || []).length > 0 && dryRun(d);
+
+function needRows(repo) {
+  const d = state.repos[repo];
+  const out = { rows: [], notes: [], loading: false, unknown: false };
+  if (!d || d.loading) { out.loading = true; return out; }
+  if (d.failed) { out.unknown = true; out.notes.push(`Could not read this repository: ${d.failed}`); return out; }
+  for (const w of d.waiting || []) if (w.kind === "unknown") { out.unknown = true; out.notes.push(w.text); }
+  const issues = d.issues || {};
+  const findIssue = (n) => Object.values(issues).flat().find((i) => i && i.number === n) || null;
+  const add = (r) => out.rows.push(Object.assign({ repo }, r));
+  // The open requests are the inbox checklist's unticked lines, the same list for every repository
+  // whether it is on screen or not; the agents tick a line when its request is answered. A request's
+  // kind and time come from its comment. Until the comments are read the requests wait (loading); if
+  // they cannot be read, or a line's comment is not among the newest 1,000, the kind is told from the
+  // line: the fixer's, merger's and review's start "#<PR>:", a breaker's is "circuit breaker tripped".
+  const lines = needsInbox(d) ? d.inbox.checklist : [];
+  const got = state.inbox[repo];
+  const comments = got && got.requests ? got.requests : null;
+  if (lines.length && !comments) {
+    if (got && got.error) { out.unknown = true; out.notes.push(`Inbox requests: ${got.error}`); }
+    else out.loading = true;
+  }
+  const guess = (l) => (/^#\d+:/.test(l.summary) ? "fixer" : (/^circuit breaker tripped/.test(l.summary) ? "breaker" : ""));
+  const asRequest = (l) => {
+    const c = comments ? comments.find((r) => r.id === l.id) : null;
+    return { id: l.id, role: c ? c.role : l.role, issue: c ? c.issue : l.issue, kind: c ? c.kind : guess(l),
+      created_at: c ? c.created_at : "", summary: l.summary };
+  };
+  const onPr = (r) => (["fixer", "merger", "review"].includes(r.kind) ? /^#(\d+):/.exec(r.summary) : null);
+  // Ticking a line is best effort, so a line whose comment says answered is dropped once that is known.
+  const reqs = out.loading ? [] : lines.filter((l) => !(comments && comments.some((r) => r.id === l.id && r.answered))).map(asRequest);
+  // While loading, a PR a line names waits for its PR row, so it does not show as "to merge" first.
+  const linePr = new Set(out.loading ? lines.map((l) => /^#(\d+):/.exec(l.summary)).filter(Boolean).map((m) => Number(m[1])) : []);
+  const prRows = new Map();
+  const prRow = (n) => {
+    if (!prRows.has(n)) {
+      const p = (d.prs || []).find((x) => x.number === n) || null;
+      prRows.set(n, { n, p, reqs: [], at: p ? p.updated_at || p.created_at || "" : "" });
+    }
+    return prRows.get(n);
+  };
+  const roleReq = {};
+  // An issue an open request is about is that request's row, not a blocked issue of its own; decided
+  // from the lines even while the comments load, so no row shows as one kind and then moves.
+  const issueReq = new Set((out.loading ? lines.map((l) => Object.assign(asRequest(l), { kind: guess(l) })) : reqs)
+    .filter((r) => r.issue && r.kind !== "breaker" && !onPr(r)).map((r) => r.issue));
+  for (const r of reqs) {
+    const pr = onPr(r);
+    if (pr) {
+      const x = prRow(Number(pr[1]));
+      x.reqs.push(r);
+      if ((r.created_at || "") > x.at) x.at = r.created_at;
       continue;
     }
-    if (d && !d.loading && !Array.isArray(d.waiting)) gaps = true;
-    if (!d || d.loading || !(d.waiting || []).length) continue;
-    if (d.waiting.some((w) => w.kind === "unknown")) gaps = true;
-    // Merged issues to close once live are bookkeeping, not decisions: one folded line for all of them.
-    const line = (w) => h("li", { class: `w-${w.kind}` },
-      pill(w.kind, w.kind === "request" || w.kind === "breaker" ? "attn" : (w.kind === "unknown" ? "warn" : "")), " ", link(w.url, w.text));
-    const now = d.waiting.filter((w) => w.kind !== "deploy");
-    const later = d.waiting.filter((w) => w.kind === "deploy");
-    blocks.push(h("div", { class: "group" },
-      h("h3", {}, h("button", { type: "button", class: "linkish", onclick: () => select(repo) }, repo)),
-      h("ul", { class: "items" }, now.map(line),
-        later.length ? h("li", {}, h("details", {}, h("summary", {}, pill("deploy"), ` ${later.length} merged issue(s) to close once the fix is live`),
-          h("ul", { class: "items" }, later.map(line)))) : null)));
+    if (r.kind === "breaker") { roleReq[r.role] = r; continue; } // lines are oldest first: the newest wins
+    const i = r.issue ? findIssue(r.issue) : null;
+    add({ kind: "request", key: `${repo}|req|${r.id}`, at: r.created_at || "", req: r,
+      title: `${roleName(r.role)} ${KIND_VERB[r.kind] || (r.kind ? `${r.kind} request` : "request")}${r.issue ? `${KIND_VERB[r.kind] ? "" : " on"} #${r.issue}` : ""}`,
+      text: i ? i.title : r.summary || r.id,
+      hint: r.kind === "blocked" || r.kind === "failed" ? `Answer on #${r.issue}, then Requeue and rerun` : (KIND_APPROVE[r.kind] || ["Answer it"])[0],
+      route: repoRoute(repo) });
   }
-  const loading = Object.values(state.repos).some((d) => d && d.loading);
-  replace($("waiting"), blocks.length ? blocks
-    : empty(loading ? "Loading…" : (gaps ? "Nothing that could be read; see the repositories below." : "Nothing. Every agent is either working or idle.")));
+
+  // Stopped roles, each with its breaker request when there is one. "Reset the breaker" answers the
+  // request and is on the Pipeline tab; Resume, for a role stopped with no request, is on Agents.
+  const known = !!d.breakers; // breaker.json unread: the role's state is not claimed either way
+  const breakers = d.breakers || {};
+  const roles = new Set([...Object.keys(breakers).filter((r) => breakers[r] && breakers[r].tripped_at), ...Object.keys(roleReq)]);
+  for (const role of roles) {
+    const b = breakers[role] || {};
+    const r = roleReq[role] || null;
+    // /resume resets a breaker without answering its request, so a request can outlive the stop.
+    const stopped = !!b.tripped_at;
+    // The Pipeline tab has "Reset the breaker" only for a request whose comment it read.
+    const viaReq = !!(r && comments && comments.some((c) => c.id === r.id));
+    add({ kind: "role", key: `${repo}|role|${role}|${b.tripped_at || (r && r.id)}`, at: b.tripped_at || (r ? r.created_at : "") || "", req: r,
+      title: stopped ? `${roleName(role)} stopped` : `${roleName(role)}: breaker request ${known ? "still open" : "open"}`,
+      text: stopped ? b.reason || (r ? r.summary : "") : (known ? "the role runs again" : "could not read whether it is stopped"),
+      hint: stopped ? `No ${role} runs until it is reset · ${viaReq ? "Reset the breaker" : "Resume"}`
+        : (viaReq ? "Reset the breaker answers the request" : "Answer it on the inbox issue"),
+      route: viaReq || !stopped ? repoRoute(repo) : repoRoute(repo, "agents") });
+  }
+
+  // Agent PRs held for a person, with any request about them.
+  for (const p of d.prs || []) if (p.labels.some((l) => STUCK.includes(l))) prRow(p.number);
+  for (const x of prRows.values()) {
+    const kinds = x.reqs.map((r) => r.kind);
+    const held = x.p && x.p.labels.some((l) => STUCK.includes(l));
+    add({ kind: "pr", key: `${repo}|pr|${x.n}`, at: x.at, pr: x.n, reqs: x.reqs,
+      title: `PR #${x.n} ${kinds.includes("merger") ? "can't be updated from its base" : (kinds.includes("review") ? "has no Claude review" : (held ? "held for a person" : "needs you"))}`,
+      text: x.p ? x.p.title : x.reqs[0].summary,
+      hint: kinds.includes("merger") ? "Merge the base in yourself, then Hand back"
+        : (kinds.includes("review") ? "Run the review once it can" : "Fix it on GitHub, then Hand back"),
+      route: repoRoute(repo) });
+  }
+
+  // Blocked issues with no open request.
+  for (const i of issues.blocked || []) {
+    if (issueReq.has(i.number)) continue;
+    add({ kind: "issue", key: `${repo}|issue|${i.number}`, at: i.updated_at || "", issue: i.number,
+      title: `#${i.number} blocked`, text: i.title, hint: "No open request · Rerun coder", route: repoRoute(repo) });
+  }
+
+  // To merge: the merge gate's last word on a PR nobody holds is "would merge" (a dry run). A PR put on
+  // hold or being fixed since keeps that line until the gate runs again, so it is left out.
+  const gate = state.gate[repo];
+  if (needsGate(d)) {
+    if (gate && gate.error) { out.unknown = true; out.notes.push(`Merge gate report: ${gate.error}`); }
+    else if (!gate) out.loading = true;
+    else {
+      for (const p of d.prs) {
+        const g = gate.prs && gate.prs[String(p.number)];
+        if (prRows.has(p.number) || linePr.has(p.number) || !g || !/^would merge /.test(g.text)
+          || p.labels.some((l) => l === "agent:hold" || l === "agent:fixing")) continue;
+        add({ kind: "merge", key: `${repo}|merge|${p.number}|${g.text.split(" ")[2] || ""}`, at: g.at || "", pr: p.number,
+          title: `PR #${p.number} passed the gate`, text: p.title, hint: "Merge it on GitHub, or turn auto-merge on in Settings", href: p.url });
+      }
+    }
+  }
+
+  // To close: merged, closed by a person once the fix is live.
+  for (const i of issues.done_pending_deploy || []) {
+    add({ kind: "close", key: `${repo}|close|${i.number}`, at: i.updated_at || "", issue: i.number,
+      title: `#${i.number} merged`, text: i.title, hint: "Close it on GitHub once the fix is live", href: i.url });
+  }
+  return out;
+}
+// One repository's Needs you count, as text: "n", "n+" (still loading or partly unread), "?" or "".
+function needText(x) {
+  const n = x.rows.length;
+  if (x.loading && !n) return "…";
+  return n ? `${n}${x.loading || x.unknown ? "+" : ""}` : (x.unknown ? "?" : "");
 }
 
-function renderRepos() {
+// NEW: what was not on Needs you the last time you looked at it. Kept in this browser for this
+// address (the dashboard's port), so a dashboard started on another port starts over.
+const SEEN_KEY = "gatehand-seen";
+function loadSeen() {
+  try { return JSON.parse(localStorage.getItem(SEEN_KEY) || "{}") || {}; } catch (_) { return {}; }
+}
+function rememberSeen(rows) {
+  try {
+    const seen = loadSeen();
+    const now = Date.now();
+    for (const r of rows) seen[r.key] = now;
+    for (const [k, t] of Object.entries(seen)) if (now - t > 30 * 864e5) delete seen[k]; // not seen for 30 days
+    localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
+  } catch (_) { /* no storage: everything stays NEW */ }
+}
+function lookAgain() { state.seenBefore = new Set(Object.keys(loadSeen())); }
+
+// --- counts: shown once, in the sidebar and the tab title --------------------------------------------
+// A repository still loading, or a part that could not be read, makes a count "n+" (at least n), or
+// "?" when nothing else is known: never a clean number that leaves something out.
+function counts() {
+  const repos = state.session ? state.session.repos : [];
+  const c = { needs: 0, needsRepos: 0, needsUnknown: false, needsLoading: false, unread: [], loading: false,
+    running: 0, runningUnknown: false, cost: 0, costSeen: false, costFloor: false };
+  for (const repo of repos) {
+    const x = needRows(repo);
+    c.needs += x.rows.length;
+    if (x.rows.length) c.needsRepos += 1;
+    if (x.loading) c.needsLoading = true;
+    if (x.unknown) { c.needsUnknown = true; c.unread.push(repo); }
+    const d = state.repos[repo];
+    if (!d || d.loading) { c.loading = true; continue; }
+    if (d.failed) { c.runningUnknown = c.costFloor = true; continue; }
+    const t = totals(d);
+    c.running += t.active;
+    if (t.unknown.has("active")) c.runningUnknown = true;
+    if (d.stats) {
+      c.costSeen = true;
+      c.cost += t.cost;
+      if ((d.runs || []).some((r) => typeof r.cost_usd !== "number")) c.costFloor = true;
+    } else c.costFloor = true;
+  }
+  const n = (v, unknown, loading) => (unknown && !v && !loading ? "?" : `${v}${loading || unknown ? "+" : ""}`);
+  c.needsText = n(c.needs, c.needsUnknown, c.needsLoading);
+  c.runningText = c.loading || c.running || c.runningUnknown ? `${n(c.running, c.runningUnknown, c.loading)} running` : "none running";
+  // A floor: runs with no cost recorded count for nothing, and Claude review runs are not in the ledger.
+  c.costText = c.costSeen || !repos.length ? `${usd(c.cost)}${c.costFloor || c.loading ? "+" : ""}` : (c.loading ? "…" : "?");
+  return c;
+}
+function repoBadge(repo) {
+  const d = state.repos[repo];
+  const x = needRows(repo);
+  const text = needText(x);
+  if (d && d.breakers && Object.values(d.breakers).some((b) => b && b.tripped_at)) return [text ? `stopped · ${text}` : "stopped", "bad"];
+  return [text, x.unknown ? "warn" : ""];
+}
+
+// --- rendering ---------------------------------------------------------------------------------------
+function renderSide() {
+  const c = counts();
+  const r = state.route;
+  const repos = state.session ? state.session.repos : [];
+  const ex = state.session ? state.session.excluded : [];
+  // Short names, unless two repositories share one.
+  const label = (repo) => (repos.filter((x) => short(x) === short(repo)).length > 1 ? repo : short(repo));
+  const item = (route, on, text, badge, badgeKind, cls, title) => routeLink(route,
+    { class: `${cls || "side-item"}${on ? " on" : ""}`, "aria-current": on ? "page" : null, title: title || null },
+    h("span", { class: "side-label" }, text), badge ? h("span", { class: `badge ${badgeKind || ""}` }, badge) : null);
+  replace($("side"),
+    item("/needs", r.view === "needs", "Needs you", c.needsText, c.needs ? "attn" : (c.needsUnknown ? "warn" : "")),
+    item("/activity", r.view === "activity", "Activity", c.runningText),
+    item("/week", r.view === "week", "Week", c.costText),
+    item("/repos", r.view === "repos", `Repositories · ${repos.length}`, null, null, "side-head"),
+    repos.map((repo) => {
+      const [badge, kind] = repoBadge(repo);
+      return item(repoRoute(repo), r.view === "repo" && repo === routeRepo(), label(repo), badge, kind, "side-item repo", repo);
+    }),
+    // Already on #/repos the address does not change, so the link goes to the form itself.
+    item("/repos", false, `Find · add${ex.length ? ` · ${ex.length} hidden` : ""}`, null, null, "side-foot"));
+  $("side").lastChild.addEventListener("click", () => { if (state.route.view === "repos") $("add-repo").focus(); });
+  document.title = c.needsText === "0" ? "Gatehand" : `(${c.needsText}) Gatehand`;
+}
+
+function viewHead(title, ...rest) {
+  return h("div", { class: "view-head" }, h("h2", {}, title), rest.length ? h("span", { class: "muted" }, ...rest) : null);
+}
+function repoHeading(repo) {
+  return h("h3", {}, routeLink(repoRoute(repo), {}, repo));
+}
+
+// A row of Needs you. Until the item pane exists it opens the repository tab with the row's buttons;
+// a row with nothing to do on the page (to merge, to close) opens it on GitHub.
+function needRow(r, isNew) {
+  const kids = [
+    h("div", { class: "lmeta" }, h("span", { class: `dot${isNew ? "" : " old"}`, "aria-hidden": "true" }),
+      `${short(r.repo)} · ${KIND_LABEL[r.kind]}${r.at ? ` · ${ago(r.at)}` : ""}`, isNew ? h("span", { class: "new" }, "NEW") : null),
+    h("div", { class: "ltitle" }, h("strong", {}, r.title), r.text ? ` ${r.text}` : ""),
+    h("div", { class: "lhint" }, r.hint)];
+  return r.route ? routeLink(r.route, { class: "lrow", title: r.repo }, kids) : h("a", { href: r.href, class: "lrow", title: r.repo }, kids);
+}
+
+function needsView() {
+  const repos = state.session ? state.session.repos : [];
+  const per = repos.map((repo) => [repo, needRows(repo)]);
+  const rows = per.flatMap(([, x]) => x.rows).sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  const isNew = (r) => !state.seenBefore.has(r.key);
+  const c = counts();
+  const kind = state.route.kind || "";
+  const of = (k) => rows.filter((r) => r.kind === k);
+  rememberSeen(kind ? of(kind) : rows); // only what is on screen counts as looked at
+  // A kind's count, like the total, is a floor while something is loading or could not be read.
+  const more = c.needsLoading || c.needsUnknown ? "+" : "";
+  const chip = (k, label, count) => routeLink(k ? `/needs?kind=${k}` : "/needs",
+    { class: `chip${kind === k ? " on" : ""}`, "aria-current": kind === k ? "page" : null }, `${label} ${count}`);
+  const chips = h("div", { class: "chips" }, chip("", "All", c.needsText),
+    CHIPS.filter(([k]) => of(k).length || kind === k).map(([k, label]) => chip(k, label, `${of(k).length}${more}`)));
+  const newCount = rows.filter(isNew).length;
+  const summary = [
+    `${c.needsText} in ${c.needsRepos} ${c.needsRepos === 1 ? "repository" : "repositories"}`,
+    newCount ? ` · ${newCount} new` : "",
+    c.needsLoading ? " · still loading" : "",
+    c.unread.length ? ` · could not read all of ${c.unread.map(short).join(", ")}` : ""];
+
+  let list;
+  if (kind) {
+    list = of(kind).map((r) => needRow(r, isNew(r)));
+  } else {
+    list = [rows.filter((r) => !FOLDED[r.kind]).map((r) => needRow(r, isNew(r))),
+      Object.keys(FOLDED).map((k) => (of(k).length ? h("details", { class: "fold" },
+        h("summary", {}, FOLDED[k](of(k).length), of(k).some(isNew) ? h("span", { class: "new" }, "NEW") : null),
+        of(k).map((r) => needRow(r, isNew(r)))) : null))];
+  }
+  // What could not be read: named, never counted.
+  const unread = per.filter(([, x]) => x.notes.length).map(([repo, x]) => h("div", { class: "lrow unread" },
+    h("div", { class: "lmeta" }, `${short(repo)} · could not read · not counted`),
+    x.notes.map((n) => h("div", {}, n)),
+    routeLink(repoRoute(repo), {}, `Open ${repo}`)));
+  const any = rows.length && (!kind || of(kind).length);
+  return [viewHead("Needs you", ...summary), chips,
+    h("div", { class: "needs-list" }, any ? list
+      : empty(c.needsLoading && !rows.length ? "Loading…"
+        : (kind ? "None of these." : (c.unread.length ? "Nothing that could be read needs you." : "Nothing needs you."))),
+    kind ? null : unread)];
+}
+
+function activityView() {
+  const c = counts();
+  const blocks = (state.session ? state.session.repos : []).map((repo) => {
+    const d = state.repos[repo];
+    if (!d || d.loading) return null;
+    if (d.failed) return h("div", { class: "group" }, repoHeading(repo), empty(`Could not read this repository: ${d.failed}`));
+    if (d.active_runs && !d.active_runs.length) return null;
+    return h("div", { class: "group" }, repoHeading(repo), runsTable(d.active_runs, cancelBtn(repo, d)));
+  }).filter(Boolean);
+  return [viewHead("Activity", `Gatehand's runs that are running or waiting to start · ${c.runningText}`),
+    blocks.length ? blocks : empty(c.loading ? "Loading…" : "Nothing is running.")];
+}
+
+function weekView() {
+  const c = counts();
+  const blocks = (state.session ? state.session.repos : []).map((repo) => {
+    const d = state.repos[repo];
+    if (!d || d.loading) return null;
+    if (d.failed) return h("div", { class: "group" }, repoHeading(repo), empty(`Could not read this repository: ${d.failed}`));
+    return h("div", { class: "group" }, repoHeading(repo), ledgerTables(d));
+  }).filter(Boolean);
+  return [viewHead("Week", `${c.costText} over the last seven days`,
+    c.costFloor ? " · at least: runs with no cost recorded count for nothing, and Claude review runs are not in the ledger" : ""),
+    blocks.length ? blocks : empty(c.loading ? "Loading…" : "No repositories.")];
+}
+
+function reposView() {
   const repos = state.session ? state.session.repos : [];
   const head = h("thead", {}, h("tr", {},
     ["Repository", "Version", "Agents", "Auto-merge", "Waiting", "PRs", "Queue", "Running", "Coder today", "Fixer today", "Cost 7 d", "Breakers", "Health", ""]
       .map((c) => h("th", {}, c))));
   const rows = repos.map((repo) => {
     const d = state.repos[repo];
-    const sel = repo === state.selected ? "selected" : "";
     if (!d || d.loading) {
-      return h("tr", { class: sel }, h("td", {}, repo), h("td", { colspan: 13, class: "muted" }, "loading…"));
+      return h("tr", {}, h("td", {}, repo), h("td", { colspan: 13, class: "muted" }, "loading…"));
     }
     if (d.failed) {
-      return h("tr", { class: sel }, h("td", {}, repo), h("td", { colspan: 12, class: "bad" }, d.failed), h("td", {}, removeBtn(repo)));
+      return h("tr", {}, h("td", {}, repo), h("td", { colspan: 12, class: "bad" }, d.failed), h("td", {}, removeBtn(repo)));
     }
     const t = totals(d);
-    return h("tr", { class: `click ${sel}`, onclick: () => select(repo) },
-      h("td", {}, h("button", { type: "button", class: "linkish", onclick: (e) => { e.stopPropagation(); select(repo); } }, repo)),
+    return h("tr", { class: "click", onclick: () => go(repoRoute(repo)) },
+      h("td", {}, routeLink(repoRoute(repo), { onclick: (e) => e.stopPropagation() }, repo)),
       h("td", {}, d.version || "?"),
       h("td", {}, onOff(d.vars, "AGENTS_ENABLED")),
       h("td", {}, d.vars ? (d.vars.AGENT_AUTO_MERGE === "true" ? pill("live", "ok") : pill("dry run", "off")) : pill("unknown", "warn")),
-      h("td", { class: "n" }, t.waiting || t.unknown.has("waiting") ? pill(shown(t, "waiting"), t.unknown.has("waiting") ? "warn" : "attn") : "0"),
+      h("td", { class: "n" }, ((x, text) => (text && text !== "…" ? pill(text, x.unknown ? "warn" : "attn") : (text || "0")))(needRows(repo), needText(needRows(repo)))),
       h("td", { class: "n" }, d.prs ? t.prs : "?"),
       h("td", { class: "n" }, d.issues ? t.queue : "?"),
       h("td", { class: "n" }, d.active_runs ? t.active : "?"),
@@ -222,23 +524,22 @@ function renderRepos() {
       h("td", {}, health(d)),
       h("td", {}, removeBtn(repo)));
   });
-  replace($("repos"), head, h("tbody", {}, rows.length ? rows : h("tr", {}, h("td", { colspan: 14, class: "muted" },
-    "No repositories with Gatehand found. Add one below, or Find repositories again."))));
-  const ex = state.session ? state.session.excluded : [];
-  $("excluded").textContent = ex.length ? `Hidden: ${ex.join(", ")}` : "";
+  return [viewHead("Repositories", `${repos.length} on this dashboard`),
+    h("div", { class: "scroll" }, h("table", { class: "grid" }, head, h("tbody", {}, rows.length ? rows : h("tr", {}, h("td", { colspan: 14, class: "muted" },
+      "No repositories with Gatehand found. Add one below, or Find repositories again.")))))];
 }
 
-function removeBtn(repo) {
+function removeBtn(repo, text) {
   return h("button", {
     type: "button", class: "quiet small", title: `Hide ${repo} from this dashboard`,
     onclick: async (e) => {
       e.stopPropagation();
       try { applySession(await api("/api/repos", { method: "POST", body: { op: "remove", repo } })); }
       catch (err) { notice(err.message); }
-      if (state.selected === repo) { state.selected = ""; $("detail").hidden = true; }
+      if (state.selected === repo) { state.selected = ""; go("/repos"); }
       renderAll();
     },
-  }, "Hide");
+  }, text || "Hide");
 }
 
 // --- actions: every write is done by the server with your own gh login, after a confirm -------------
@@ -319,7 +620,7 @@ async function previewAct(repo, payload, btn) {
 async function loadInbox(repo, fresh) {
   try { state.inbox[repo] = await api(`/api/repo/${repo}/inbox${fresh ? "?fresh=1" : ""}`); }
   catch (e) { state.inbox[repo] = { error: e.message }; }
-  if (state.selected === repo) renderDetail();
+  renderAll(); // the requests change Needs you and the sidebar counts, not only this repository's page
 }
 
 // After any inbox command: re-read the inbox every 10 s for two minutes, until the bot has replied
@@ -449,7 +750,7 @@ function verdictActions(repo, d, p) {
     actBtn("Approve…", why, (b) => previewAct(repo, { type: "review_verdict", pr: p.number, verdict: "approve" }, b), "primary"),
     actBtn(draft ? "Close the note" : "Request changes…", why, () => {
       if (draft) delete state.drafts[key]; else state.drafts[key] = { note: "", fixer: true };
-      renderDetail();
+      renderView();
     }),
     actBtn("Run review", why, (b) => previewAct(repo, { type: "dispatch", workflow: "review", pr: p.number }, b)),
     actBtn("Run merge gate", why, (b) => previewAct(repo, { type: "dispatch", workflow: "merge", pr: p.number }, b)),
@@ -468,7 +769,7 @@ function verdictForm(repo, p) {
     e.preventDefault();
     const done = await previewAct(repo, { type: "review_verdict", pr: p.number, verdict: "request-changes", note: draft.note, start_fixer: draft.fixer },
       e.currentTarget.querySelector("button"));
-    if (done) { delete state.drafts[key]; renderDetail(); }
+    if (done) { delete state.drafts[key]; renderView(); }
   } }, note, h("label", {}, fixer, " Start the fixer on it"), h("button", { type: "submit", class: "small" }, "Request changes…"));
 }
 
@@ -588,23 +889,12 @@ function gateLine(gate, n) {
   return h("div", { class: "gate" }, "Gate ", link(g.url, ago(g.at)), `: ${g.text}`);
 }
 
-function renderDetail() {
-  const repo = state.selected;
-  const el = $("detail");
-  const d = state.repos[repo];
-  if (!repo || !d || d.loading || d.failed) { el.hidden = true; return; }
-  el.hidden = false;
+// A repository's four tabs. Every list and button the page had is on one of them.
+function pipelineTab(repo, d) {
   const i = d.issues;
-  replace(el,
-    h("div", { class: "detail-head" }, h("h2", {}, link(d.url, repo)),
-      h("span", { class: "muted" }, ` Gatehand ${d.version || "?"} · you have ${String(d.viewer_permission || "?").toLowerCase()} access · read ${ago(d.fetched_at)}`),
-      h("button", { type: "button", class: "quiet small", onclick: () => { state.selected = ""; renderDetail(); renderRepos(); } }, "Close")),
-    (d.errors || []).length ? h("div", { class: "notice" }, h("strong", {}, "Could not read everything:"),
-      h("ul", {}, d.errors.map((e) => h("li", {}, e)))) : null,
-    h("h3", {}, "Switches"), switchesBlock(repo, d),
+  return [
     h("h3", {}, "Inbox requests"), inboxBlock(repo, d),
     h("h3", {}, "Agent PRs"), prBlock(repo, d),
-    h("h3", {}, "Running now"), runsTable(d.active_runs, cancelBtn(repo, d)),
     h("h3", {}, "Queue"),
     i && i.ready && i.ready.length ? h("div", { class: "actions" }, actBtn("Start the coder on the next one", writerBlock(d),
       (b) => previewAct(repo, { type: "dispatch", workflow: "coder" }, b))) : null,
@@ -619,13 +909,68 @@ function renderDetail() {
     h("h3", {}, "Candidates"), issueList(i && i.candidate, "None.", (x) => x.labels.includes("agent:ready") ? null
       : h("a", { href: x.url, class: "button-link", title: "agent:ready makes the agents trust the issue's text as it is now: read it, then add the label there." }, "Read and queue on GitHub")),
     h("h3", {}, "On hold"), issueList(i && i.hold, "None.", (x) => labelBtn(repo, d, x.number, "remove", "agent:hold", "Release", "The agents may work on it again.")),
-    h("h3", {}, "Merged, to close once live"), issueList(i && i.done_pending_deploy, "None."),
-    h("h3", {}, "Agent runs, last seven days"), ledgerTables(d),
-    h("h3", {}, "Breakers"), breakerList(repo, d),
-    h("h3", {}, "Recent finished runs"), runsTable(d.recent_runs));
+    h("h3", {}, "Merged, to close once live"), issueList(i && i.done_pending_deploy, "None.")];
+}
+function agentsTab(repo, d) {
+  return [h("h3", {}, "Breakers"), breakerList(repo, d),
+    h("h3", {}, "Running now"), runsTable(d.active_runs, cancelBtn(repo, d))];
+}
+function runsTab(repo, d) {
+  return [h("h3", {}, "Agent runs, last seven days"), ledgerTables(d),
+    h("h3", {}, "Recent finished runs"), runsTable(d.recent_runs)];
+}
+function settingsTab(repo, d) {
+  const v = d.vars;
+  const def = d.default_branch || "the default branch";
+  const ref = { ok: pill(`matches ${def}`, "ok"), stale: pill(`differs from ${def}`, "bad"), missing: pill("missing", "bad") }[d.runner_ref] || pill("unknown", "warn");
+  return [h("h3", {}, "Switches"), switchesBlock(repo, d),
+    h("h3", {}, "Set up"),
+    h("ul", { class: "items" },
+      h("li", {}, h("strong", {}, "Who can answer "), v ? (v.AGENT_OWNER_LOGIN || pill("not set", "warn")) : pill("unknown", "warn"),
+        h("span", { class: "muted" }, " AGENT_OWNER_LOGIN")),
+      h("li", {}, h("strong", {}, "Inbox "), d.inbox ? link(d.inbox.url, `#${d.inbox.number}`) : (d.inbox_state === "unknown" ? pill("unknown", "warn") : "none found")),
+      h("li", {}, h("strong", {}, "Version "), d.version || "?"),
+      h("li", {}, h("strong", {}, "Runner branch "), ref, h("span", { class: "muted" }, ` ${(d.policy && d.policy.runnerRef) || ""}`)),
+      h("li", {}, h("strong", {}, "Limits and schedules "),
+        link(`${d.url}/blob/${d.default_branch || "main"}/.github/agents/policy.json`, "policy.json on GitHub"),
+        h("span", { class: "muted" }, " · changed there, not here"))),
+    h("h3", {}, "This dashboard"),
+    h("p", {}, removeBtn(repo, "Hide this repository"), h("span", { class: "muted" }, " Keeps it out of the list and later scans. Changes nothing on GitHub."))];
 }
 
-function renderAll() { renderTotals(); renderWaiting(); renderRepos(); renderDetail(); }
+function repoView() {
+  if (!state.session) return empty("Loading…");
+  const repo = routeRepo();
+  if (!repo) {
+    return [viewHead(state.route.repo), empty("This repository is not on this dashboard."), routeLink("/repos", {}, "Add it under Repositories")];
+  }
+  const d = state.repos[repo];
+  const head = h("div", { class: "detail-head" }, h("h2", {}, link(`https://github.com/${repo}`, repo)),
+    d && !d.loading && !d.failed ? [
+      d.vars ? pill(d.vars.AGENTS_ENABLED === "true" ? "Agents on" : "Agents off", d.vars.AGENTS_ENABLED === "true" ? "ok" : "off") : pill("Agents ?", "warn"),
+      d.vars ? pill(d.vars.AGENT_AUTO_MERGE === "true" ? "Auto-merge on" : "Auto-merge: dry run", d.vars.AGENT_AUTO_MERGE === "true" ? "ok" : "off") : pill("Auto-merge ?", "warn"),
+      h("span", { class: "muted" }, ` Gatehand ${d.version || "?"} · you have ${String(d.viewer_permission || "?").toLowerCase()} access · read ${ago(d.fetched_at)}`)] : null);
+  if (!d || d.loading) return [head, empty("Loading…")];
+  if (d.failed) return [head, h("p", { class: "bad" }, d.failed), removeBtn(repo, "Hide this repository")];
+  const tab = state.route.tab;
+  return [head,
+    (d.errors || []).length ? h("div", { class: "notice" }, h("strong", {}, "Could not read everything:"),
+      h("ul", {}, d.errors.map((e) => h("li", {}, e)))) : null,
+    h("nav", { class: "tabs", "aria-label": repo }, TABS.map(([k, text]) =>
+      routeLink(repoRoute(repo, k), { class: k === tab ? "on" : null, "aria-current": k === tab ? "page" : null }, text))),
+    { pipeline: pipelineTab, agents: agentsTab, runs: runsTab, settings: settingsTab }[tab](repo, d)];
+}
+
+function renderView() {
+  const v = state.route.view;
+  replace($("view"), { needs: needsView, activity: activityView, week: weekView, repos: reposView, repo: repoView }[v]());
+  // Adding and finding repositories is a static form, so a re-render while you type keeps your text.
+  $("repo-tools").hidden = v !== "repos";
+  const ex = state.session ? state.session.excluded : [];
+  $("excluded").textContent = ex.length ? `Hidden: ${ex.join(", ")}` : "";
+}
+
+function renderAll() { renderSide(); renderView(); }
 
 function notice(text) {
   const n = $("notice");
@@ -647,30 +992,37 @@ async function loadRepo(repo, fresh) {
     state.repos[repo] = { failed: e.message };
   }
   renderAll();
-  if (repo === state.selected) loadExtras(repo, fresh);
+  loadExtras(repo, fresh);
 }
 
+// The inbox and the merge gate's report: always for the repository on screen, and for any other when
+// Needs you needs them (needsInbox, needsGate).
 async function loadExtras(repo, fresh) {
   const d = state.repos[repo];
-  if (!d || d.failed) return;
+  if (!d || d.failed || d.loading) return;
   const q = fresh ? "?fresh=1" : "";
+  const open = repo === state.selected;
+  const part = (name) => api(`/api/repo/${repo}/${name}${q}`)
+    .then((r) => { state[name][repo] = r; }, (e) => { state[name][repo] = { error: e.message }; })
+    .then(renderAll);
   const jobs = [];
-  if (d.inbox) {
-    jobs.push(api(`/api/repo/${repo}/inbox${q}`).then((r) => { state.inbox[repo] = r; }, (e) => { state.inbox[repo] = { error: e.message }; }));
-  }
-  if ((d.prs || []).length) {
-    jobs.push(api(`/api/repo/${repo}/gate${q}`).then((r) => { state.gate[repo] = r; }, (e) => { state.gate[repo] = { error: e.message }; }));
-  }
+  if (d.inbox && (open || needsInbox(d))) jobs.push(part("inbox"));
+  if ((d.prs || []).length && (open || needsGate(d))) jobs.push(part("gate"));
   await Promise.all(jobs);
-  if (state.selected === repo) renderDetail();
 }
 
-function select(repo) {
+// The address changed (a link, Back, a typed URL): show that view, and read the inbox and the merge
+// gate of a repository when it is the one opened.
+function onRoute() {
+  const was = state.route.view;
+  state.route = parseRoute();
+  if (state.route.view === "needs" && was !== "needs") lookAgain();
+  const repo = routeRepo();
+  const opened = repo && repo !== state.selected;
   state.selected = repo;
-  renderRepos();
-  renderDetail();
-  loadExtras(repo, false);
-  $("detail").scrollIntoView({ behavior: "smooth", block: "start" });
+  renderAll();
+  if (opened) loadExtras(repo, false);
+  window.scrollTo(0, 0);
 }
 
 async function refresh(fresh) {
@@ -681,6 +1033,7 @@ async function refresh(fresh) {
   $("refresh").disabled = true;
   try {
     applySession(await api(`/api/session${fresh ? "?fresh=1" : ""}`));
+    state.selected = routeRepo();
     const scan = [state.session.scan_error && `Finding repositories failed: ${state.session.scan_error}`,
       ...(state.session.scan_notes || []).map((n) => `Finding repositories: ${n}`)].filter(Boolean);
     notice(scan.join(" · "));
@@ -697,6 +1050,7 @@ async function refresh(fresh) {
   }
 }
 
+window.addEventListener("hashchange", onRoute);
 $("refresh").addEventListener("click", () => refresh(true));
 $("rescan").addEventListener("click", async () => {
   $("rescan").disabled = true;
@@ -718,4 +1072,6 @@ $("add").addEventListener("submit", async (e) => {
 setInterval(() => { if (document.visibilityState === "visible") refresh(false); }, 5 * 60 * 1000);
 // The server stops after a while with no page open; a background tab still counts as open.
 setInterval(() => { if (state.token) api("/api/ping").catch(() => {}); }, 60 * 1000);
+// What Needs you showed when you last looked, read now that everything above is defined.
+lookAgain();
 refresh(false);
