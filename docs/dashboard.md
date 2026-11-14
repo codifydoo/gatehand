@@ -44,6 +44,15 @@ A row marked NEW was not there the last time you looked at Needs you. That is re
 browser for this address, so a dashboard started on another port (the default picks a free one)
 marks everything NEW once; `--port` keeps it.
 
+With nothing in it, Needs you says what is true and the one useful next step where the item would
+be: "Nothing needs you", with the runs going and issues queued and a link to Activity; "Nothing that
+could be read needs you" while a repository is unread, naming each and linking to the first (never
+an all clear); or, with no repositories, that none were found (or that finding them failed, and how
+many are hidden), the scan's notes, and where to find or add one. The sidebar then shows no badge for Needs you, and with no repositories it greys Needs you,
+Activity and Week. A repository still being read has a "reading…" line under the rows until it
+answers; rows that arrive are placed by time (the folded groups stay last), so a newer one can appear
+above those already shown.
+
 In the sidebar, the tab's title and the chips, a count that leaves out a part it could not read, or a
 repository still loading, shows as "n+" (at least n), or "?" when nothing else is known. What could
 not be read is listed under the rows, not counted.

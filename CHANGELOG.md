@@ -33,6 +33,9 @@
   the page does not show them yet (#21, #22).
 - In a narrow window the open item of Needs you expands in place under its row, as in a mail app,
   and the sidebar folds into one line with ☰.
+- Needs you with nothing in it says what is true and what to do next: nothing needs you (with what
+  is running and queued), nothing that could be read (naming what could not), or no repositories
+  found; a repository still being read shows a "reading…" line.
 - Keys on Needs you: j/k move, o goes into the item, a opens its primary action's confirm (Enter
   confirms), r opens Reject…, Esc closes the confirm, ? lists them.
 - Nothing installed into repositories changes: no update is needed.
