@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- The dashboard is laid out as a sidebar and views instead of one long page: Needs you, Activity,
+  Week, a Repositories list, and per repository four tabs (Pipeline, Agents, Runs and spend,
+  Settings). The view is in the address, so a reload or a link keeps it, and the number waiting for
+  you is in the tab's title. The total tiles are gone: what waits for you, runs going and the week's cost sit
+  in the sidebar; open PRs, queued issues and run counts are per repository, on Repositories and Week. Every list and
+  button is still there, and sends exactly what it did.
+- Nothing installed into repositories changes: no update is needed.
+
 ## 0.6.0 (2026-11-14)
 
 - The dashboard can now start and stop the agents' work. Start the coder (an auto pick, with every
