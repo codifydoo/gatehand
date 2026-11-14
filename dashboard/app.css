@@ -60,6 +60,7 @@ details.fold > .lrow { padding-left: 24px; }
 .alist { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
 .alist > p { margin: 0; padding: 9px 10px; }
 .alist .lrow { overflow-wrap: anywhere; }
+.alist .lmeta { display: block; } /* a flex line would break a short name to fit a long note beside it */
 div.lrow.arow { flex-direction: row; align-items: center; gap: 10px; }
 .arow > div { flex: 1; min-width: 0; }
 .arow > button { flex: none; }
