@@ -7,6 +7,11 @@
   scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
   branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only;
   the page does not show them yet (#21, #22).
+- Review: `/verify-pr` now says how to write its two headings (plain `###` markdown, with the
+  verdict alone on the line under `### Verdict`). In one installation, 45 of 316 reviews in a month
+  wrote the Verdict heading as HTML, in bold or on one line with the verdict, and the merge gate
+  read 10 of them as unknown, which leaves an agent PR waiting for a person. Installed repositories
+  get the wording on their next update.
 
 ## 0.7.0 (2026-11-14)
 
