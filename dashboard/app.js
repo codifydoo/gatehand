@@ -726,17 +726,141 @@ async function postRequest(r, payload) {
   await loadRepo(repo, true);
 }
 
+// --- Activity: what runs now, what is not moving and why, what finished today -------------------------
+// Three lists across every repository, filled in as each repository arrives. A part of a repository
+// that could not be read is named under the list it belongs to and makes that list's count "n+" (or
+// "?"), as in the sidebar: it is never read as "nothing running" or "nothing stuck".
+const atLeast = (n, unread, loading) => (unread && !n && !loading ? "?" : `${n}${unread || loading ? "+" : ""}`);
+const roleList = (roles) => cap1(roles.join(", "));
+// The coder's gate counts runs per UTC day (agent-state.sh cmd_gate), so a daily limit lifts at 00:00 UTC.
+function untilUtcMidnight() {
+  const now = new Date();
+  const m = Math.ceil((Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1) - now) / 60000);
+  return m < 90 ? `${m} min` : `${Math.round(m / 60)} h`;
+}
+const isToday = (t) => { const x = new Date(t || ""); return !isNaN(x) && x.toDateString() === new Date().toDateString(); };
+
+// Why a repository's agents are not moving, without anyone being asked: one row per cause, each with
+// when it moves where this page's data can say so (and nothing where it cannot: next-run times are not
+// sent). The causes are those of the coder gate (agent-state.sh gate_decide) that the design lists,
+// plus a lock no run holds; a stale runner ref is a health item, not one of these.
+function stillRows(repo, d) {
+  const rows = [], unread = [];
+  const add = (cause, what, moves) => rows.push({ repo, cause, what, moves });
+  const stats = d.stats || {};
+  const roles = (pred) => Object.keys(stats).filter((r) => stats[r] && pred(stats[r])).sort();
+  if (!d.vars) unread.push("the variables (agents on or off)");
+  else if (d.vars.AGENTS_ENABLED !== "true") {
+    // Off stops the scheduled agents and the sweep too, so every other cause waits behind this one.
+    const v = d.vars.AGENTS_ENABLED;
+    add("Agents off", `AGENTS_ENABLED is ${v === null || v === undefined ? "not set" : `“${oneLine(v, 40)}”`}: the coder, fixer, merge gate, sweep and triage do not run.`,
+      ["When someone turns them on, in ", routeLink(repoRoute(repo, "settings"), {}, "Settings"), "."]);
+    return { rows, unread };
+  }
+  if (!d.breakers) unread.push("the breaker state");
+  else {
+    const stopped = Object.keys(d.breakers).filter((r) => d.breakers[r] && d.breakers[r].tripped_at).sort();
+    if (stopped.length) {
+      add(`${roleList(stopped)} stopped`, stopped.map((r) => `${r}: the circuit breaker tripped ${String(d.breakers[r].tripped_at).slice(0, 16).replace("T", " ")} UTC${
+        d.breakers[r].reason ? `, ${oneLine(d.breakers[r].reason, 160)}` : ""}.`).join(" "),
+        ["When its breaker is reset, from ", routeLink(needsRoute("role"), {}, "Needs you"), "."]);
+    }
+  }
+  // Without policy.json the server sends no limits, though the repository's own gate still has them.
+  if (d.policy_ok === false) unread.push("policy.json (runsPerDay, maxOpenPrs)");
+  if (!d.stats) unread.push("the ledger (runs today)");
+  else {
+    const full = roles((s) => typeof s.cap === "number" && s.today >= s.cap);
+    if (full.length) {
+      const lifts = full.some((r) => stats[r].cap > 0);
+      add("Daily limit reached", full.map((r) => `${r}: ${stats[r].today} of ${stats[r].cap} runs today.`).join(" "), [
+        lifts ? `The count starts again at 00:00 UTC, in ${untilUtcMidnight()}.` : "",
+        full.some((r) => stats[r].cap <= 0) ? `${lifts ? " " : ""}A limit of 0 lifts only when runsPerDay in policy.json is raised.` : ""]);
+    }
+  }
+  if (!d.prs) unread.push("the open PRs");
+  else if (d.stats) {
+    // Only the coder's gate applies maxOpenPrs; it counts every open PR labelled agent:pr, as d.prs does.
+    const full = roles((s) => typeof s.max_open_prs === "number" && d.prs.length >= s.max_open_prs).filter((r) => r === "coder");
+    if (full.length) {
+      add("Open-PR limit reached", full.map((r) => `${r}: ${d.prs.length} open agent PRs, at most ${stats[r].max_open_prs}.`).join(" "),
+        "When an agent PR merges or is closed.");
+    }
+  }
+  if (!d.issues || !d.active_runs || !d.prs) unread.push("the issues or runs (locks)");
+  else {
+    // An agent's label still on an issue or PR with no run of that agent active: the run ended without
+    // releasing its lock, and the hourly sweep puts the item back once the lock expires. As the sweep
+    // (agent-sweep.sh): it waits while a coder run, or a dispatched fixer run, is in progress, and it
+    // leaves an item on agent:hold alone, so those are not listed as moving at the sweep.
+    const inProgress = (agent, event) => d.active_runs.some((r) => r.agent === agent && r.status === "in_progress" && (!event || r.event === event));
+    const free = (x) => !(x.labels || []).includes("agent:hold");
+    const held = [
+      ...(inProgress("coder") ? [] : d.issues.in_progress.filter(free).map((i) => link(i.url, `#${i.number} ${i.title}`))),
+      ...(inProgress("fixer", "workflow_dispatch") ? [] : d.prs.filter((p) => free(p) && (p.labels || []).includes("agent:fixing"))
+        .map((p) => link(p.url, `PR #${p.number} ${p.title}`)))];
+    if (held.length) {
+      add("Locked, no run", [`${held.length === 1 ? "Marked" : `${held.length} marked`} in progress with no run of its agent holding it: `,
+        held.map((x, i) => [i ? ", " : "", x])], "At the first hourly sweep after its lock expires.");
+    }
+  }
+  return { rows, unread };
+}
+
+function stillRow(x) {
+  return h("div", { class: "lrow" },
+    h("div", { class: "lmeta" }, routeLink(repoRoute(x.repo), { title: x.repo }, short(x.repo))),
+    h("div", { class: "ltitle" }, h("strong", {}, x.cause), " ", x.what),
+    h("div", { class: "lhint" }, "Moves: ", x.moves));
+}
+function runningRow({ repo, d, r }) {
+  return h("div", { class: "lrow arow" },
+    h("div", {},
+      h("div", { class: "lmeta" }, `${short(repo)} · ${r.agent} · ${r.event || "?"}${r.created_at ? ` · started ${ago(r.created_at)}` : ""}`),
+      h("div", { class: "ltitle" }, link(r.url, r.name || String(r.id)), " ", pill(r.status || "?", "attn"))),
+    cancelBtn(repo, d)(r));
+}
+function finishedRow({ repo, d, r }) {
+  const num = (n) => /^[0-9]+$/.test(String(n ?? ""));
+  const target = num(r.pr) ? link(`${d.url}/pull/${r.pr}`, `PR #${r.pr}`) : (num(r.issue) ? link(`${d.url}/issues/${r.issue}`, `#${r.issue}`) : null);
+  const outcome = r.outcome || "?";
+  return h("div", { class: "lrow" },
+    h("div", { class: "lmeta" }, `${short(repo)} · ${r.role || "?"} · ${hhmm(r.ended_at || r.started_at)}${typeof r.cost_usd === "number" ? ` · ${usd(r.cost_usd)}` : ""}`),
+    h("div", { class: "ltitle" }, target, target ? " · " : null, r.run_url ? link(r.run_url, outcome) : outcome),
+    r.reason ? h("div", { class: "lhint" }, oneLine(r.reason, 160)) : null);
+}
+
 function activityView() {
   const c = counts();
-  const blocks = (state.session ? state.session.repos : []).map((repo) => {
+  const repos = state.session ? state.session.repos : [];
+  const loading = repos.filter((repo) => !state.repos[repo] || state.repos[repo].loading);
+  const running = [], still = [], done = [];
+  const unread = { running: [], still: [], done: [] };
+  for (const repo of repos) {
     const d = state.repos[repo];
-    if (!d || d.loading) return null;
-    if (d.failed) return h("div", { class: "group" }, repoHeading(repo), empty(`Could not read this repository: ${d.failed}`));
-    if (d.active_runs && !d.active_runs.length) return null;
-    return h("div", { class: "group" }, repoHeading(repo), runsTable(d.active_runs, cancelBtn(repo, d)));
-  }).filter(Boolean);
-  return [viewHead("Activity", `Gatehand's runs that are running or waiting to start · ${c.runningText}`),
-    blocks.length ? blocks : empty(c.loading ? "Loading…" : "Nothing is running.")];
+    if (!d || d.loading) continue;
+    if (d.failed) { for (const k of Object.keys(unread)) unread[k].push([repo, `could not read this repository: ${d.failed}`]); continue; }
+    if (d.active_runs) running.push(...d.active_runs.map((r) => ({ repo, d, r })));
+    else unread.running.push([repo, "could not read its Actions runs"]);
+    const s = stillRows(repo, d);
+    still.push(...s.rows);
+    if (s.unread.length) unread.still.push([repo, `could not read ${s.unread.join(", ")}`]);
+    // The ledger: a row per agent run, written when the run ends.
+    if (d.runs) done.push(...d.runs.filter((r) => r && isToday(r.ended_at || r.started_at)).map((r) => ({ repo, d, r })));
+    else unread.done.push([repo, "could not read the ledger"]);
+  }
+  const at = (x) => String(x.r.ended_at || x.r.started_at || x.r.created_at || "");
+  const newest = (a, b) => (at(a) < at(b) ? 1 : at(a) > at(b) ? -1 : 0);
+  const section = (title, rows, notes, none) => h("section", { class: "act" },
+    h("h3", {}, `${title} · ${atLeast(rows.length, notes.length > 0, loading.length > 0)}`),
+    h("div", { class: "alist" }, rows,
+      notes.map(([repo, text]) => h("div", { class: "lrow unread" },
+        h("div", { class: "lmeta" }, routeLink(repoRoute(repo), { title: repo }, short(repo)), ` · ${text} · not counted`))),
+      rows.length || notes.length ? null : empty(loading.length ? "Loading…" : none)));
+  return [viewHead("Activity", c.runningText, loading.length ? ` · still loading ${loading.map(short).join(", ")}` : ""),
+    section("Running now", running.sort(newest).map(runningRow), unread.running, "Nothing is running."),
+    section("Not moving and not waiting on you", still.map(stillRow), unread.still, "Nothing is held up."),
+    section("Finished today", done.sort(newest).map(finishedRow), unread.done, "No agent run finished today.")];
 }
 
 function weekView() {

@@ -56,6 +56,13 @@ details.fold > summary { padding: 9px 10px; color: var(--muted); }
 details.fold > summary .new { float: right; }
 details.fold > .lrow { padding-left: 24px; }
 .lrow.on { background: var(--sel); box-shadow: inset 3px 0 0 var(--accent); }
+.act h3 { font-size: 12px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+.alist { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.alist > p { margin: 0; padding: 9px 10px; }
+.alist .lrow { overflow-wrap: anywhere; }
+div.lrow.arow { flex-direction: row; align-items: center; gap: 10px; }
+.arow > div { flex: 1; min-width: 0; }
+.arow > button { flex: none; }
 .needs-split { display: grid; grid-template-columns: minmax(260px, 400px) minmax(0, 1fr); gap: 16px; align-items: start; }
 .needs-split.no-pane { grid-template-columns: minmax(0, 1fr); }
 .pane { position: sticky; top: 65px; max-height: calc(100vh - 81px); overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }

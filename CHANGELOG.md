@@ -19,6 +19,10 @@
   first (such as commenting on the blocked issue), and answers it with a confirm that opens in the
   pane, naming the exact inbox line and what follows. Disabled, refused (nothing posted) and waiting
   for the Agent inbox workflow are said in the pane. Other rows' panes link to where they are done.
+- Activity lists, across every repository, what is running now (with Cancel), what is not moving
+  and not waiting on you, one row per cause per repository with when it moves (agents off, a role
+  stopped, a daily or open-PR limit reached, a lock no run holds), and the agent runs that finished
+  today. A part that could not be read is named and counts as unknown, never as none.
 - Nothing installed into repositories changes: no update is needed.
 
 ## 0.7.0 (2026-11-14)
