@@ -87,6 +87,13 @@ naming where you are, and ☰ opens it. A request's pane is the place to answer 
 - the last seven days of ledger rows about the issue and the request itself, as a timeline, and the
   issue's labels, the inbox and `AGENT_OWNER_LOGIN`, folded.
 
+Keys on Needs you: `j` and `k` move to the next or previous item as listed; `o` goes into the open
+item (or opens one); `a` opens the item's primary action's confirm, and Enter (or Space) then confirms, so the
+primary action is two keys as it is two clicks (on a to-merge or to-close item, `a` opens the GitHub
+link instead); `r` opens Reject…; Esc closes a confirm; `?` lists
+them. Keys do nothing while you type in a field (except Esc) or with a modifier held, and there is no
+key that posts without its confirm.
+
 Where the confirm was, the pane says which of three states it is in: disabled, with the reason (the
 same checks as below); refused, saying nothing was posted and why (the server's own reason, such as
 the request being answered already); or waiting for the Agent inbox workflow, with the line posted

@@ -51,6 +51,8 @@ a.lrow:hover { background: var(--sel); text-decoration: none; }
 .lmeta .dot.old { background: none; border: 1px solid var(--muted); }
 .new { margin-left: auto; color: var(--attn); font-weight: 600; font-size: 11px; }
 .lhint { font-size: 12px; color: var(--muted); }
+.keys { font-size: 12px; margin: 8px 10px; }
+@media (hover: none) { .keys { display: none; } }
 details.fold { border-bottom: 1px solid var(--line); }
 details.fold > summary { padding: 9px 10px; color: var(--muted); }
 details.fold > summary .new { float: right; }
