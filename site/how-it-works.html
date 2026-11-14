@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How it works · Gatehand</title>
+<meta name="description" content="One issue, from the agent:ready label to the merge: preflight, the model's job, the publish job, CI and the Claude review, the fixer and the merge gate.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="favicon.svg" alt="">Gatehand</a>
+    <nav aria-label="Site">
+      <a href="how-it-works.html" aria-current="page">How it works</a>
+      <a href="security.html">Security</a>
+      <a href="dashboard.html">Dashboard</a>
+      <a href="get-started.html">Get started</a>
+      <a href="https://github.com/codifydoo/gatehand">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="page-head">
+    <h1>How it works</h1>
+    <p class="lead">One issue, from the label to the merge. Every step is a GitHub Actions job in your
+      own repository, and only one of them runs a model.</p>
+  </div>
+
+  <section>
+    <h2>From an issue to a merged PR</h2>
+    <ol class="steps">
+      <li>
+        <h3>You queue an issue</h3>
+        <p>Someone with write access labels it <code>agent:ready</code>, or files it with the "Agent
+          task" template. It is taken only with an acceptance section (<code>Done when</code>,
+          <code>Acceptance</code> and the like), and not while it carries <code>size: L</code>,
+          <code>agent:hold</code> or <code>question</code>.</p>
+      </li>
+      <li>
+        <h3>Preflight <span class="pill ok">no model</span></h3>
+        <p>Stops unless the agents are enabled, the run is on the <code>agent-runner</code> ref, the
+          breaker is closed, and today's runs and open agent PRs are under their caps. Then it picks
+          the highest-priority, oldest eligible issue, locks it, and reads it once: title, body, and
+          only comments by people with write access, framed as untrusted data.</p>
+      </li>
+      <li>
+        <h3>Code <span class="pill attn">the model</span></h3>
+        <p>Runs your <code>system</code>, <code>toolchain</code> and <code>dependencies</code> actions,
+          drops passwordless sudo, then the <code>/agent-implement</code> command. The model edits,
+          tests and commits on a local branch. Its GitHub token reads repository contents only; it
+          cannot push, comment or label.</p>
+      </li>
+      <li>
+        <h3>Publish <span class="pill ok">no model</span></h3>
+        <p>A fresh checkout of the default branch takes the agent's commits from a git bundle and
+          validates them: commit shape, bot authorship, no closing keywords, <code>Refs #N</code>, size
+          caps, protected paths. Then it pushes the branch and opens the PR. What the coder noticed
+          but left alone is filed as <code>agent:candidate</code> issues, for you to queue or close.</p>
+      </li>
+      <li>
+        <h3>CI and the Claude review</h3>
+        <p>The PR goes through your CI and the Claude review like any other. The review's model has
+          no tool that writes; a separate job that runs no model posts its verdict.</p>
+      </li>
+      <li>
+        <h3>The fixer, if needed</h3>
+        <p>When CI fails or the review asks for changes, the fixer fixes its own PR: at most
+          <code>maxCiFixes</code> times for CI and <code>maxReviewFixes</code> times for a review.
+          After that it is a person's turn.</p>
+      </li>
+      <li>
+        <h3>The merge gate <span class="pill ok">no model</span></h3>
+        <p>Merges only when, on the PR's current head, everything holds: the agents are on and no
+          breaker is tripped; the PR is the bot's, open, mergeable, and not held, blocked or being
+          fixed; every required check and <code>agent pr guard</code> passed; the newest review
+          verdict is Approve and newer than the head; no changed file is protected; and the head
+          contains the default branch's tip. It merges with a merge commit pinned to that head,
+          never <code>--admin</code>. With auto-merge off, it only reports what it would do.</p>
+      </li>
+      <li>
+        <h3>You close the issue</h3>
+        <p>The issue becomes <code>agent:done-pending-deploy</code>. Close it yourself once the change
+          is live.</p>
+      </li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>The workflows</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Workflow</th><th>What it does</th><th>Model</th></tr></thead>
+        <tbody>
+          <tr><td><code>agent-coder.yml</code></td><td>Takes one <code>agent:ready</code> issue, implements it, opens a PR that says <code>Refs #N</code></td><td>yes</td></tr>
+          <tr><td><code>agent-fixup.yml</code></td><td>Fixes its own PR when CI fails or a review asks for changes</td><td>yes</td></tr>
+          <tr><td><code>claude-code-review.yml</code></td><td>Reviews every PR once, on open and on ready-for-review; its verdict gates the merge</td><td>yes</td></tr>
+          <tr><td><code>agent-merge.yml</code></td><td>Merges an agent PR when every condition holds; a dry run until <code>AGENT_AUTO_MERGE</code> is <code>true</code></td><td>none</td></tr>
+          <tr><td><code>agent-pr-guard.yml</code></td><td>The <code>agent pr guard</code> check: protected paths, <code>Refs #N</code>, no closing keywords, your hook's rules</td><td>none</td></tr>
+          <tr><td><code>agent-sweep.yml</code></td><td>Hourly: frees stale locks, moves issues whose PR merged or closed, recovers dead fix runs</td><td>none</td></tr>
+          <tr><td><code>agent-inbox.yml</code></td><td>Applies your commands on the inbox issue</td><td>none</td></tr>
+          <tr><td><code>agent-digest.yml</code></td><td>A weekly comment on the inbox: what waits for you, PRs, runs and cost, the queue</td><td>none</td></tr>
+          <tr><td><code>agent-triage.yml</code></td><td>Optional: queues Low and Medium Claude Security findings a writer filed</td><td>none</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The logic is in <code>.github/scripts/agent-*.sh</code>: deterministic shell scripts that run
+      without a model. State lives in GitHub itself: labels, HTML-comment markers in the bot's
+      comments, and JSON rows on the <code>agent-ledger</code> branch.</p>
+  </section>
+
+  <section>
+    <h2>What you own, what the package owns</h2>
+    <p><code>.github/agents/</code> holds your settings, created once and never overwritten:</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>File</th><th>What it is</th></tr></thead>
+        <tbody>
+          <tr><td><code>policy.json</code></td><td>Limits (runs per day, open PRs, attempts), models, schedules, runners, extra tools, required checks</td></tr>
+          <tr><td><code>project.md</code></td><td>Your standing rules and the check commands per area; the agents read it every run</td></tr>
+          <tr><td><code>protected-paths.txt</code></td><td>Paths an agent PR needs a person's label for, and <code>!</code> paths it may never touch</td></tr>
+          <tr><td><code>system/</code>, <code>toolchain/</code>, <code>dependencies/</code></td><td>Composite actions that set up the agent's job like your CI</td></tr>
+          <tr><td><code>hooks/lib.sh</code></td><td>Optional: extra PR-guard rules, inbox request kinds, digest sections</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Everything else (the workflows, the scripts, the Claude commands) is rendered by the package
+      and recorded with hashes in <code>.github/agents/install.lock.json</code>.
+      <code>/gatehand:update</code> re-renders them, and refuses to overwrite a file you edited by
+      hand: that change belongs in one of the files above.</p>
+    <p><a href="https://github.com/codifydoo/gatehand/blob/main/docs/README.md">The full runbook</a>
+      is also installed into your repository, as <code>.github/agents/README.md</code>.</p>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Gatehand, formerly <code>repo-agents</code>. MIT licence. By <a href="https://github.com/codifydoo">Codify d.o.o.</a></span>
+    <span class="spacer"></span>
+    <a href="https://github.com/codifydoo/gatehand/blob/main/docs/README.md">Runbook</a>
+    <a href="https://github.com/codifydoo/gatehand/blob/main/CHANGELOG.md">Changelog</a>
+    <a href="https://github.com/codifydoo/gatehand/blob/main/SECURITY.md">Security policy</a>
+  </div>
+</footer>
+</body>
+</html>

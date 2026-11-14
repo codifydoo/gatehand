@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gatehand: unattended Claude coding agents for a GitHub repository</title>
+<meta name="description" content="A Claude Code plugin that installs unattended coding agents into your GitHub repository as plain GitHub Actions workflows: a coder, a fixer, a Claude review and a merge gate.">
+<meta property="og:title" content="Gatehand">
+<meta property="og:description" content="Unattended Claude coding agents for a GitHub repository, where the model never shares a job with a write-capable token.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="favicon.svg" alt="">Gatehand</a>
+    <nav aria-label="Site">
+      <a href="how-it-works.html">How it works</a>
+      <a href="security.html">Security</a>
+      <a href="dashboard.html">Dashboard</a>
+      <a href="get-started.html">Get started</a>
+      <a href="https://github.com/codifydoo/gatehand">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="hero">
+    <h1>Unattended coding agents, behind a gate.</h1>
+    <p class="lead">Gatehand is a Claude Code plugin that installs Claude coding agents into your GitHub
+      repository as plain GitHub Actions workflows. Label an issue, and a coder opens a pull request;
+      a fixer answers red CI and review findings; a merge gate merges it only when every rule agrees.</p>
+<pre><code>/plugin marketplace add codifydoo/gatehand
+/plugin install gatehand@gatehand
+/gatehand:install</code></pre>
+    <div class="cta">
+      <a class="btn" href="get-started.html">Get started</a>
+      <a class="btn quiet" href="how-it-works.html">How it works</a>
+    </div>
+  </div>
+
+  <section>
+    <h2>The rule it rests on</h2>
+    <p><strong>The model never shares a job with a write-capable token, and nothing it wrote is
+      executed by one.</strong> Each coder run is three jobs. Only the middle one runs the model.</p>
+    <ol class="flow">
+      <li>
+        <h3>Preflight</h3>
+        <div class="tags"><span class="pill ok">no model</span><span class="pill">App token</span></div>
+        <p>Checks the kill switch, the daily caps and the breaker, picks one <code>agent:ready</code>
+          issue, locks it and reads it once.</p>
+      </li>
+      <li class="model">
+        <h3>Code</h3>
+        <div class="tags"><span class="pill attn">the model</span><span class="pill ok">read-only token</span></div>
+        <p>Edits, tests and commits on a local branch. It cannot push, comment or label, and every
+          <code>gh</code> command is denied to it.</p>
+      </li>
+      <li>
+        <h3>Publish</h3>
+        <div class="tags"><span class="pill ok">no model</span><span class="pill">App token</span></div>
+        <p>A fresh checkout of your default branch validates the commits and opens the PR, with a
+          GitHub App that has no Workflows permission.</p>
+      </li>
+    </ol>
+    <p>It came out of running exactly this, unattended, on a production codebase. The
+      <a href="security.html">security model</a> lists every control, and the risks that remain.</p>
+  </section>
+
+  <section>
+    <h2>What runs in your repository</h2>
+    <div class="cards">
+      <div class="card"><h3>Coder</h3><p>Turns <code>agent:ready</code> issues into pull requests that say <code>Refs #N</code>.</p></div>
+      <div class="card"><h3>Fixer</h3><p>Answers red CI and review findings on the agents' own PRs, a capped number of times.</p></div>
+      <div class="card"><h3>Claude review</h3><p>Reviews every PR once. Its verdict gates the merge.</p></div>
+      <div class="card"><h3>Merge gate</h3><p>Merges an agent PR only when CI, the review and every rule agree. A dry run until you turn it on.</p></div>
+      <div class="card"><h3>PR guard</h3><p>A check on every agent PR: protected paths, <code>Refs #N</code>, no closing keywords, and your own rules.</p></div>
+      <div class="card"><h3>Inbox</h3><p>One issue where everything that needs a person lands. You answer with <code>/approve</code>, <code>/reject</code>, <code>/rerun</code>, <code>/pause</code>, <code>/resume</code>.</p></div>
+      <div class="card"><h3>Digest</h3><p>A weekly comment on the inbox: what waits for you, PRs, runs and cost, the queue.</p></div>
+      <div class="card"><h3>Sweep</h3><p>Hourly: frees stale locks, moves issues whose PR merged or closed, recovers dead fix runs.</p></div>
+    </div>
+    <p>The logic is in deterministic shell scripts that run without a model; the workflows are thin
+      callers. State lives in GitHub itself: labels, markers in the bot's comments, and JSON rows
+      on an <code>agent-ledger</code> branch.</p>
+  </section>
+
+  <section>
+    <h2>You stay in charge</h2>
+    <ul>
+      <li><strong>Off until you turn it on.</strong> Nothing runs until <code>AGENTS_ENABLED</code> is
+        <code>true</code>. Set it to <code>false</code> and every agent job stops at its next start.</li>
+      <li><strong>Auto-merge is a second switch.</strong> The merge gate only reports what it would do
+        until <code>AGENT_AUTO_MERGE</code> is <code>true</code>.</li>
+      <li><strong>Capped.</strong> Runs per day, open PRs, attempts per issue and fixes per PR are limits
+        in your <code>policy.json</code>; a breaker stops a role that keeps failing.</li>
+      <li><strong>Trust starts with a person.</strong> The coder takes an issue only if someone with
+        write access applied <code>agent:ready</code>, and nobody without write access edited it since.</li>
+      <li><strong>Protected paths.</strong> An agent PR can never touch <code>.github/</code> or
+        <code>.claude/</code>, and paths you list need a person's label on the issue first.</li>
+      <li><strong>Your files stay yours.</strong> Your settings in <code>.github/agents/</code> are created
+        once and never overwritten; an update refuses to overwrite a package file you edited by hand.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>A dashboard on your machine</h2>
+    <p>One local page for every repository where Gatehand is installed: what waits for you, agent PRs
+      and why the merge gate holds each, what is running, the queue, and the week's runs and cost.
+      Its buttons do, with your own <code>gh</code> login, what you would otherwise type on GitHub.
+      It needs <code>gh</code> signed in and Python 3.9 or later: no packages, no build, no server of ours.</p>
+<pre><code>/gatehand:dashboard        # in Claude Code
+python3 bin/dashboard.py   # from a checkout</code></pre>
+    <p><a href="dashboard.html">What it shows, what each button does, and how it is kept private</a></p>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Gatehand, formerly <code>repo-agents</code>. MIT licence. By <a href="https://github.com/codifydoo">Codify d.o.o.</a></span>
+    <span class="spacer"></span>
+    <a href="https://github.com/codifydoo/gatehand/blob/main/docs/README.md">Runbook</a>
+    <a href="https://github.com/codifydoo/gatehand/blob/main/CHANGELOG.md">Changelog</a>
+    <a href="https://github.com/codifydoo/gatehand/blob/main/SECURITY.md">Security policy</a>
+  </div>
+</footer>
+</body>
+</html>

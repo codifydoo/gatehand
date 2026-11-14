@@ -71,6 +71,11 @@ directories above the skill file.
 model and what each button does are in `docs/dashboard.md`; `tests/dashboard/dashboard.test.sh`
 pins them.
 
+**Project site.** `site/` is plain HTML and CSS with no build, published to GitHub Pages by
+`.github/workflows/pages.yml`. It restates `README.md` and `docs/README.md` by hand, so a change
+to what those say (the install commands, the workflows, the security model) may need the same
+change there; `tests/site/site.test.sh` pins the links and the install commands only.
+
 ## Conventions
 
 - The version lives only in `.claude-plugin/plugin.json` (`render.sh` reads it). A release adds a
