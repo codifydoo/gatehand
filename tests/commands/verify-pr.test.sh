@@ -324,7 +324,7 @@ else
   t_fail "the review step has no github_token: the action would mint the Claude App's write token for the model"
 fi
 missing_deny=""
-for tool in Write Edit NotebookEdit 'Bash(gh:*)' WebFetch WebSearch 'Bash(curl:*)'; do
+for tool in Write Edit NotebookEdit 'Bash(gh:*)' WebFetch WebSearch 'Bash(curl:*)' 'Bash(sh:*)' 'Bash(bash:*)' 'Bash(env:*)'; do
   grep -qF ",${tool}," <<<",${dis}," || missing_deny="${missing_deny} ${tool}"
 done
 if [[ -n "${dis}" && -z "${missing_deny}" ]]; then

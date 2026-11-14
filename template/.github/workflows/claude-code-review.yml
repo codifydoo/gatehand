@@ -304,10 +304,11 @@ jobs:
           # equal to the gh calls in .claude/commands/verify-pr.md; Gatehand's
           # tests/commands/verify-pr.test.sh asserts they agree.
           #
-          # The flag does not bound the grant: the checkout puts the PR's `.claude/settings.json` in
-          # the workspace and Claude Code loads it, so the effective grant is this flag, that file's
-          # `permissions.allow` and the command's frontmatter together. --disallowedTools is what
-          # bounds it: it maps onto `deny`, and deny beats allow from every scope. Write, Edit and
+          # The flag does not bound the grant: the command's `allowed-tools` frontmatter adds to it,
+          # and on a dispatch that is the PR head's copy (the checkout's settings files are dropped
+          # above). --disallowedTools is what bounds it: it maps onto `deny`, and deny beats allow
+          # from every scope, so it names every shell and interpreter as well as what the review
+          # could use to write or send. Write, Edit and
           # NotebookEdit are denied by name, so the tools are gone; so is plain `gh` (the review uses
           # review-gh, above); the network tools so that it cannot send anything out; and git, the
           # package managers, build tools and interpreters so that a repo's settings cannot quietly
@@ -324,7 +325,7 @@ jobs:
           claude_args: |
             --model @@REVIEW_MODEL@@
             --allowedTools "Read,Grep,Glob,TodoWrite,Bash(review-gh pr view:*),Bash(review-gh pr diff:*),Bash(review-gh pr list:*),Bash(review-gh issue view:*),Bash(review-gh search:*)"
-            --disallowedTools "Write,Edit,NotebookEdit,Bash(gh:*),Bash(pnpm:*),Bash(npm:*),Bash(npx:*),Bash(yarn:*),Bash(bun:*),Bash(go:*),Bash(gofmt:*),Bash(cargo:*),Bash(pip:*),Bash(uv:*),Bash(python:*),Bash(python3:*),Bash(node:*),Bash(make:*),Bash(git:*),Bash(docker:*),Bash(curl:*),Bash(wget:*),Bash(env:*),Bash(printenv:*),Bash(cat:*),WebFetch,WebSearch"
+            --disallowedTools "Write,Edit,NotebookEdit,Bash(gh:*),Bash(pnpm:*),Bash(npm:*),Bash(npx:*),Bash(yarn:*),Bash(bun:*),Bash(go:*),Bash(gofmt:*),Bash(cargo:*),Bash(pip:*),Bash(uv:*),Bash(python:*),Bash(python3:*),Bash(node:*),Bash(make:*),Bash(git:*),Bash(docker:*),Bash(curl:*),Bash(wget:*),Bash(env:*),Bash(printenv:*),Bash(cat:*),Bash(sh:*),Bash(bash:*),Bash(zsh:*),Bash(dash:*),Bash(perl:*),Bash(ruby:*),Bash(php:*),Bash(lua:*),Bash(deno:*),Bash(java:*),Bash(ssh:*),Bash(nc:*),Bash(sudo:*),WebFetch,WebSearch"
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 
@@ -402,11 +403,12 @@ jobs:
           }
           # comment_ids <jq filter on one comment>: ids of this PR's comments that match, every page.
           comment_ids() {
-            local page=1 got
+            local page=1 got n
             while :; do
               got="$(ghapi "${GH_API_TOKEN}" GET "/repos/${REPO}/issues/${PR}/comments?per_page=100&page=${page}")" || return 1
-              jq -r ".[] | select($1) | .id" <<<"${got}"
-              [[ "$(jq length <<<"${got}")" -eq 100 ]] || break
+              jq -r ".[] | select($1) | .id" <<<"${got}" || return 1
+              n="$(jq length <<<"${got}")" || return 1
+              [[ "${n}" -eq 100 ]] || break
               page=$((page + 1))
             done
           }
@@ -467,6 +469,7 @@ jobs:
               'https://api.anthropic.com/api/github/github-app-token-exchange')" || code=$?
           [[ "${code}" -eq 0 ]] || { echo "::error::the Claude App token exchange could not be reached (curl ${code})"; exit 1; }
           json="$(cat "${answer}")"
+          rm -f "${answer}"
           if [[ "${status}" != 200 ]]; then
             err="$(jq -r '(.error.details.error_code // "") + " " + (.error.message // "") + " " + (.message // "")' <<<"${json}" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
             if [[ "${err}" == *workflow_not_found_on_default_branch* || ( "${status}" == 401 && "${err}" == *"workflow validation failed"* ) ]]; then

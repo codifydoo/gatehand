@@ -122,6 +122,11 @@ refused "a host path" pr view 'evil.example/acme/repo/pull/7'
 refused "a URL on github.com too" pr view 'https://github.com/other/repo/pull/7'
 refused "an ssh remote" pr view 'git@evil.example:acme/repo'
 refused "a flag before the subcommand" --repo other/repo pr view 7
+rgh pr view 'sk-ant-oat01-ShouldNotBeEchoed'
+[[ "${rc}" -ne 0 ]] && ! grep -qF 'ShouldNotBeEchoed' "${TMP}/gh_err" && t_pass "wrapper: a refused value is not repeated in the error" \
+  || t_fail "wrapper: the error repeats the refused value: $(cat "${TMP}/gh_err")"
+rgh pr view 7 '--sk-ant-oat01-ShouldNotBeEchoed'
+! grep -qF 'ShouldNotBeEchoed' "${TMP}/gh_err" && t_pass "wrapper: nor is a refused flag" || t_fail "wrapper: the error repeats the refused flag"
 refused "combined short flags (-cq is --jq)" pr view 7 --json title -cq title
 refused "combined short flags (-cw is --web)" pr view 7 -cw
 refused "an attached short value" pr list -L5
@@ -182,6 +187,7 @@ case "${method} ${url}" in
     [[ "${POST_DROP:-0}" == 1 ]] || jq --argjson b "${data}" --arg who "${who}" '. + [{id: (900 + length), user: {login: $who}, body: $b.body}]' "${POSTED}" >"${POSTED}.n" && mv "${POSTED}.n" "${POSTED}"
     answer 201 '{"id":1}' ;;
   "GET "*/comments*) [[ "${GET_FAIL:-0}" == 1 ]] && answer 502 '<html>bad gateway</html>'
+    [[ "${GET_FAIL:-0}" == html200 ]] && answer 200 '<html>a proxy page</html>'
     answer 200 "$(jq -c --argjson e "${EXISTING:-[]}" '$e + .' "${POSTED}")" ;;
   *) echo "stub curl: unexpected ${method} ${url}" >&2; exit 7 ;;
 esac
@@ -254,6 +260,8 @@ run_post '' CLAUDE_RAN=false EXISTING='[{"id":3,"user":{"login":"github-actions[
 [[ "${rc}" -eq 0 && "$(grep -c '^POST' "${TMP}/log")" -eq 0 ]] && t_pass "note 2: once per PR" || t_fail "note 2: calls $(calls)"
 run_post '' CLAUDE_RAN=false GET_FAIL=1
 [[ "${rc}" -ne 0 && "$(grep -c '^POST' "${TMP}/log")" -eq 0 ]] && t_pass "note 2: a failed read posts no second note and reddens the job" || t_fail "note 2b: rc=${rc}, calls $(calls)"
+run_post '' CLAUDE_RAN=false GET_FAIL=html200
+[[ "${rc}" -ne 0 && "$(grep -c '^POST' "${TMP}/log")" -eq 0 ]] && t_pass "note 2: a 200 that is not JSON is a failed read too" || t_fail "note 2c: rc=${rc}, calls $(calls)"
 run_post "${REVIEW}" GET_FAIL=1
 [[ "${rc}" -ne 0 && "${out}" == *"could not be read"* && "${out}" != *"posted nothing"* ]] && t_pass "post 10: a failed check after the post says so, not that nothing was posted" || t_fail "post 10: rc=${rc}: ${out}"
 run_post '' CLAUDE_RAN=false EVENT=workflow_dispatch
