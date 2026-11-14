@@ -24,6 +24,10 @@
 #      scripts' own regexes accept, on the ref each workflow needs. A verdict, posted, reads as meant
 #      through the real review_verdict (both readers, GitHub's render recorded), and a note cannot
 #      move it. Only Gatehand's runs are cancelled; only AGENTS_ENABLED and AGENT_AUTO_MERGE are set.
+#   9. Limits and schedules: a role limit policy.json does not set is null, never a default. The
+#      schedules come from the workflow files on the default branch, not policy.json; no `schedule:`
+#      (or no file) is null; a file, or a shape of `on:`, that cannot be read is "unknown" and listed
+#      under the errors, never "no schedule". The next run is POSIX cron's, in UTC.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -154,6 +158,50 @@ log = "\n".join(["2026-11-14T09:25:51.1Z ##[group]Run agent-merge.sh run", "2026
 check("gate: one line per PR", d.merge_gate_lines(log), {12: "wait: CI is running", 13: "would merge abc (dry run: AGENT_AUTO_MERGE is not true)", 14: "merged"})
 check("gate: terminal escapes are stripped", d.ANSI_RE.sub("", "\x1b[36;1m#1: wait\x1b[0m"), "#1: wait")
 
+# Schedules: the cron lines of the rendered workflows, and when each runs next (now is Saturday
+# 2026-11-14 12:00 UTC).
+from datetime import datetime, timezone
+now = datetime(2026, 11, 14, 12, 0, tzinfo=timezone.utc)
+wf = lambda f: open(os.path.join(os.environ["AGENTS_ROOT"], ".github/workflows", f)).read()
+policy = json.load(open(os.path.join(os.environ["AGENTS_ROOT"], ".github/agents/policy.json")))
+check("schedules: each scheduled workflow's cron is the one rendered from policy.json",
+      {k: d.workflow_crons(wf(f)) for k, f in d.SCHEDULED.items()}, {k: [policy["schedules"][k]] for k in d.SCHEDULED})
+check("schedules: a workflow with no schedule has none", d.workflow_crons(wf("agent-inbox.yml")), [])
+check("schedules: an input named schedule is not one", d.workflow_crons(
+    "on:\n  workflow_dispatch:\n    inputs:\n      schedule:\n        type: string\njobs:\n  schedule:\n"), [])
+check("schedules: quoted, unquoted, commented, two of them", d.workflow_crons(
+    "name: x\non: # why\n  push:\n  schedule:\n    # first\n    - cron: '5 4 * * *'  # four\n    - cron: 0 1 * * 1\njobs: {}\n"), ["5 4 * * *", "0 1 * * 1"])
+check("schedules: a quoted key, items at the key's indent, a BOM, a comment naming schedule", d.workflow_crons(
+    "﻿on:\n  push: # and on schedule\n  \"schedule\":\n  - cron: \"17 5 * * *\"\n  workflow_dispatch:\n"), ["17 5 * * *"])
+for name, text in (("flow style", "on: [push, schedule]\n"), ("flow-style schedule", "on:\n  schedule: [{cron: '1 * * * *'}]\n"),
+                   ("schedule with no cron", "on:\n  schedule:\n  push:\n"), ("a key it does not know", "on:\n  schedule:\n    - crons: x\n"),
+                   ("an anchor on on:", "on: &t\n  schedule:\n    - cron: '11 * * * *'\n"), ("an alias", "on: *t\n"),
+                   ("a tag", "on: !!map\n  schedule:\n    - cron: '11 * * * *'\n"),
+                   ("an anchor on the cron", "on:\n  schedule:\n    - cron: &c '1 2 * * *'\n"), ("an alias for the cron", "on:\n  schedule:\n    - cron: *c\n"),
+                   ("a schedule key it cannot read", "on:\n  ? schedule\n  : - cron: '11 * * * *'\n"),
+                   ("a cron that is not a list item (GitHub would not run it)", "on:\n  schedule:\n    cron: '1 * * * *'\n")):
+    try:
+        d.workflow_crons(text); got = "read"
+    except ValueError:
+        got = "unknown"
+    check("schedules: %s is unknown, never none" % name, got, "unknown")
+nxt = lambda c: d.iso(d.next_cron_run(c, now))
+check("next run: each default schedule, in UTC", {k: nxt(policy["schedules"][k]) for k in d.SCHEDULED},
+      {"coder": "2026-11-14T12:17:00Z", "merge": "2026-11-14T12:11:00Z", "sweep": "2026-11-14T12:41:00Z",
+       "digest": "2026-11-16T06:30:00Z", "triage": "2026-11-15T05:17:00Z"})
+check("next run: strictly after now", nxt("0 12 * * *"), "2026-11-15T12:00:00Z")
+check("next run: day of month or day of week when both are set (the 13th, or a Friday)", nxt("0 0 13 * 5"), "2026-11-20T00:00:00Z")
+check("next run: Sunday is 0 or 7", (nxt("0 0 * * 7"), nxt("0 0 * * 0")), ("2026-11-15T00:00:00Z", "2026-11-15T00:00:00Z"))
+check("next run: lists, ranges and steps", nxt("10,50 13-23/5 * 11-12 *"), "2026-11-14T13:10:00Z")
+check("next run: 29 February", nxt("0 0 29 2 *"), "2028-02-29T00:00:00Z")
+check("next run: a day that never comes is none", d.next_cron_run("0 0 31 2 *", now), None)
+for c in ("60 * * * *", "* * * *", "*/0 * * * *", "0 0 * * MON", "@@CRON_CODER@@", "5-1 * * * *", "0 24 * * *", "١ * * * *"):
+    try:
+        d.next_cron_run(c, now); got = "read"
+    except ValueError:
+        got = "refused"
+    check("next run: %r is refused" % c, got, "refused")
+
 for r in ("o/r", "my-org/repo.name", "o/r_1"):
     check("repo name ok: %r" % r, d.valid_repo(r), True)
 for r in ("o/..", "o/.", "../r", "o/r/x", "o", "-o/r", "o/r?x", "o/r%2F", "", "o/r\n", "o\n/r"):
@@ -173,8 +221,13 @@ Q2="api graphql -f breaker=agent-ledger:state/breaker.json -f cur=agent-ledger:r
 POLICY="$(jq -c '.' "${REPO_ROOT}/.github/agents/policy.json")"
 ROW1='{"role":"coder","outcome":"pr-opened","started_at":"2026-11-14T08:00:00Z","cost_usd":1.5}'
 ROW2='{"role":"fixer","outcome":"fix-pushed","started_at":"2026-11-13T08:00:00Z","cost_usd":0.5}'
-q1() { jq -nc --arg p "${POLICY}" --arg perm "${PERM:-ADMIN}" '{data: {repository: {nameWithOwner: "o/r", url: "https://github.com/o/r", viewerPermission: $perm,
-  isArchived: false, defaultBranchRef: {name: "main"}, policy: {text: $p, isTruncated: false}, lock: {text: "{\"version\":\"9.9.9\"}", isTruncated: false}}}}'; }
+# The scheduled workflows as rendered; WF_EXTRA (a JSON object) replaces some of them.
+WF_BLOBS="$(for k in coder merge sweep digest triage; do
+  jq -nc --arg k "wf_${k}" --rawfile t "${REPO_ROOT}/.github/workflows/agent-${k}.yml" '{($k): {text: $t, isTruncated: false}}'
+done | jq -sc 'add')"
+WF_EXTRA='{}'
+q1() { jq -nc --arg p "${POLICY}" --arg perm "${PERM:-ADMIN}" --argjson wf "${WF_BLOBS}" --argjson wfx "${WF_EXTRA}" '{data: {repository: ({nameWithOwner: "o/r", url: "https://github.com/o/r", viewerPermission: $perm,
+  isArchived: false, defaultBranchRef: {name: "main"}, policy: {text: $p, isTruncated: false}, lock: {text: "{\"version\":\"9.9.9\"}", isTruncated: false}} + $wf + $wfx)}}'; }
 q2() { # q2 <cur-blob-json> <breaker-blob-json>
   jq -nc --argjson c "$1" --argjson b "$2" '{data: {repository: {cur: $c, prev: $c, breaker: $b, wfRunner: {oid: "a"}, wfMain: {oid: "a"}}}}'
 }
@@ -188,6 +241,7 @@ rules() {
   stub_gh_on "${Q1}" "$(q1)"
   stub_gh_on "${Q2}" "${Q2_OUT}" "${Q2_RC:-0}" "${Q2_ERR:-}"
   stub_gh_on "api -H Accept: application/vnd.github.raw repos/o/r/contents/runs/2026-11.jsonl?ref=agent-ledger" "${RAW_LEDGER:-}"
+  stub_gh_on "api -H Accept: application/vnd.github.raw repos/o/r/contents/.github/workflows/agent-digest.yml?ref=main" "" 1 "HTTP 502: Bad Gateway"
   stub_gh_on "api repos/o/r/actions/variables?per_page=100" "${VARS_OUT:-}" "${VARS_RC:-0}" "${VARS_ERR:-}"
   stub_gh_on "api repos/o/r/issues?state=open&per_page=100&page=1" "${ISSUES_OUT:-}" "${ISSUES_RC:-0}" "${ISSUES_ERR:-}"
   stub_gh_on "api repos/o/r/actions/runs?status=in_progress&per_page=100" '{"workflow_runs":[
@@ -284,6 +338,29 @@ g="$(get /api/repo/o/r/gate)"
 expect "the gate: the newest run that ran" "$(jq -r .run.url <<<"${g}")" "https://github.com/o/r/actions/runs/5"
 expect "the gate: a PR's newest line wins; one the newest run skipped comes from the scheduled run" "$(jq -c '[.prs["50"].text, .prs["51"].text]' <<<"${g}")" '["wait: the review is running","merged"]'
 expect "the gate: each line says which run it is from" "$(jq -c '[.prs["50"].at, .prs["51"].at]' <<<"${g}")" '["2026-11-14T09:30:00Z","2026-11-14T09:11:00Z"]'
+
+# The per-role limits: what policy.json sets, and null (never a default) for what it does not.
+LIMITS='[.policy.roles[] | [.maxAttemptsPerIssue, .maxCiFixes, .breakerThreshold, .timeoutMinutes]]'
+expect "limits: each role's, from policy.json" "$(jq -c "${LIMITS}" <<<"${r}")" "$(jq -c '[.roles[] | [.maxAttemptsPerIssue, .maxCiFixes, .breakerThreshold, .timeoutMinutes]]' <<<"${POLICY}")"
+expect "limits: a key the role does not have is null" "$(jq -c '[.policy.roles.coder.maxCiFixes, .policy.roles.fixer.maxAttemptsPerIssue]' <<<"${r}")" "[null,null]"
+# The schedules: the cron the workflow file carries, and its next run in UTC.
+expect "schedules: each scheduled workflow, its cron and next run" "$(jq -c '.schedules | [.coder, .merge, .sweep, .digest, .triage] | map([.cron[0], .next_run])' <<<"${r}")" \
+  "$(jq -c '.schedules | [.coder, .merge, .sweep, .digest, .triage]' <<<"${POLICY}" | jq -c '[[.[0], "2026-11-14T12:17:00Z"], [.[1], "2026-11-14T12:11:00Z"], [.[2], "2026-11-14T12:41:00Z"], [.[3], "2026-11-16T06:30:00Z"], [.[4], "2026-11-15T05:17:00Z"]]')"
+Q1_SAVE="${POLICY}"; POLICY="$(jq -c 'del(.roles.coder.breakerThreshold, .roles.fixer.timeoutMinutes)' <<<"${POLICY}")"
+WF_EXTRA='{"wf_sweep":{"text":"on:\n  workflow_dispatch:\n","isTruncated":false},"wf_triage":null,"wf_digest":{"text":"","isTruncated":true},
+  "wf_merge":{"text":"on:\n  schedule:\n    - cron: \"0 0 31 2 *\"\n","isTruncated":false},"wf_coder":{"text":null,"isTruncated":false}}'
+rules
+r="$(get '/api/repo/o/r?fresh=1')"
+expect "limits: a key taken out of policy.json is null, not the default" "$(jq -c '[.policy.roles.coder.breakerThreshold, .policy.roles.fixer.timeoutMinutes, .policy.roles.coder.timeoutMinutes]' <<<"${r}")" \
+  "[null,null,$(jq '.roles.coder.timeoutMinutes' <<<"${POLICY}")]"
+expect "schedules: no schedule (or no file) is null" "$(jq -c '[.schedules.sweep, .schedules.triage]' <<<"${r}")" "[null,null]"
+expect "schedules: a file that cannot be read (a failed read, a blob with no text) is unknown, not no schedule" "$(jq -c '[.schedules.digest, .schedules.coder]' <<<"${r}")" '["unknown","unknown"]'
+expect "schedules: a cron that never runs keeps its cron, its next run null" "$(jq -c '.schedules.merge' <<<"${r}")" '{"cron":["0 0 31 2 *"],"next_run":null}'
+expect "schedules: and both say so under the repository" "$(jq -c '[.errors[] | split(":")[0]]' <<<"${r}")" '[".github/workflows/agent-coder.yml",".github/workflows/agent-merge.yml",".github/workflows/agent-digest.yml"]'
+
+POLICY="${Q1_SAVE}"; WF_EXTRA='{}'
+rules
+r="$(get '/api/repo/o/r?fresh=1')"
 
 # Variables unreadable (a viewer without write access): the inbox is unknown, never a guess.
 VARS_OUT="" VARS_RC=1 VARS_ERR="HTTP 403: Must have admin rights to Repository."
