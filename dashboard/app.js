@@ -455,7 +455,7 @@ function prActions(repo, d, p) {
       if (!window.confirm(`Remove ${stuck.join(" and ")} from PR #${p.number} as ${state.session.viewer}?\n\nDo this once you have fixed the PR yourself: the merge gate and the fixer pick it up again.`)) return;
       b.disabled = true;
       for (const label of stuck) {
-        try { await api("/api/action", { method: "POST", body: { repo, type: "label", op: "remove", label, number: p.number } }); }
+        try { await api("/api/action", { method: "POST", body: { repo, viewer: state.session.viewer, type: "label", op: "remove", label, number: p.number } }); }
         catch (e) { notice(`Not done: ${e.message}`); b.disabled = false; loadRepo(repo, true); return; }
       }
       notice(`Done: PR #${p.number} is back with the merge gate.`);
