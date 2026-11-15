@@ -1043,9 +1043,33 @@ def _do_inbox_command(repo, d, viewer, body):
             raise ApiError(404, "%s is not a request the agent made in #%d" % (body["req"], number))
         if r["answered"]:
             raise ApiError(409, "%s is already answered" % body["req"])
+    if body.get("command") == "rerun":
+        rerun_refusal(repo, body["issue"], got["requests"])
     out = gh_json(["api", "repos/%s/issues/%d/comments" % (repo, number), "--input", "-"],
                   stdin=json.dumps({"body": line})) or {}
     return {"posted": line, "url": out.get("html_url"), "inbox": number}
+
+
+def rerun_refusal(repo, n, requests):
+    """A rerun names no request, so nothing else stops a second one from a page not yet refreshed:
+    the issue's labels, read afresh, must still say it is blocked and not taken."""
+    item = gh_json(["api", "repos/%s/issues/%d" % (repo, n)]) or {}
+    if "pull_request" in item:
+        raise ApiError(409, "#%d is a PR; the coder reruns issues" % n)
+    if item.get("state") != "open":
+        raise ApiError(409, "#%d is not open" % n)
+    labels = {(l or {}).get("name") for l in item.get("labels") or []}
+    if "agent:in-progress" in labels:
+        raise ApiError(409, "#%d is agent:in-progress: the coder is already on it" % n)
+    if "agent:pr-open" in labels:
+        raise ApiError(409, "#%d is agent:pr-open: the coder already opened a PR for it" % n)
+    # agent:needs-human too: the page lists it as blocked, and /rerun takes both labels off.
+    if not labels & {"agent:blocked", "agent:needs-human"}:
+        raise ApiError(409, "#%d is no longer blocked (a rerun or a person got there first): refresh the page" % n)
+    r = next((x for x in requests if x["kind"] == "untrusted" and x["issue"] == n and not x["answered"]), None)
+    if r:
+        raise ApiError(409, "#%d has an open untrusted request (%s): re-apply agent:ready on GitHub and "
+                       "Acknowledge it first; a rerun before that would be refused" % (n, r["id"]))
 
 
 def do_label(repo, d, body):

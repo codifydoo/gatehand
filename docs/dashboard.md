@@ -154,8 +154,10 @@ issue's coder runs and cost beside it, and Hold or Release. Rerun is disabled, w
 while the issue has an open `untrusted` request, or carries `agent:hold` (a run named for a held
 issue does not take it). If the issue also carries `agent:ready` and not `agent:hold`, the pane says
 the coder may take it on its next scheduled run. The server refuses a second command until the inbox
-workflow replies; after that, a rerun from a page not yet refreshed would be posted again, since a
-rerun names no request.
+workflow replies. A rerun names no request, so before posting one the server reads the issue's
+labels afresh and refuses, with the reason, when it is no longer `agent:blocked` or
+`agent:needs-human`, or is `agent:in-progress` or `agent:pr-open`: a second click from a page not yet
+refreshed posts nothing.
 
 **To merge, to close.** The two folded groups open link-only panes, since the page merges nothing
 and closes nothing. "To merge" says the gate found nothing in the way and auto-merge is a dry run,
@@ -334,7 +336,9 @@ Before posting, the server checks what the inbox workflow will check, and refuse
 rather than post something that would be ignored: you are `AGENT_OWNER_LOGIN` to the letter; the
 inbox issue is open, carries `<!-- agent-inbox -->` and was opened by the agent bot or the owner; the
 request is one the agent bot filed and nobody has answered yet; no command of yours is still waiting
-for its answer; a role is one in `policy.json`. Labels are never changed on the inbox issue itself. The
+for its answer; a role is one in `policy.json`; a rerun is of an open issue that is still blocked
+(`agent:blocked` or `agent:needs-human`), not `agent:in-progress` or `agent:pr-open`, with no open
+`untrusted` request. Labels are never changed on the inbox issue itself. The
 command line it posts is built by the server in exactly the grammar `agent-inbox.sh` parses; a reject
 reason is cut to one line of 300 characters. `agent:allow-protected` is never offered: opening
 protected paths stays behind approving the agent's own `protected` request.
