@@ -179,7 +179,9 @@ carries a checkbox: tick the issues whose fix is live and "Close n…" closes th
 way the server previews it (one preview per repository, in one confirm above the rows for ticked
 issues) and closes, as completed, only issues that are still open and still carry
 `agent:done-pending-deploy`; one closed or relabelled since the preview refuses that repository's
-confirm, and you ask again; so does a repository whose inbox issue cannot be told. At most 50 issues
+confirm, and you ask again; so does a repository whose inbox issue cannot be told. When it is done, a
+note says how many were closed and what was refused, above the rows, or where they were once every
+one is closed, until you dismiss it. At most 50 issues
 of one repository go in one confirm. A closed issue keeps its labels, as GitHub's own Close button
 leaves them.
 

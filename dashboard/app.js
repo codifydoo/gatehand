@@ -510,10 +510,10 @@ function needsView() {
   const one = (r, on) => (r.kind === "close" ? pickRow(r, needRow(r, isNew(r), on)) : needRow(r, isNew(r), on));
   const row = (r) => (narrow && sel === r && pane ? [one(r, true), paneBox(true)] : one(r, sel === r));
   const bar = (k) => (k === "close" && of(k).length ? closeBar(of(k)) : null);
-  if (!of("close").length && state.session && !c.needsLoading) { // nothing left to close: an outcome or a confirm for it is old news
-    state.closeOut = "";
-    if (state.closeBulk && !state.closeBulk.sending) state.closeBulk = null;
-  }
+  // Nothing left to close: a confirm for it is old news. What the last close did is still said, where
+  // the rows were, until dismissed (closing every ticked row is the usual case).
+  if (!of("close").length && state.session && !c.needsLoading && state.closeBulk && !state.closeBulk.sending) state.closeBulk = null;
+  const closeNote = !of("close").length && (!kind || kind === "close") ? closeOutNote() : null;
   let list;
   if (kind) {
     list = [bar(kind), of(kind).map(row)];
@@ -521,7 +521,7 @@ function needsView() {
     // A fold stays open while something in it is open, ticked or being closed.
     // Opened by hand, a fold stays open across re-renders (ticking a row re-renders the list).
     const keep = (k) => of(k).includes(sel) || !!state.folds[`group-${k}`]
-      || (k === "close" && (!!state.closeBulk || !!state.closeOut || of(k).some((r) => state.closeSel.has(r.key))));
+      || (k === "close" && (!!state.closeBulk || of(k).some((r) => state.closeSel.has(r.key))));
     list = [rows.filter((r) => !FOLDED[r.kind]).map(row),
       Object.keys(FOLDED).map((k) => (of(k).length ? h("details", { class: "fold", open: keep(k), ontoggle: (e) => { state.folds[`group-${k}`] = e.currentTarget.open; } },
         h("summary", {}, FOLDED[k](of(k).length), of(k).some(isNew) ? h("span", { class: "new" }, "NEW") : null),
@@ -543,7 +543,7 @@ function needsView() {
   return [viewHead("Needs you", ...summary), chips,
     h("div", { class: `needs-split${aside && !narrow ? "" : " no-pane"}` },
       narrow && aside ? paneBox(false) : null,
-      h("div", { class: "needs-list" }, any ? list : null, reading,
+      h("div", { class: "needs-list" }, closeNote ? h("div", { class: "close-bar" }, closeNote) : null, any ? list : null, reading,
         any || reading.length || zero ? null : empty(!state.session ? (state.sessionFailed ? `Could not load: ${state.sessionFailed}` : "Loading…")
           : (!repos.length ? "No repositories yet."
             : (c.unread.length ? `None that could be read; could not read ${c.unread.map(short).join(", ")}.` : "None of these."))),
@@ -1512,6 +1512,11 @@ async function sendCloseBulk() {
 }
 // Above the To close rows: what is ticked and the button, or the open confirm, or the last outcome.
 const CLOSE_MAX = 50; // the server's own cap on one repository's confirm
+function closeOutNote() {
+  if (!state.closeOut) return null;
+  return h("div", { class: "state note" }, state.closeOut, " ",
+    h("button", { type: "button", id: "close-dismiss", class: "quiet small", onclick: () => { state.closeOut = ""; state.focusId = "close-open"; renderView(); } }, "Dismiss"));
+}
 function closeBar(rows) {
   const picked = rows.filter((r) => state.closeSel.has(r.key));
   const over = [...new Set(picked.map((r) => r.repo))].filter((repo) => picked.filter((r) => r.repo === repo).length > CLOSE_MAX);
@@ -1547,8 +1552,7 @@ function closeBar(rows) {
   const able = rows.filter(canClose);
   const all = able.length > 0 && able.every((r) => state.closeSel.has(r.key));
   return h("div", { class: "close-bar" },
-    state.closeOut ? h("div", { class: "state note" }, state.closeOut, " ",
-      h("button", { type: "button", id: "close-dismiss", class: "quiet small", onclick: () => { state.closeOut = ""; state.focusId = "close-open"; renderView(); } }, "Dismiss")) : null,
+    closeOutNote(),
     h("div", { class: "actions" },
       h("button", { type: "button", id: "close-all", class: "quiet small", disabled: !able.length,
         onclick: () => { for (const r of able) { if (all) state.closeSel.delete(r.key); else state.closeSel.add(r.key); } state.focusId = "close-all"; renderView(); } },
