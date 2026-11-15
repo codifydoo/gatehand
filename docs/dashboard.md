@@ -131,7 +131,9 @@ request still open", until the request is answered.
 
 A row opens beside the list, in the item pane; the address keeps it (`#/needs?open=…`), and with
 none named the top row is opened and put in the address, so a newer row arriving does not take the
-pane from you. A request's pane is the place to answer it:
+pane from you. In a window narrower than about 1000 px the item opens in place, under
+its row, and that row is scrolled to the top (tapping it again closes the item); below about 760 px the sidebar folds into one line
+naming where you are, and ☰ opens it. A request's pane is the place to answer it:
 
 - a header line (repository, request id, kind, role, age), the title, and for a request about an
   issue the stage it is stuck at;
@@ -149,6 +151,13 @@ pane from you. A request's pane is the place to answer it:
   against the daily cap, and whether the agents are off);
 - the last seven days of ledger rows about the issue and the request itself, as a timeline, and the
   issue's labels, the inbox and `AGENT_OWNER_LOGIN`, folded.
+
+Keys on Needs you: `j` and `k` move to the next or previous item as listed; `o` goes into the open
+item (or opens one); `a` opens the item's primary action's confirm, and Enter (or Space) then confirms, so the
+primary action is two keys as it is two clicks (on a to-merge or to-close item, `a` opens the GitHub
+link instead); `r` opens Reject…; Esc closes a confirm; `?` lists
+them. Keys do nothing while you type in a field (except Esc) or with a modifier held, and there is no
+key that posts without its confirm.
 
 Where the confirm was, the pane says which of three states it is in: disabled, with the reason (the
 same checks as below); refused, saying nothing was posted and why (the server's own reason, such as
@@ -376,6 +385,18 @@ Each repository costs about seven API calls per refresh, cached for a minute; th
 every five minutes while it is visible, and on "Refresh". The server stops after `--idle-minutes`
 with no page open; a page in a background tab counts as open.
 
+## Weekly budget
+
+The server keeps a weekly budget in US dollars, and a warning line as a share of it (80% unless you
+set another). It is a personal setting on the machine the dashboard runs on, kept in the same config
+file as the repository list (`budget_usd`, `budget_warn`): nothing is written to GitHub,
+`policy.json` does not hold it, and no agent reads it. It is for warning only and stops nothing; to
+stop the agents, turn them off. The page does not show or set it yet.
+
+`POST /api/budget` takes exactly `{"weekly_usd": <number of 0 or more, or null to clear>,
+"warn_at": <share from 0 to 1, or null for the default>}` (`warn_at` may be left out to keep it);
+anything else is refused with a reason. `/api/session` returns the budget as `budget`.
+
 ## Security model
 
 The server can read everything your `gh` login can, so the page is built so that nothing but the
@@ -406,6 +427,8 @@ tab it opened can talk to it.
   request from the page is passed through. Reading writes nothing to GitHub. `tests/dashboard/dashboard.test.sh`
   pins each point above, runs every command the page can post through the real `parse_commands`, and
   every verdict through the real `review_verdict`.
+- Besides GitHub and the files above, it writes only its own config file: the repository list and
+  the weekly budget, each a fixed shape the server validates, kept with mode 0600.
 
 ## Options
 
@@ -415,5 +438,5 @@ tab it opened can talk to it.
 | `--no-open` | do not open a browser; print the address instead |
 | `--print-url` | print the address with its secret |
 | `--idle-minutes M` | stop after M minutes with no page open (default 120; 0 never) |
-| `--config FILE` | keep the repository list here |
+| `--config FILE` | keep the repository list and the weekly budget here |
 | `--ready-file FILE` | write `{port, token}` there (mode 0600) once listening, for scripts |

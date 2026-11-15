@@ -410,7 +410,13 @@ function renderSide() {
   const item = (route, on, text, badge, badgeKind, cls, title) => routeLink(route,
     { class: `${cls || "side-item"}${on ? " on" : ""}`, "aria-current": on ? "page" : null, title: title || null },
     h("span", { class: "side-label" }, text), badge ? h("span", { class: `badge ${badgeKind || ""}` }, badge) : null);
+  // On a narrow window the sidebar folds into one line naming where you are; ☰ opens it.
+  const here = { needs: ["Needs you", c.needsText], activity: ["Activity", c.runningText], week: ["Week", c.costText],
+    repos: ["Repositories", String(repos.length)], repo: [routeRepo() ? label(routeRepo()) : "Repository", ""] }[r.view] || ["", ""];
+  $("side").classList.toggle("open", !!state.sideOpen);
   replace($("side"),
+    h("button", { type: "button", class: "side-toggle quiet", "aria-expanded": state.sideOpen ? "true" : "false",
+      onclick: (e) => { state.sideOpen = !state.sideOpen; $("side").classList.toggle("open", state.sideOpen); e.currentTarget.setAttribute("aria-expanded", String(state.sideOpen)); } }, "☰ ", h("strong", {}, here[0]), here[1] ? ` ${here[1]}` : ""),
     item("/needs", r.view === "needs", "Needs you", c.needsText, c.needs ? "attn" : (c.needsUnknown ? "warn" : "")),
     item("/activity", r.view === "activity", "Activity", c.runningText),
     item("/week", r.view === "week", "Week", c.costText),
@@ -422,6 +428,8 @@ function renderSide() {
     // Already on #/repos the address does not change, so the link goes to the form itself.
     item("/repos", false, `Find · add${ex.length ? ` · ${ex.length} hidden` : ""}`, null, null, "side-foot"));
   $("side").lastChild.addEventListener("click", () => { if (state.route.view === "repos") $("add-repo").focus(); });
+  // Any link in the folded sidebar folds it again, the current view's included (no hashchange then).
+  $("side").onclick = (e) => { if (e.target.closest("a") && state.sideOpen) { state.sideOpen = false; $("side").classList.remove("open"); $("side").firstChild.setAttribute("aria-expanded", "false"); } };
   document.title = c.needsText === "0" ? "Gatehand" : `(${c.needsText}) Gatehand`;
 }
 
@@ -439,7 +447,8 @@ function needRow(r, isNew, on) {
       `${short(r.repo)} · ${KIND_LABEL[r.kind]}${r.at ? ` · ${ago(r.at)}` : ""}`, isNew ? h("span", { class: "new" }, "NEW") : null),
     h("div", { class: "ltitle" }, h("strong", {}, r.title), r.text ? ` ${r.text}` : ""),
     h("div", { class: "lhint" }, r.hint)];
-  return routeLink(needsRoute(state.route.kind, r.key), { class: `lrow${on ? " on" : ""}`, title: r.repo,
+  // On a narrow window the open row, tapped again, closes its item.
+  return routeLink(needsRoute(state.route.kind, on && NARROW.matches ? "-" : r.key), { class: `lrow${on ? " on" : ""}`, title: r.repo,
     "aria-current": on ? "true" : null }, kids);
 }
 
@@ -469,7 +478,8 @@ function needsView() {
   // item). Rows in a folded group come after the others, as they are shown.
   const shownRows = kind ? of(kind) : [...rows.filter((r) => !FOLDED[r.kind]), ...Object.keys(FOLDED).flatMap(of)];
   const want = state.route.open;
-  const sel = want ? shownRows.find((r) => r.key === want) || null : shownRows[0] || null;
+  const closed = want === "-"; // closed by tapping its row on a narrow window
+  const sel = closed ? null : (want ? shownRows.find((r) => r.key === want) || null : shownRows[0] || null);
   // The top row, once open, is pinned in the address: a newer row arriving does not take the pane
   // from under you, and once it is answered the pane says what happened instead of moving on.
   // Only while the address itself still says Needs you with nothing open: a navigation not yet handled wins.
@@ -478,7 +488,15 @@ function needsView() {
     state.route.open = sel.key;
     history.replaceState(null, "", `${location.pathname}#${needsRoute(kind, sel.key)}`);
   }
-  const row = (r) => needRow(r, isNew(r), sel === r);
+  const pane = sel ? itemPane(sel) : (want && !closed ? gonePane(want, c) : null);
+  // A narrow window: the open item expands in place, under its row, as in a mail app; otherwise it
+  // sits beside the list.
+  const narrow = NARROW.matches;
+  const paneBox = (inPlace) => h("section", { class: `pane card${inPlace ? " in-place" : ""}`, id: "pane", "aria-label": "Item" }, pane);
+  state.shownKeys = shownRows.map((r) => r.key); // for the keys: j/k move through the list as shown
+  state.selKey = sel ? sel.key : "";
+  if (sel) state.lastSelKey = sel.key;
+  const row = (r) => (narrow && sel === r && pane ? [needRow(r, isNew(r), true), paneBox(true)] : needRow(r, isNew(r), sel === r));
   let list;
   if (kind) {
     list = of(kind).map(row);
@@ -494,15 +512,26 @@ function needsView() {
     x.notes.map((n) => h("div", {}, n)),
     routeLink(repoRoute(repo), {}, `Open ${repo}`)));
   const any = rows.length && (!kind || of(kind).length);
-  const pane = sel ? itemPane(sel) : (want ? gonePane(want, c) : null);
+  const aside = pane && !(narrow && sel); // beside the list, or (narrow, the item gone) above it
   return [viewHead("Needs you", ...summary), chips,
-    h("div", { class: `needs-split${pane ? "" : " no-pane"}` },
+    h("div", { class: `needs-split${aside && !narrow ? "" : " no-pane"}` },
+      narrow && aside ? paneBox(false) : null,
       h("div", { class: "needs-list" }, any ? list
         : empty(c.needsLoading && !rows.length ? "Loading…"
           : (kind ? "None of these." : (c.unread.length ? "Nothing that could be read needs you." : "Nothing needs you."))),
-      kind ? null : unread),
-      pane ? h("section", { class: "pane card", id: "pane", "aria-label": "Item" }, pane) : null)];
+      kind ? null : unread,
+      any ? h("p", { class: "keys muted" }, state.keysHelp ? KEYS_HELP : "j/k move · o open · a primary · r reject · ? keys") : null),
+      aside && !narrow ? paneBox(false) : null)];
 }
+// The width below which the list and the pane do not fit side by side (app.css has the same number).
+const NARROW = window.matchMedia("(max-width: 1000px)");
+NARROW.addEventListener("change", () => {
+  if (state.route.view !== "needs") return;
+  renderView();
+  // The pane moved (beside the list, or under its row): a field you are typing in stays in view.
+  const a = document.activeElement;
+  if (a && $("pane") && $("pane").contains(a)) a.scrollIntoView({ block: "nearest" });
+});
 
 // --- the item pane: the one place to act on a row ------------------------------------------------------
 // Every pane: a header line and the title; then, as its kind has them, a stage track, why it is stuck
@@ -2202,7 +2231,13 @@ function renderPause() {
   if (f && !f.disabled) f.focus({ preventScroll: true });
   state.pauseFocus = "";
 }
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.pause && !document.querySelector("dialog[open]")) closePause(); });
+// Registered before the Needs you keys, so they see defaultPrevented: Escape closes this confirm only,
+// and their letters do nothing to the list behind it while it has the focus.
+document.addEventListener("keydown", (e) => {
+  if (!state.pause || document.querySelector("dialog[open]")) return;
+  if (e.key === "Escape") { e.preventDefault(); closePause(); return; }
+  if (!e.metaKey && !e.ctrlKey && !e.altKey && $("pause").contains(e.target) && /^[jkoar?]$/i.test(e.key)) e.preventDefault();
+});
 
 // --- loading -----------------------------------------------------------------------------------------
 function applySession(s) {
@@ -2242,6 +2277,7 @@ async function loadExtras(repo, fresh) {
 function onRoute() {
   const was = state.route.view;
   const wasOpen = state.route.open;
+  state.sideOpen = false; // a link in the folded sidebar was followed: fold it again
   state.route = parseRoute();
   // Another item opened: a confirm left open on the last one closes; what was posted from it stays.
   if (state.route.open !== wasOpen) state.pane = { key: "", confirm: "", text: "", fixer: true, preview: null };
@@ -2252,12 +2288,13 @@ function onRoute() {
   state.selected = repo;
   renderAll();
   if (opened) loadExtras(repo, false);
-  // Opening an item keeps the list where it is; where the pane sits under the list, it is brought into view.
+  // Opening an item keeps the list where it is; on a narrow window, where the item opens under its
+  // row, that row is brought to the top.
   if (state.route.view === "needs" && was === "needs") {
-    const pane = $("pane");
-    if (pane && named && getComputedStyle(pane.parentNode).gridTemplateColumns.split(" ").length < 2) {
-      window.scrollTo(0, pane.getBoundingClientRect().top + window.scrollY - document.querySelector(".bar").offsetHeight - 8);
-    }
+    const on = document.querySelector(".needs-list .lrow.on");
+    if (on && state.keyMoved && !NARROW.matches) on.scrollIntoView({ block: "nearest" });
+    state.keyMoved = false;
+    if (on && named && NARROW.matches) window.scrollTo(0, on.getBoundingClientRect().top + window.scrollY - document.querySelector(".bar").offsetHeight - 8);
   } else window.scrollTo(0, 0);
 }
 
@@ -2287,6 +2324,63 @@ async function refresh(fresh) {
 }
 
 window.addEventListener("hashchange", onRoute);
+
+// --- keys, on Needs you: j/k move through the list, o goes into the open item, a opens its primary
+// action's confirm (Enter then confirms: two keys, as two clicks), r opens Reject…, Esc closes a
+// confirm, ? shows them all. Never while you type in a field, and never with a modifier.
+const KEYS_HELP = "j / k next or previous item · o go into the open item (or open it) · a the item's primary action, then Enter to confirm · r Reject… · Esc close the confirm · ? hide this";
+document.addEventListener("keydown", (e) => {
+  if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || state.route.view !== "needs") return;
+  if (document.querySelector("dialog[open]")) return;
+  const t = e.target;
+  const typing = t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+  const pane = $("pane");
+  if (e.isComposing || e.keyCode === 229) return; // an input method is composing: its keys are its own
+  if (e.key === "Escape") {
+    const cancel = pane && [...pane.querySelectorAll(".confirm button")].find((b) => b.textContent === "Cancel");
+    if (cancel && !cancel.disabled) { e.preventDefault(); cancel.click(); }
+    return;
+  }
+  if (typing) return;
+  const keys = state.shownKeys || [];
+  // With the item closed (narrow window) or gone, j/k go on from the one last open.
+  const at = keys.indexOf(state.selKey || state.lastSelKey);
+  const move = (i) => {
+    if (i < 0 || i >= keys.length) return;
+    state.keyMoved = true;
+    go(needsRoute(state.route.kind, keys[i]));
+  };
+  // Caps Lock still means the letter; Shift is only for "?".
+  if (e.shiftKey && e.key !== "?") return;
+  switch (e.key.length === 1 && !e.shiftKey ? e.key.toLowerCase() : e.key) {
+    case "j": e.preventDefault(); move(at < 0 ? 0 : at + 1); break;
+    case "k": e.preventDefault(); move(at < 0 ? 0 : at - 1); break;
+    case "o": {
+      e.preventDefault();
+      if (!pane || !state.selKey) { move(Math.max(at, 0)); break; }
+      const f = pane.querySelector("button:not(:disabled), a[href]");
+      pane.scrollIntoView({ block: "nearest" });
+      if (f) f.focus({ preventScroll: true });
+      break;
+    }
+    case "a": {
+      // Only the first control of the pane's first row of actions, and only if it is the primary
+      // (a filled button, or a link-only pane's GitHub link) and enabled: never a confirm's own post
+      // button, so a write always takes Enter on the confirm.
+      const first = pane && pane.querySelector(".step .actions");
+      const b = first && first.firstElementChild;
+      if (b && !b.classList.contains("quiet") && !b.disabled && (b.tagName === "BUTTON" || b.matches("a.cta[href]"))) { e.preventDefault(); b.click(); }
+      break;
+    }
+    case "r": {
+      const b = pane && [...pane.querySelectorAll(".step .actions > button")].find((x) => x.textContent === "Reject…" && !x.disabled);
+      if (b) { e.preventDefault(); b.click(); }
+      break;
+    }
+    case "?": e.preventDefault(); state.keysHelp = !state.keysHelp; renderView(); break;
+    default:
+  }
+});
 $("refresh").addEventListener("click", () => refresh(true));
 $("pause-all").addEventListener("click", () => openPause("pause"));
 $("rescan").addEventListener("click", async () => {

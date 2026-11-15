@@ -52,6 +52,10 @@
   branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only
   (#21, #22); Activity shows the next scheduled runs, and a repository's Agents tab shows the limits
   and schedules.
+- In a narrow window the open item of Needs you expands in place under its row, as in a mail app,
+  and the sidebar folds into one line with ☰.
+- Keys on Needs you: j/k move, o goes into the item, a opens its primary action's confirm (Enter
+  confirms), r opens Reject…, Esc closes the confirm, ? lists them.
 - Dashboard: Pause all's record. A `set_variable` that turns `AGENTS_ENABLED` off can carry
   `"pause_all": true`; once that write succeeds, the repository is kept in a `paused` list in the
   dashboard's local config file, which `/api/session` returns, so Resume turns on only what Pause
@@ -61,6 +65,11 @@
   is on, after one confirm that lists every repository with its preview; the bar then says "Agents
   off in n of m" on every screen, names what was refused, and offers "Resume n…", which turns on
   only what Pause all turned off.
+- Dashboard: a weekly budget in US dollars and a warning line (a share of it, 80% by default), kept
+  in the dashboard's local config file, set through `POST /api/budget` and returned by
+  `/api/session`. A setting on this machine only: nothing is written to GitHub, no agent reads it,
+  and it stops nothing. A config file from before loads unchanged. The page does not show or set it
+  yet (#28).
 - Project site: `site/` holds five static pages (home, how it works, security, the dashboard, get
   started), published to GitHub Pages by `.github/workflows/pages.yml` on a push to `main`. Not
   part of the package: nothing changes in installed repositories.
