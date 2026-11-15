@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Dashboard: an answered inbox request says how (`answer`: approved, rejected, seen or acknowledged),
+  when (`answered_at`) and, for a reject, the owner's one-line reason (`reason`), read only from
+  `AGENT_OWNER_LOGIN`'s own `/reject`, never an edited one (#23). The blocked-issue pane shows it
+  ("its last one, REQ-…, was rejected by you on Nov 11: not now"), as does a request's pane once someone answered first ("approved at
+  17:29") and the Pipeline tab's recently answered requests. Installed repositories need no update:
+  the dashboard runs from the package.
 - A blocked or failed request's pane says under step 1 whether someone with write access has
   commented on the issue since the request, and who and when (#24). The server reads it per request,
   for the open pane only (when it opens and on each refresh), from the new

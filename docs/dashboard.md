@@ -97,7 +97,8 @@ posted and why (the server's own reason, such as the request being answered alre
 for the Agent inbox workflow, with the line posted and a link to it, until its answer arrives. If
 the dashboard fails after it may have posted, or does not answer, the pane says it is not known
 whether anything was posted. When the answer is in, the row leaves Needs you and the pane says what
-happened.
+happened; a request answered elsewhere while its pane was open says how and when ("approved at
+17:29").
 
 **A request.** Its pane is the place to answer it:
 
@@ -148,7 +149,9 @@ it, and a note changed after its preview is previewed again before anything is s
 and their cost over the last seven days are beside the buttons; Claude review runs are not in the
 ledger.
 
-**A blocked issue with no open request.** The pane says so (it was answered, or never filed), that
+**A blocked issue with no open request.** The pane says so: how its newest request was answered,
+when, and a reject's reason ("its last one, REQ-…, was rejected by you on Nov 11: not now"), or that it was
+answered or never filed when no answered request about it is among the inbox comments read. It says
 the coder picks only `agent:ready` issues, and offers "Rerun coder" (`/rerun coder #N`) with the
 issue's coder runs and cost beside it, and Hold or Release. Rerun is disabled, with the reason,
 while the issue has an open `untrusted` request, or carries `agent:hold` (a run named for a held
@@ -536,6 +539,27 @@ it can already have passed: that is "due now"); GitHub often starts a scheduled 
 late, and skips it while the workflow is disabled. It is `null`, and listed under the errors, for a cron the
 server cannot read (only `*`, numbers, `-`, `,` and `/`, the operators GitHub documents) or one
 that matches no day in nine years.
+
+### How a request was answered
+
+`/api/repo/<owner>/<name>/inbox` lists the requests the agent bot filed, each with `answered`. An
+answered one also carries:
+
+| Field | What | Read from |
+|---|---|---|
+| `answer` | `approved`, `rejected`, `seen` (a request about a PR: nothing changed) or `acknowledged` (an `untrusted` request: nothing changed), as the inbox workflow recorded it; `null` if neither source says | the bot's reply line for the request (`` - `REQ-…` approved…``); for a request kind a repository's own hook handles, which writes its own line, the verb of the owner's command |
+| `answered_at` | when, in UTC | the bot's first comment carrying the request's answer marker |
+| `reason` | a reject's reason, one line of at most 300 characters, as text; `null` without one | the owner's command that reply applied: the rest of its `/reject REQ-… ` line |
+
+The command a reply applied is the owner's first one naming the request after the bot's last earlier
+reply about it (a failed apply asks for it again; a second command sent while a run was going is
+"already answered"), else the last one before the reply. Only `AGENT_OWNER_LOGIN`'s comments are
+read for it, to the letter: the inbox workflow applies no one else's, so a `/reject` pasted by
+anyone else changes nothing. A command edited since it was posted is not read (the workflow applied
+the text as first posted, and anyone with write access can edit a comment), so neither verb nor
+reason comes from it. A request that is not
+answered has all three `null`. The reason is text the owner typed: the page sets it as text, never
+as HTML, and nothing is queued from it.
 
 ### The weekly budget
 
