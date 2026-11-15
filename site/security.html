@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security model · Gatehand</title>
+<meta name="description" content="Gatehand's security model: the model never shares a job with a write-capable token. The controls, and the risks you accept by running it.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Gatehand">
+<meta property="og:image" content="https://codifydoo.github.io/gatehand/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Gatehand: unattended Claude coding agents for a GitHub repository, behind a merge gate.">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="favicon.svg" alt="">Gatehand</a>
+    <nav aria-label="Site">
+      <a href="how-it-works.html">How it works</a>
+      <a href="security.html" aria-current="page">Security</a>
+      <a href="dashboard.html">Dashboard</a>
+      <a href="get-started.html">Get started</a>
+      <a href="https://github.com/codifydoo/gatehand">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="page-head">
+    <h1>Security model</h1>
+    <p class="lead">The model never shares a job with a write-capable token, and nothing it wrote is
+      executed by one. This page is a summary; the
+      <a href="https://github.com/codifydoo/gatehand/blob/main/docs/README.md#security-model">runbook</a>
+      has the full text.</p>
+  </div>
+
+  <section>
+    <h2>The controls</h2>
+    <div class="cards">
+      <div class="card">
+        <h3>Read-only model job</h3>
+        <p>The job that runs the model has <code>contents: read</code> and no <code>id-token</code>.
+          Push, every <code>gh</code> command, curl, wget, ssh, docker, sudo, WebFetch and WebSearch
+          are denied to it.</p>
+      </div>
+      <div class="card">
+        <h3>A separate publish job</h3>
+        <p>The job with the App token runs only the default branch's scripts. The App has no
+          Workflows permission, so GitHub itself refuses any push that touches
+          <code>.github/workflows/</code>.</p>
+      </div>
+      <div class="card">
+        <h3>Protected paths</h3>
+        <p>Paths you list need a writer's <code>agent:allow-protected</code> on the issue, and such a
+          PR is never auto-merged. Under that is a floor no file can lower: <code>.github/</code>,
+          <code>.claude/</code>, nested <code>CLAUDE.md</code> files, <code>.mcp.json</code>.</p>
+      </div>
+      <div class="card">
+        <h3>Sudo once, before agent code</h3>
+        <p>Your <code>system</code> action is the only setup step that may use sudo. Passwordless sudo
+          is gone before anything the agent wrote runs.</p>
+      </div>
+      <div class="card">
+        <h3>The <code>agent-runner</code> ref</h3>
+        <p>Runs are dispatched on a ref whose cache scope the default branch and PRs never read, and
+          the model's job restores no caches.</p>
+      </div>
+      <div class="card">
+        <h3>The review model cannot write</h3>
+        <p>The review job's token is read-only and the model has no tool that writes. A separate job
+          that runs no model posts the review, and refuses one that carries text shaped like a
+          credential.</p>
+      </div>
+      <div class="card">
+        <h3>Untrusted text</h3>
+        <p>Issue text is framed as data and stripped of invisible format characters; only writers'
+          comments reach the model. Text the bot posts has <code>@mentions</code> and
+          <code>&lt;!--</code> neutralised.</p>
+      </div>
+      <div class="card">
+        <h3>Trust anchored on a person</h3>
+        <p>The coder takes an issue only if the latest <code>agent:ready</code> came from someone with
+          write access and nobody without it edited the issue since. Inbox commands count only from
+          the owner you name.</p>
+      </div>
+    </div>
+    <h3>The review runs the PR's code</h3>
+    <p>The review checks out the PR and runs code from it with the Claude credential in reach. A
+      dispatched review refuses a fork's PR before the checkout, and on an automatic run GitHub
+      gives a fork's PR no secrets and a read-only token. Fork code still runs on the review
+      runner, so a public repository with a self-hosted review runner should require approval for
+      all external contributors.</p>
+  </section>
+
+  <section>
+    <h2>Risks you accept by running this</h2>
+    <div class="callout warn">
+      <p>These remain after every control above. Read them before you turn the agents on.</p>
+    </div>
+    <ul>
+      <li><strong>The model's own job.</strong> A prompt-injected run controls its job and can read
+        the Claude credential from its environment. Use a capped API key if that matters to you,
+        and on self-hosted runners an egress allowlist.</li>
+      <li><strong>CI runs agent code.</strong> An agent PR's code runs in your CI like any PR's,
+        without a person reading it first. Keep secrets out of PR-triggered CI jobs, and on
+        self-hosted runners keep the agent pool apart from the CI pool.</li>
+      <li><strong>The review's verdict is a model's.</strong> A review that is fooled can still say
+        Approve. The merge gate also needs green CI, the PR guard and no protected path; leave
+        <code>AGENT_AUTO_MERGE</code> off if you want a person to merge every agent PR.</li>
+      <li><strong>Shared subscription.</strong> With a Claude subscription token, the runs count
+        against the same subscription as your interactive sessions; <code>runsPerDay</code> is the
+        guard.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Runners</h2>
+    <p>GitHub-hosted runners by default: a fresh VM per job is the isolation the design needs. For
+      your own machines, the
+      <a href="https://github.com/codifydoo/gatehand/blob/main/addons/hardened-runner/README.md">hardened-runner add-on</a>
+      says what a self-hosted agent pool must give you, with a reference egress allowlist.</p>
+  </section>
+
+  <section>
+    <h2>Reporting a vulnerability</h2>
+    <p>Report it privately through GitHub:
+      <a href="https://github.com/codifydoo/gatehand/security/advisories/new">Report a vulnerability</a>.
+      Please do not open a public issue for a security problem. A report that shows one of the
+      risks above is worse than described is in scope too.</p>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Gatehand, formerly <code>repo-agents</code>. MIT licence. By <a href="https://github.com/codifydoo">Codify d.o.o.</a></span>
+    <span class="spacer"></span>
+    <a href="https://github.com/codifydoo/gatehand/blob/main/docs/README.md">Runbook</a>
+    <a href="https://github.com/codifydoo/gatehand/blob/main/CHANGELOG.md">Changelog</a>
+    <a href="https://github.com/codifydoo/gatehand/blob/main/SECURITY.md">Security policy</a>
+  </div>
+</footer>
+</body>
+</html>

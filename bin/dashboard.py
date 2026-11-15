@@ -25,6 +25,7 @@ import argparse
 import hmac
 import http.server
 import json
+import math
 import os
 import re
 import secrets
@@ -156,9 +157,13 @@ def rate_reset(resource):
 def cause_of(e):
     """A failed read's cause as the page gets it: {"cause": one of CAUSES}, and for "rate_limited"
     also "resets_at" (ISO time, or null when unknown)."""
-    c = {"cause": e.cause}
-    if e.cause == "rate_limited":
-        c["resets_at"] = rate_reset(e.resource)
+    return cause_entry(e.cause, e.resource)
+
+
+def cause_entry(cause, resource):
+    c = {"cause": cause}
+    if cause == "rate_limited":
+        c["resets_at"] = rate_reset(resource)
     return c
 
 
@@ -205,8 +210,8 @@ def gql_types(data):
 
 
 def graphql(query, partial=False, **variables):
-    """The response's data. Any GraphQL error raises, unless partial: then (data, [messages]) for a
-    response that still carries data (one node a SAML-protected organisation hides, say)."""
+    """The response's data. Any GraphQL error raises, unless partial: then (data, [{message, type}])
+    for a response that still carries data (one node a SAML-protected organisation hides, say)."""
     # Variables first, then the query: the order the test stub's globs expect. -f only: -F would
     # read a value starting with @ as a file.
     # An int goes as -F (typed): digits cannot start with @.
@@ -230,7 +235,10 @@ def graphql(query, partial=False, **variables):
     errors = [str(x.get("message")) for x in data.get("errors") or [] if isinstance(x, dict)]
     if errors and not (partial and data.get("data")):
         raise GhError(args, 0, "; ".join(errors), gql_types(data))
-    return (data.get("data") or {}, errors) if partial else (data.get("data") or {})
+    if partial:
+        return data.get("data") or {}, [{"message": str(x.get("message")), "type": x.get("type")}
+                                        for x in data.get("errors") or [] if isinstance(x, dict)]
+    return data.get("data") or {}
 
 
 def rest_pages(path, max_pages):
@@ -1406,14 +1414,19 @@ nodes{nameWithOwner isArchived lock:object(expression:"HEAD:.github/agents/insta
 
 
 def discover():
-    """Every repository your login can see that has Gatehand's lock file on its default branch, and
-    notes on what the scan could not see (an organisation that hides its repositories from this token,
-    a scan cut short)."""
-    found, notes, cursor = [], [], None
+    """Every repository your login can see that has Gatehand's lock file on its default branch, notes
+    on what the scan could not see (an organisation that hides its repositories from this token, a scan
+    cut short), and for each note that is a failed read, its cause: {"cause", "error": the note}."""
+    found, notes, unreadable, cursor = [], [], [], None
     for page_no in range(MAX_DISCOVERY_PAGES):
         kw = {"cursor": cursor} if cursor else {}
         data, errors = graphql(DISCOVER_Q, partial=True, **kw)
-        notes += [e for e in errors[:3] if e not in notes]
+        for e in errors[:3]:
+            msg = e["message"][:300]  # as Config loads a note: the note and its entry stay equal
+            if msg not in notes:
+                notes.append(msg)
+                cause = read_cause(0, e["message"], [str(e["type"])] if e["type"] else [])
+                unreadable.append(dict(cause_entry(cause, "graphql"), error=msg))
         page = (data.get("viewer") or {}).get("repositories") or {}
         found += [n["nameWithOwner"] for n in page.get("nodes") or []
                   if n and n.get("lock") and not n.get("isArchived") and valid_repo(n.get("nameWithOwner", ""))]
@@ -1423,7 +1436,7 @@ def discover():
         cursor = info.get("endCursor")
         if page_no == MAX_DISCOVERY_PAGES - 1:
             notes.append("stopped after %d repositories; add the others by hand" % (MAX_DISCOVERY_PAGES * 100))
-    return sorted(set(found), key=str.lower), notes
+    return sorted(set(found), key=str.lower), notes, unreadable
 
 
 def valid_repo(s):
@@ -1439,13 +1452,45 @@ def config_path():
     return os.path.join(base, "gatehand", "dashboard.json")
 
 
+def scan_entry(x):
+    """A kept scan cause in cause_entry's shape, whatever the file held."""
+    c = {"cause": x["cause"], "error": x["error"][:300]}
+    if x["cause"] == "rate_limited":
+        r = x.get("resets_at")
+        try:  # only a real UTC time in iso()'s form: a hand-edited file never yields a guessed time
+            c["resets_at"] = iso(datetime.strptime(r, "%Y-%m-%dT%H:%M:%SZ")) if r.isascii() else None
+        except (TypeError, ValueError, AttributeError):
+            c["resets_at"] = None
+    return c
+
+
+BUDGET_WARN_DEFAULT = 0.8
+
+
+def budget_number(v, name, top=None):
+    """A budget field: None (not set), or a finite number of zero or more (at most `top`). A bool is
+    not a number here, and json.loads lets NaN and Infinity through."""
+    if v is None:
+        return None
+    try:  # an int too big for a float (json.loads takes 4,000 digits) is not a budget either
+        ok = not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v) and v >= 0 and (top is None or v <= top)
+    except OverflowError:
+        ok = False
+    if not ok:
+        raise ValueError("%s must be a number from 0%s, or null" % (name, " to %g" % top if top is not None else " up"))
+    return v
+
+
 class Config:
-    """discovered (the last scan), added (by hand), excluded (removed by hand; a rescan keeps them out)."""
+    """discovered (the last scan), added (by hand), excluded (removed by hand; a rescan keeps them out),
+    and the viewer's weekly budget (budget_usd, US dollars) and its warning line (budget_warn, a share
+    of it): settings on this machine only, which warn and stop nothing, and which no agent reads."""
 
     def __init__(self, path):
         self.path = path
         self.lock = threading.Lock()
-        self.data = {"discovered": [], "added": [], "excluded": [], "scanned_at": None}
+        self.data = {"discovered": [], "added": [], "excluded": [], "scanned_at": None,
+                     "budget_usd": None, "budget_warn": None}
         try:
             with open(path) as f:
                 got = json.load(f)
@@ -1455,8 +1500,23 @@ class Config:
             self.data["scanned_at"] = got.get("scanned_at") if isinstance(got.get("scanned_at"), str) else None
             notes = got.get("scan_notes")
             self.data["scan_notes"] = [str(n)[:300] for n in notes] if isinstance(notes, list) else []
+            causes = got.get("scan_unreadable")
+            self.data["scan_unreadable"] = [scan_entry(x) for x in causes if isinstance(x, dict)
+                                            and x.get("cause") in CAUSES and isinstance(x.get("error"), str)
+                                            ] if isinstance(causes, list) else []
+            for k, top in (("budget_usd", None), ("budget_warn", 1)):
+                try:  # a value hand-edited out of shape is not set, and the rest of the file still loads
+                    self.data[k] = budget_number(got.get(k), k, top)
+                except ValueError:
+                    pass
         except (OSError, ValueError, AttributeError):
             pass
+
+    def budget(self):
+        with self.lock:
+            warn = self.data["budget_warn"]
+            return {"weekly_usd": self.data["budget_usd"],
+                    "warn_at": BUDGET_WARN_DEFAULT if warn is None else warn}
 
     def repos(self):
         with self.lock:
@@ -1655,7 +1715,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             user = cache.get("user", lambda: gh_json(["api", "user"]) or {}, ttl=3600)
             rate = cache.get("rate", lambda: ((gh_json(["api", "rate_limit"]) or {}).get("resources") or {}), fresh=fresh)
             return self.send(200, dict(self.repo_list(), viewer=user.get("login"), scan_error=scan_error,
-                                       scan_cause=scan_cause, rate={k: rate.get(k) for k in ("core", "graphql")}, now=iso(now_utc())))
+                                       scan_cause=scan_cause, budget=cfg.budget(), rate={k: rate.get(k) for k in ("core", "graphql")},
+                                       now=iso(now_utc())))
         m = re.fullmatch(r"/api/repo/([^/]+)/([^/]+)(/inbox|/gate)?", path)
         if not m:
             raise ApiError(404, "not found")
@@ -1738,10 +1799,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def repo_list(self):
         c = self.server.config
         return {"repos": c.repos(), "excluded": list(c.data["excluded"]), "scanned_at": c.data["scanned_at"],
-                "scan_notes": list(c.data.get("scan_notes") or [])}
+                "scan_notes": list(c.data.get("scan_notes") or []),
+                "scan_unreadable": list(c.data.get("scan_unreadable") or [])}
 
     def rescan(self):
-        found, notes = discover()
+        found, notes, unreadable = discover()
         def apply(c):
             if notes:  # a scan that could not see everything keeps what earlier scans found
                 found_l = {r.lower() for r in found}
@@ -1752,8 +1814,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 c["discovered"] = found
             c["scan_notes"] = notes
+            c["scan_unreadable"] = unreadable  # resets_at is a time, so it still reads right later
             c["scanned_at"] = iso(now_utc())
         self.server.config.update(apply)
+
+    def set_budget(self, body):
+        """The weekly budget, a setting in the local config file only: nothing goes to GitHub. The body
+        is exactly {"weekly_usd": number >= 0 or null to clear, "warn_at"?: share 0..1, or null for the
+        default}; a missing warn_at keeps the line as it is."""
+        extra = sorted(set(body) - {"weekly_usd", "warn_at"})
+        if extra or "weekly_usd" not in body:
+            raise ApiError(400, "the budget is {weekly_usd, warn_at}: %s" % (
+                "unknown field %s" % ", ".join(extra) if extra else "weekly_usd is missing (null clears it)"))
+        try:
+            usd = budget_number(body["weekly_usd"], "weekly_usd")
+            warn = budget_number(body.get("warn_at"), "warn_at", 1)
+        except ValueError as e:
+            raise ApiError(400, str(e))
+
+        got = {}
+
+        def apply(c):  # under the config's lock: the answer is this request's own write
+            c["budget_usd"] = usd
+            if "warn_at" in body:
+                c["budget_warn"] = warn
+            got.update(weekly_usd=usd, warn_at=BUDGET_WARN_DEFAULT if c["budget_warn"] is None else c["budget_warn"])
+        self.server.config.update(apply)
+        self.send(200, {"budget": got})
 
     def post(self):
         path, _ = self.route()
@@ -1767,6 +1854,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.action(body)
         if path == "/api/action/preview":
             return self.preview(body)
+        if path == "/api/budget":
+            return self.set_budget(body)
         if path != "/api/repos":
             raise ApiError(404, "not found")
         op, repo = body.get("op"), body.get("repo")
@@ -1807,7 +1896,7 @@ def main(argv=None):
     ap.add_argument("--print-url", action="store_true", help="print the URL with its session secret")
     ap.add_argument("--idle-minutes", type=int, default=120, help="stop after this long with no page open (0: never)")
     ap.add_argument("--ready-file", help="write {port, token} here (mode 0600) once listening; for scripts and tests")
-    ap.add_argument("--config", help="the repository list (default: %s)" % config_path())
+    ap.add_argument("--config", help="the repository list and the weekly budget (default: %s)" % config_path())
     a = ap.parse_args(argv)
 
     token = secrets.token_urlsafe(32)

@@ -30,9 +30,15 @@
 #      under the errors, never "no schedule". The next run is POSIX cron's, in UTC.
 #  10. A failed read says why, from a fixed set (SSO not authorized, signed out, rate limited with
 #      the time the exhausted limit resets, not found, too little access), beside its text: in each
-#      `unreadable` entry of a repository and in a failed request's 502. Each cause is matched on
+#      `unreadable` entry of a repository, in a failed request's 502 and in each scan note that is a
+#      failed read (kept across a restart only in that fixed shape). Each cause is matched on
 #      one sample in the shape gh prints; a message that matches nothing, and a reset time that
 #      cannot be read, stay unknown: the page acts on a cause, so a guess would send you the wrong way.
+#  11. The weekly budget is a setting in the local config file, never on GitHub: set, change and
+#      clear it with a fixed-shape body; a negative, non-numeric, infinite or out-of-range value, or
+#      any other field, is refused with a reason and changes nothing; the file keeps mode 0600 and
+#      the repository list; a config file from before the budget loads unchanged, and a budget
+#      hand-edited out of shape loads as not set. Setting it makes no gh call.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -69,7 +75,7 @@ fi
 stub_gh_reset_calls
 
 # --- the pure readers: 2 (ledger), 3, 4, 5 -------------------------------------------------------------
-REQ_COMMENT="${TMP}/req-comment" python3 - "${PKG}/bin/dashboard.py" <<'PY' >"${TMP}/py.out" 2>&1
+REQ_COMMENT="${TMP}/req-comment" CFG_DIR="${TMP}/pycfg" python3 - "${PKG}/bin/dashboard.py" <<'PY' >"${TMP}/py.out" 2>&1
 import importlib.util, json, os, sys
 spec = importlib.util.spec_from_file_location("dashboard", sys.argv[1])
 d = importlib.util.module_from_spec(spec)
@@ -130,10 +136,12 @@ check("inbox: the lowest by the owner or the bot; never another author's or a PR
 check("inbox: without an owner, only the bot's", d.find_inbox(issues, marker, bot, "")["number"], 9)
 check("inbox: the owner login is matched exactly", d.find_inbox(issues, marker, bot, "Owner-Login")["number"], 9)
 
-pages = iter([({"viewer": {"repositories": {"nodes": [{"nameWithOwner": "a/b", "lock": {"oid": "1"}}], "pageInfo": {"hasNextPage": True, "endCursor": "x"}}}}, ["SAML"]),
-               ({"viewer": {"repositories": {"nodes": [None], "pageInfo": {"hasNextPage": False}}}}, ["SAML"])])
+SAML = {"message": "Resource protected by organization SAML enforcement. You must grant your OAuth token access to this organization.", "type": "FORBIDDEN"}
+pages = iter([({"viewer": {"repositories": {"nodes": [{"nameWithOwner": "a/b", "lock": {"oid": "1"}}], "pageInfo": {"hasNextPage": True, "endCursor": "x"}}}}, [SAML]),
+               ({"viewer": {"repositories": {"nodes": [None], "pageInfo": {"hasNextPage": False}}}}, [SAML, {"message": "Something went wrong", "type": None}])])
 real_graphql, d.graphql = d.graphql, lambda *a, **k: next(pages)
-check("discovery keeps what a partly hidden scan found, and says why once", d.discover(), (["a/b"], ["SAML"]))
+check("discovery keeps what a partly hidden scan found, says why once, and each note's cause", d.discover(),
+      (["a/b"], [SAML["message"], "Something went wrong"], [{"cause": "sso", "error": SAML["message"]}, {"cause": "unknown", "error": "Something went wrong"}]))
 d.graphql = real_graphql
 
 # Labels with no inbox issue at all (closed, or not created yet): Hold still works.
@@ -149,10 +157,10 @@ check("labels refused while the inbox cannot be told", got, 409)
 
 w = d.waiting_items({"url": "https://github.com/o/r", "inbox_state": "unknown", "inbox": None, "breakers": None, "issues": None})
 check("waiting: every unreadable part is an item, never nothing", [x["kind"] for x in w], ["unknown", "unknown", "unknown"])
-pages = iter([({"viewer": {"repositories": {"nodes": [{"nameWithOwner": "a/b", "lock": {"oid": "1"}}], "pageInfo": {"hasNextPage": True, "endCursor": "x"}}}}, ["SAML"]),
-               ({"viewer": {"repositories": {"nodes": [None], "pageInfo": {"hasNextPage": False}}}}, ["SAML"])])
+pages = iter([({"viewer": {"repositories": {"nodes": [{"nameWithOwner": "a/b", "lock": {"oid": "1"}}], "pageInfo": {"hasNextPage": True, "endCursor": "x"}}}}, [{"message": "SAML", "type": None}]),
+               ({"viewer": {"repositories": {"nodes": [None], "pageInfo": {"hasNextPage": False}}}}, [{"message": "SAML", "type": None}])])
 real_graphql, d.graphql = d.graphql, lambda *a, **k: next(pages)
-check("discovery keeps what a partly hidden scan found, and says why once", d.discover(), (["a/b"], ["SAML"]))
+check("discovery keeps what a partly hidden scan found, and says why once", d.discover()[:2], (["a/b"], ["SAML"]))
 d.graphql = real_graphql
 
 w = d.waiting_items({"url": "https://github.com/o/r", "inbox_state": "none", "inbox": None, "breakers": {},
@@ -262,6 +270,38 @@ def unreadable(args, stdin=None):
 d._rate["at"], d.gh_json = None, unreadable
 check("rate limited, and the limits unreadable: no time", d.rate_reset("core"), None)
 check("any other cause carries no time", d.cause_of(d.GhError(["api", "x"], 1, "gh: Not Found (HTTP 404)")), {"cause": "not_found"})
+os.makedirs(os.environ["CFG_DIR"])
+cfg = os.path.join(os.environ["CFG_DIR"], "dashboard.json")
+json.dump({"scan_notes": ["n1"], "scan_unreadable": [
+    {"cause": "sso", "error": "n1"}, {"cause": "rate_limited", "error": "n2", "resets_at": "2026-11-14T13:00:00Z"},
+    {"cause": "<b>made up</b>", "error": "x"}, {"cause": "sso", "error": 5}, "z",
+    {"cause": "sso", "error": "y", "resets_at": "2026-11-14T13:00:00Z"}, {"cause": "rate_limited", "error": "r1"},
+    {"cause": "rate_limited", "error": "r2", "resets_at": "not a time"},
+    {"cause": "rate_limited", "error": "r3", "resets_at": "2026-99-99T99:99:99Z"},
+    {"cause": "rate_limited", "error": "r4", "resets_at": "\uff12\uff10\uff12\uff16-11-14T13:00:00Z"},
+    {"cause": "unknown", "error": "e" * 400}]}, open(cfg, "w"))
+check("scan causes are kept across a restart, only in the fixed shape", d.Config(cfg).data["scan_unreadable"],
+      [{"cause": "sso", "error": "n1"}, {"cause": "rate_limited", "error": "n2", "resets_at": "2026-11-14T13:00:00Z"},
+       {"cause": "sso", "error": "y"}, {"cause": "rate_limited", "error": "r1", "resets_at": None},
+       {"cause": "rate_limited", "error": "r2", "resets_at": None}, {"cause": "rate_limited", "error": "r3", "resets_at": None},
+       {"cause": "rate_limited", "error": "r4", "resets_at": None}, {"cause": "unknown", "error": "e" * 300}])
+# A long note and its cause still match after a restart; the notes that are not failed reads have none.
+long = "Although you appear to have the correct authorization credentials, the o organization has enabled OAuth App access restrictions. " * 3
+pages = iter([({"viewer": {"repositories": {"nodes": [], "pageInfo": {"hasNextPage": False}}}}, [{"message": long, "type": "FORBIDDEN"}])])
+real_graphql, d.graphql = d.graphql, lambda *a, **k: next(pages)
+class Srv:
+    config = d.Config(cfg)
+    config.data["discovered"] = ["o/earlier"]
+h = d.Handler.__new__(d.Handler)
+h.server = Srv
+h.rescan()
+d.graphql = real_graphql
+live = Srv.config.data
+check("a long note is cut once, before it is sent or kept: the same before and after a restart",
+      (len(live["scan_notes"][0]), live["scan_notes"][0] == live["scan_unreadable"][0]["error"]), (300, True))
+again = d.Config(cfg).data
+check("a long note and its cause match after a restart", (len(again["scan_notes"][0]), again["scan_notes"][0] == again["scan_unreadable"][0]["error"]), (300, True))
+check("the kept-repositories note has no cause", (len(again["scan_notes"]), [x["cause"] for x in again["scan_unreadable"]]), (2, ["no_access"]))
 PY
 while IFS= read -r line; do
   case "${line}" in
@@ -374,6 +414,50 @@ expect "the viewer" "$(jq -r .viewer <<<"${s}")" "owner-login"
 expect "the list is kept, mode 0600" "$(mode_of "${TMP}/cfg/dashboard.json")" 600
 expect "a repository not on the list: refused" "$(code -H "X-Gatehand-Token: ${TOKEN}" "${B}/api/repo/o/plain")" 404
 expect "a path out of the list: refused" "$(code --path-as-is -H "X-Gatehand-Token: ${TOKEN}" "${B}/api/repo/o/..%2F..%2Fetc")" 404
+
+# 11. the weekly budget: a local setting, set from the page, read with the session.
+budget() { curl -s -H "X-Gatehand-Token: ${TOKEN}" -H "Origin: ${B}" -H "Content-Type: application/json" -d "$1" "${B}/api/budget"; }
+budget_code() { code -H "X-Gatehand-Token: ${TOKEN}" -H "Origin: ${B}" -H "Content-Type: application/json" -d "$1" "${B}/api/budget"; }
+expect "budget: none until one is set, the warning line at 80%" "$(jq -c .budget <<<"${s}")" '{"weekly_usd":null,"warn_at":0.8}'
+n_calls="$(stub_gh_calls | wc -l)"
+expect "budget: set" "$(budget '{"weekly_usd":60}' | jq -c .budget)" '{"weekly_usd":60,"warn_at":0.8}'
+expect "budget: change, with a warning line" "$(budget '{"weekly_usd":75.5,"warn_at":0.9}' | jq -c .budget)" '{"weekly_usd":75.5,"warn_at":0.9}'
+expect "budget: a change without warn_at keeps the line" "$(budget '{"weekly_usd":80}' | jq -c .budget)" '{"weekly_usd":80,"warn_at":0.9}'
+expect "budget: setting it is never a call to GitHub" "$(stub_gh_calls | wc -l)" "${n_calls}"
+expect "budget: the session carries it" "$(get /api/session | jq -c .budget)" '{"weekly_usd":80,"warn_at":0.9}'
+expect "budget: kept in the config file, which keeps its repositories and mode 0600" \
+  "$(jq -c '[.budget_usd, .budget_warn, .discovered]' "${TMP}/cfg/dashboard.json") $(mode_of "${TMP}/cfg/dashboard.json")" '[80,0.9,["o/r"]] 600'
+# Each refused by the budget's own check (its reason's first words), not by the JSON reader.
+huge="1$(printf '0%.0s' {1..400})"
+while IFS='|' read -r bad why; do
+  expect "budget: refused with a reason, ${bad:0:40}" "$(budget_code "${bad}") $(budget "${bad}" | jq -r .error | cut -d' ' -f1-3)" "400 ${why}"
+done <<BAD
+{"weekly_usd":-1}|weekly_usd must be
+{"weekly_usd":"60"}|weekly_usd must be
+{"weekly_usd":true}|weekly_usd must be
+{"weekly_usd":Infinity}|weekly_usd must be
+{"weekly_usd":NaN}|weekly_usd must be
+{"weekly_usd":${huge}}|weekly_usd must be
+{"weekly_usd":60,"warn_at":1.5}|warn_at must be
+{"weekly_usd":60,"warn_at":-0.1}|warn_at must be
+{"warn_at":0.5}|the budget is
+{"weekly_usd":60,"repo":"o/r"}|the budget is
+BAD
+expect "budget: a refusal says why" "$(budget '{"weekly_usd":-1}' | jq -r .error)" "weekly_usd must be a number from 0 up, or null"
+expect "budget: and changes nothing" "$(get /api/session | jq -c .budget)" '{"weekly_usd":80,"warn_at":0.9}'
+expect "budget: clear (null), and the warning line back to its default" "$(budget '{"weekly_usd":null,"warn_at":null}' | jq -c .budget)" '{"weekly_usd":null,"warn_at":0.8}'
+expect "budget: zero is a budget, not none" "$(budget '{"weekly_usd":0}' | jq -c .budget.weekly_usd)" 0
+budget '{"weekly_usd":null}' >/dev/null
+# A config file from before the budget, and one hand-edited out of shape.
+cfg_load() { (cd "${PKG}/bin" && PYTHONDONTWRITEBYTECODE=1 python3 -c 'import json, sys, dashboard; c = dashboard.Config(sys.argv[1]); print(json.dumps([c.repos(), c.data["excluded"], c.data["scanned_at"], c.budget()]))' "$1"); }
+printf '%s' '{"discovered":["o/r"],"added":["o/x"],"excluded":["o/y"],"scanned_at":"2026-11-01T00:00:00Z","scan_notes":[]}' >"${TMP}/old.json"
+expect "budget: an old config file loads unchanged, with no budget" "$(cfg_load "${TMP}/old.json")" \
+  '[["o/r", "o/x"], ["o/y"], "2026-11-01T00:00:00Z", {"weekly_usd": null, "warn_at": 0.8}]'
+for odd in '"lots"' "${huge}"; do
+  printf '{"discovered":["o/r"],"budget_usd":%s,"budget_warn":7}' "${odd}" >"${TMP}/odd.json"
+  expect "budget: a value out of shape in the file (${odd:0:10}) is not set, and the rest loads" "$(cfg_load "${TMP}/odd.json")" \
+    '[["o/r"], [], null, {"weekly_usd": null, "warn_at": 0.8}]'
+done
 
 # 2-5. one repository
 r="$(get /api/repo/o/r)"
@@ -509,6 +593,13 @@ s2="$(curl -s -H "X-Gatehand-Token: $(jq -r .token "${TMP}/ready2")" "http://127
 kill "${SRV2}" 2>/dev/null
 expect "a first scan that fails: scan_cause beside scan_error" "$(jq -c '[.scan_cause.cause, (.scan_error | test("HTTP 401"))]' <<<"${s2}")" '["signed_out",true]'
 rules
+# A scan an organisation's SAML enforcement hides part of: each note carries its cause.
+stub_gh_reset_rules
+stub_gh_on "api graphql -f query=query(\$cursor*" '{"data":{"viewer":{"repositories":{"pageInfo":{"hasNextPage":false},"nodes":[{"nameWithOwner":"o/r","isArchived":false,"lock":{"oid":"1"}},null]}}},"errors":[{"type":"FORBIDDEN","path":["viewer","repositories","nodes",1],"message":"Resource protected by organization SAML enforcement. You must grant your OAuth token access to this organization."}]}' 1 "gh: Resource protected by organization SAML enforcement. You must grant your OAuth token access to this organization."
+s3="$(curl -s -H "X-Gatehand-Token: ${TOKEN}" -H "Origin: ${B}" -H "Content-Type: application/json" -d '{"op":"rescan"}' "${B}/api/repos")"
+expect "a partly hidden scan: the note and its cause" "$(jq -c '[.repos, .scan_notes == [.scan_unreadable[0].error], [.scan_unreadable[].cause]]' <<<"${s3}")" '[["o/r"],true,["sso"]]'
+rules
+expect "a clean scan clears them" "$(curl -s -H "X-Gatehand-Token: ${TOKEN}" -H "Origin: ${B}" -H "Content-Type: application/json" -d '{"op":"rescan"}' "${B}/api/repos" | jq -c '[.scan_notes, .scan_unreadable]')" '[[],[]]'
 
 # 6. read only. An allowlist of read shapes, not a list of write ones: a GraphQL call must be a
 # `query` (not a mutation) and its only typed value a number; a REST call is `api` with no -f/-F/-X/
