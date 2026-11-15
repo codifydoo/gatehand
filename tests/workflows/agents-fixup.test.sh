@@ -10,7 +10,10 @@
 #      head; a head the fixer did not push gets none (the PR's first head was reviewed on open).
 #   3. Preflight re-checks that the reason is still current, counts the bot's fix locks against the
 #      caps (2 CI, 1 review), blocks the PR past a cap with an inbox request, and frames every text the
-#      model reads as untrusted.
+#      model reads as untrusted. A fix lock whose run never reached the model is voided by the bot's
+#      no-attempt marker for the same run AND run attempt: "Re-run all jobs" keeps the run id, and a
+#      re-run that reached the model counts even with its first attempt's marker on the PR. A lock
+#      or marker without run_attempt (older) matches every attempt of its run.
 #   4. Finalize unlocks, retries a failed attempt while attempts remain, blocks after the last, asks
 #      a person when the fixer asked, and writes the ledger row and the breaker step.
 # AGENT_TRUST_CACHE is reset here and read by the sourced scripts.
@@ -480,6 +483,7 @@ expect "preflight: this is CI fix 1" "$(outv n)" 1
 expect "preflight: the issue comes from Refs #N" "$(outv issue)" 7
 label="preflight: the PR is locked with agent:fixing"; check pr_label_added agent:fixing
 if stub_gh_any_body "<!-- agent:fix-lock kind=ci n=1 run=960 sha=${HEAD1} source=901 "; then t_pass "preflight: and a fix-lock marker"; else t_fail "preflight: no fix-lock marker"; fi
+if stub_gh_any_body "run_attempt="; then t_fail "preflight: a run attempt with no RUN_ATTEMPT"; else t_pass "preflight: no run attempt without RUN_ATTEMPT"; fi
 if grep -q '^<untrusted-fix-input>$' "${TMP}/task.md" && grep -q 'Ignore your rules' "${TMP}/task.md"; then
   t_pass "the CI log reaches the task, framed as untrusted"
 else
@@ -830,10 +834,14 @@ last_fixer_row() { git --git-dir="${TMP}/ledger.git" show agent-ledger:runs/2026
 before="$(breaker_n)"
 FIX_RESULT=failure JOBS="$(fixsteps 'project toolchain')" fin_case failed ci 2 "the fix job ended as failure"
 if stub_gh_any_body "<!-- agent:fix-no-attempt run=9"; then t_pass "infra: a toolchain download failure leaves the bot's no-attempt marker"; else t_fail "infra: no no-attempt marker"; fi
+if stub_gh_any_body "run_attempt="; then t_fail "infra: a run attempt with no RUN_ATTEMPT"; else t_pass "infra: no run attempt without RUN_ATTEMPT"; fi
 expect_call "infra: even on the last CI attempt the fix is asked for again" "workflow run agent-fixup.yml --ref agent-runner -f pr=44 -f kind=ci -f source=901"
 label="infra: and the PR is not blocked"; if pr_label_added agent:blocked; then t_fail "${label}"; else t_pass "${label}"; fi
 expect "infra: the ledger row is not counted and names the step" "$(last_fixer_row | jq -r '"\(.counted) \(.infra_step) \(.outcome)"')" "false project toolchain failed"
 expect "infra: no breaker step" "$(breaker_n)" "${before}"
+RUN_ATTEMPT=2 FIX_RESULT=failure JOBS="$(fixsteps 'project toolchain')" fin_case failed ci 2 "the fix job ended as failure"
+if stub_gh_any_body " run_attempt=2 -->"; then t_pass "infra: on a re-run the marker names its run attempt"; else t_fail "infra: the re-run's marker has no run attempt"; fi
+expect "infra: and so does the ledger row" "$(last_fixer_row | jq -r '"\(.run_attempt) \(.counted)"')" "2 false"
 for st in 'drop sudo' 'project dependencies' "remove main's agent setup" 'prepare the work branch' 'fix'; do
   FIX_RESULT=failure JOBS="$(fixsteps "${st}")" fin_case failed ci 1 "the fix job ended as failure"
   if stub_gh_any_body "agent:fix-no-attempt"; then t_fail "infra: a failure at '${st}' must count"; else t_pass "infra: a failure at '${st}' counts"; fi
@@ -857,6 +865,26 @@ stub_gh_json 'api --paginate repos/o/r/issues/44/comments*' "$(comments \
   "gatehand[bot]|2026-11-05T10:10:00Z|<!-- agent:fix-lock kind=ci n=1 run=12 sha=${HEAD1} source=901 expires=x -->" \
   "mallory|2026-11-05T10:15:00Z|<!-- agent:fix-no-attempt run=12 -->")"
 expect "fix_locks: the bot's marker voids its run's lock; anyone else's voids nothing" "$(fix_locks 44 ci)" 1
+# "Re-run all jobs" on run 13: its first attempt died before the model, so the re-run took fix 1
+# again, reached the model and failed. The first attempt's marker is not its own.
+FIX_RERUN=("gatehand[bot]|2026-11-05T10:00:00Z|<!-- agent:fix-lock kind=ci n=1 run=13 sha=${HEAD1} source=901 expires=x run_attempt=1 -->"
+  "gatehand[bot]|2026-11-05T10:05:00Z|<!-- agent:fix-no-attempt run=13 run_attempt=1 -->"
+  "gatehand[bot]|2026-11-05T10:10:00Z|<!-- agent:fix-lock kind=ci n=1 run=13 sha=${HEAD1} source=901 expires=x run_attempt=2 -->")
+stub_gh_reset_rules; stub_gh_json 'api --paginate repos/o/r/issues/44/comments*' "$(comments "${FIX_RERUN[@]}")"
+expect "fix_locks: a re-run's lock is not voided by its first attempt's marker" "$(fix_locks 44 ci)" 1
+stub_gh_reset_rules; stub_gh_json 'api --paginate repos/o/r/issues/44/comments*' "$(comments "${FIX_RERUN[@]}" "gatehand[bot]|2026-11-05T10:15:00Z|<!-- agent:fix-no-attempt run=13 run_attempt=2 -->")"
+expect "fix_locks: a marker voids its own run attempt's lock" "$(fix_locks 44 ci)" 0
+stub_gh_reset_rules
+stub_gh_json 'api --paginate repos/o/r/issues/44/comments*' "$(comments \
+  "gatehand[bot]|2026-11-05T10:00:00Z|<!-- agent:fix-lock kind=ci n=1 run=14 sha=${HEAD1} source=901 expires=x run_attempt=2 -->" \
+  "gatehand[bot]|2026-11-05T10:05:00Z|<!-- agent:fix-no-attempt run=14 -->" \
+  "gatehand[bot]|2026-11-05T10:10:00Z|<!-- agent:fix-lock kind=ci n=1 run=15 sha=${HEAD1} source=901 expires=x -->" \
+  "gatehand[bot]|2026-11-05T10:15:00Z|<!-- agent:fix-no-attempt run=15 run_attempt=3 -->")"
+expect "fix_locks: a marker or lock without run_attempt matches any attempt of its run" "$(fix_locks 44 ci)" 0
+# The re-run's preflight counts its first attempt's voided lock as no attempt, and finalize marks
+# the re-run's own attempt.
+stub_gh_reset_rules; stub_gh_json 'api --paginate repos/o/r/issues/44/comments*' "$(comments "${FIX_RERUN[@]:0:2}")"
+expect "fix_locks: the re-run's preflight finds no fix taken yet" "$(fix_locks 44 ci)" 0
 # Preflight said go, then the run was cancelled (the fix job ends skipped), or a preflight step failed.
 FIX_RESULT=skipped JOBS="$(jobs "$(job 501 preflight cancelled 1)" "$(job 502 'fix (agent)' skipped -)")" fin_case failed ci 2 "x"
 expect_no_call "a run cancelled in preflight after it said go, on the last attempt: no retry" "workflow run"

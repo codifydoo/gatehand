@@ -97,6 +97,9 @@ jobs:
       go: ${{ steps.pick.outputs.issue != '' && steps.gate.outputs.go == 'true' }}
       issue: ${{ steps.pick.outputs.issue }}
       attempt: ${{ steps.pick.outputs.attempt }}
+      # The run attempt that posted the lock: "Re-run failed jobs" keeps this job's outputs, so
+      # finalize marks the lock it re-finalizes, not the new attempt's number.
+      run_attempt: ${{ github.run_attempt }}
       started_at: ${{ steps.clock.outputs.now }}
       # failure when a non-writer changed the issue after the label the run trusts, or the trust
       # check failed; publish turns that into an `untrusted-change` refusal, and finalize blocks it.
@@ -150,6 +153,7 @@ jobs:
           ISSUE: ${{ steps.pick.outputs.issue }}
           ATTEMPT: ${{ steps.pick.outputs.attempt }}
           RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash .github/scripts/agent-state.sh lock "$ISSUE" "$ATTEMPT"
       # The task file is built HERE, once, from one fetch, and re-checked after it: the code job
@@ -399,5 +403,6 @@ jobs:
           STARTED_AT: ${{ needs.preflight.outputs.started_at }}
           TRIGGER: ${{ github.event_name }}
           RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ needs.preflight.outputs.run_attempt || github.run_attempt }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash .github/scripts/agent-state.sh finalize

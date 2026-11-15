@@ -10,9 +10,13 @@
 #      A run that opened its PR makes the issue agent:pr-open; a run that has its ledger row gets
 #      that row's outcome, without a second comment or request; only a row for this issue counts,
 #      as a re-run of a coder run picks again and may have worked another issue under the same run
-#      id. agent:hold is never touched.
+#      id, and only a row of the lock's GitHub run attempt (or one naming none), as a re-run may pick
+#      the same issue at the same attempt when its first attempt never reached the model: the first
+#      attempt's uncounted row must not let the re-run's stale lock skip its row, comment and
+#      breaker step, or its last-attempt block. agent:hold is never touched.
 #   2. A run whose publish job never wrote its ledger row gets one, so it counts against the daily
-#      cap and the breaker; a run that has its row does not get a second. Last month's rows are
+#      cap and the breaker; a run that has its row does not get a second. The same holds for a dead
+#      fixer run's lock, matched to its run attempt the same way. Last month's rows are
 #      read too, on the 1st of every month as well; an unreadable ledger leaves the issue alone.
 #   3. agent:pr-open follows the bot's own agent PR, the one whose footer names the issue: merged ->
 #      agent:done-pending-deploy with a marker comment, closed unmerged -> agent:blocked, still
@@ -147,6 +151,29 @@ LEDGER_RUNS='{"run_id":"578","role":"coder","issue":8,"attempt":1,"outcome":"pr-
 expect_no_call "another issue's row under the same run id is not this issue's: no agent:pr-open" "--add-label agent:pr-open"
 expect_call "the lock is stale like any other: back to agent:ready" "issue edit 7 --add-label agent:ready"
 expect "and it gets its own row" "$(ledger_rows | jq -r 'select(.run_id == "578" and .issue == 7) | .outcome')" failed
+# "Re-run all jobs" on run 580, whose first attempt (run_attempt 1) died before the model on #7: its
+# finalize wrote an uncounted row and the no-attempt marker, so the re-run (run_attempt 2) picked #7
+# again at the same attempt, 2 of 2, and died before its own finalize.
+rlock() { printf '<!-- agent:lock role=coder run=%s attempt=%s expires=%s run_attempt=%s -->\nThe coder agent picked this up.' "$1" "$2" "$3" "$4"; }
+RERUN_COMMENTS="$(comments "gatehand[bot]|$(rlock 580 2 2026-11-05T08:00:00Z 1)" \
+  "gatehand[bot]|<!-- agent:no-attempt run=580 run_attempt=1 -->"$'\n'"The run failed before the agent started." \
+  "gatehand[bot]|$(rlock 580 2 "${EXPIRED}" 2)")"
+FIRST_TRY='{"run_id":"580","run_attempt":1,"role":"coder","issue":7,"attempt":2,"outcome":"failed","counted":false}'
+breaker_before="$(ledger_breaker | jq -r '.coder.consecutive // 0')"
+LEDGER_RUNS="${FIRST_TRY}" LEDGER_RC=0 lock_case "${RERUN_COMMENTS}" "${COMPLETED}"
+expect_call "a dead re-run is not its first attempt's uncounted row: on the last attempt, blocked" \
+  "issue edit 7 --add-label agent:blocked --add-label agent:needs-human --remove-label agent:in-progress"
+if stub_gh_any_body 'kind=failed -->'; then t_pass "re-run: with the last-attempt request"; else t_fail "re-run: no last-attempt request"; fi
+if stub_gh_any_body '<!-- agent-sweep:stale-lock run=580 -->'; then t_pass "re-run: the issue is told why"; else t_fail "re-run: no stale-lock comment"; fi
+expect "re-run: it gets its own row, of its run attempt" \
+  "$(ledger_rows | jq -r 'select(.run_id == "580" and .trigger == "sweep") | "\(.run_attempt) \(.attempt) \(.outcome)"')" "2 2 failed"
+expect "re-run: and a breaker step" "$(ledger_breaker | jq -r .coder.consecutive)" "$((breaker_before + 1))"
+LEDGER_RUNS="$(jq -c '.run_attempt = 2' <<<"${FIRST_TRY}")" LEDGER_RC=0 lock_case "${RERUN_COMMENTS}" "${COMPLETED}"
+expect_call "control: the re-run's OWN uncounted row puts it back in the queue" "issue edit 7 --add-label agent:ready"
+LEDGER_RUNS="$(jq -c 'del(.run_attempt)' <<<"${FIRST_TRY}")" LEDGER_RC=0 lock_case "${RERUN_COMMENTS}" "${COMPLETED}"
+expect_call "a row written before run_attempt existed matches any attempt of its run" "issue edit 7 --add-label agent:ready"
+LEDGER_RUNS="${FIRST_TRY}" LEDGER_RC=0 lock_case "$(comments "gatehand[bot]|$(lock 580 2 "${EXPIRED}")")" "${COMPLETED}"
+expect_call "and so does a lock written before it existed" "issue edit 7 --add-label agent:ready"
 LEDGER_RUNS='{"run_id":"570","role":"coder","issue":7,"attempt":1,"outcome":"blocked","reason":"needs a decision"}' LEDGER_RC=0 \
   lock_case "$(comments "gatehand[bot]|$(lock 570 1 "${EXPIRED}")")" "${COMPLETED}"
 expect_call "a finalized run whose relabel never landed gets its row's outcome (blocked), not 'failed'" \
@@ -269,6 +296,24 @@ JOBS='{"jobs":[{"id":502,"name":"fix (agent)","conclusion":"success","started_at
   NOTES='[{"annotation_level":"failure","message":"The job has exceeded the maximum execution time of 10m0s"}]' \
   fix_case "$(comments "gatehand[bot]|$(fixlock ci 1 7012 "${EXPIRED}")")" "${COMPLETED}"
 expect_call "a dead run whose publish job hit its 10-minute limit is a failure: retried" "workflow run agent-fixup.yml --ref agent-runner -f pr=44 -f kind=ci"
+# "Re-run all jobs" on fixer run 7013, whose first attempt died before the model on CI fix 2 of 2:
+# the re-run took fix 2 again (run_attempt 2) and died before its own finalize. The first attempt's
+# uncounted row is not the re-run's: it is finalized as the last failed attempt, and the PR blocked.
+rfixlock() { printf '<!-- agent:fix-lock kind=ci n=%s run=%s sha=abc123 source=901 expires=%s run_attempt=%s -->\nThe fixer agent is working on this.' "$1" "$2" "$3" "$4"; }
+FIX_RERUN="$(comments "gatehand[bot]|$(rfixlock 2 7013 2026-11-05T08:00:00Z 1)" \
+  "gatehand[bot]|<!-- agent:fix-no-attempt run=7013 run_attempt=1 -->" "gatehand[bot]|$(rfixlock 2 7013 "${EXPIRED}" 2)")"
+FIX_FIRST='{"run_id":"7013","run_attempt":1,"role":"fixer","attempt":2,"outcome":"failed","counted":false}'
+fix_case "${FIX_RERUN}" "${FAILED}" "${FIX_FIRST}"
+if unlocked; then t_pass "a dead fixer re-run: unlocked"; else t_fail "a dead fixer re-run stayed locked: $(cat "${TMP}/sweep.out")"; fi
+if grep -q 'finalized as failed' "${TMP}/sweep.out"; then t_pass "fix re-run: finalized, not taken for its first attempt's row"; else t_fail "fix re-run: $(cat "${TMP}/sweep.out")"; fi
+if stub_gh_any_body 'Fix attempt 2 of 2 (ci)'; then t_pass "fix re-run: counted as the last CI fix"; else t_fail "fix re-run: no counted attempt"; fi
+expect_no_call "fix re-run: and, past the cap, not retried" "workflow run"
+expect "fix re-run: its row carries its run attempt" \
+  "$(ledger_rows | jq -r 'select(.run_id == "7013" and .trigger == "sweep") | "\(.run_attempt) \(.attempt) \(.outcome) \(.counted)"')" "2 2 failed true"
+fix_case "${FIX_RERUN}" "${FAILED}" "$(jq -c '.run_attempt = 2' <<<"${FIX_FIRST}")"
+if grep -q 'had finalized; unlocked' "${TMP}/sweep.out"; then t_pass "control: the fixer re-run's OWN row means it finalized"; else t_fail "control: $(cat "${TMP}/sweep.out")"; fi
+fix_case "${FIX_RERUN}" "${FAILED}" "$(jq -c 'del(.run_attempt)' <<<"${FIX_FIRST}")"
+if grep -q 'had finalized; unlocked' "${TMP}/sweep.out"; then t_pass "a fixer row written before run_attempt existed matches any attempt"; else t_fail "old fixer row: $(cat "${TMP}/sweep.out")"; fi
 fix_case "$(comments "gatehand[bot]|$(fixlock ci 1 7003 "${FRESH}")")" "${COMPLETED}"
 if unlocked; then t_fail "a fresh fix lock was freed"; else t_pass "a fix lock that has not expired stays"; fi
 fix_case "$(comments "gatehand[bot]|$(fixlock ci 1 7004 "${EXPIRED}")")" "${RUNNING}"

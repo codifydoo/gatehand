@@ -52,14 +52,15 @@ BOT="$(policy '.botLogin')"
 
 # --- locks -------------------------------------------------------------------------------------------
 
-# last_lock <issue>: the newest lock comment the BOT wrote, as "run attempt expires role", or nothing.
+# last_lock <issue>: the newest lock comment the BOT wrote, as "run attempt expires role run_attempt"
+# (run_attempt is empty on a lock written before it existed), or nothing.
 last_lock() {
   local bodies m
   bodies="$(gh api --paginate "repos/${GH_REPO}/issues/$1/comments?per_page=100" \
     --jq ".[] | select(.user.login == \"${BOT}\") | .body")" || return 1
-  m="$(grep -oE '<!-- agent:lock role=[a-z]+ run=[0-9]+ attempt=[0-9]+ expires=[0-9TZ:-]+ -->' <<<"${bodies}" | tail -1)"
+  m="$(grep -oE '<!-- agent:lock role=[a-z]+ run=[0-9]+ attempt=[0-9]+ expires=[0-9TZ:-]+( run_attempt=[0-9]+)? -->' <<<"${bodies}" | tail -1)"
   [[ -n "${m}" ]] || return 0
-  sed -E 's/.* role=([a-z]+) run=([0-9]+) attempt=([0-9]+) expires=([0-9TZ:-]+) .*/\2 \3 \4 \1/' <<<"${m}"
+  sed -E 's/.* role=([a-z]+) run=([0-9]+) attempt=([0-9]+) expires=([0-9TZ:-]+)( run_attempt=([0-9]+))? -->.*/\2 \3 \4 \1 \6/' <<<"${m}"
 }
 
 # run_state <run-id>: "status conclusion started_at" from the Actions API; "gone" for a 404 (the run
@@ -78,11 +79,13 @@ run_state() {
   return 1
 }
 
-# ledger_row <run-id> [attempt] [issue]: the run's row from this month's or last month's ledger, as
-# one JSON line; with [attempt], only a row of that attempt ("Re-run all jobs" keeps the run id, so a
-# re-run that died must not be taken for its first run, which finalized); with [issue], only a row
-# for that issue or one naming none (a coder re-run picks its issue again, so the run id's row may
-# be another issue's). Exit 0 found, 1 missing, 2 unreadable.
+# ledger_row <run-id> [attempt] [issue] [run-attempt]: the run's row from this month's or last
+# month's ledger, as one JSON line. "Re-run all jobs" keeps the run id, so a re-run that died must
+# not be taken for its first attempt, which finalized: with [attempt], only a row of that attempt
+# number; with [issue], only a row for that issue or one naming none (a coder re-run picks its
+# issue again, so the run id's row may be another issue's); with [run-attempt], only a row of that
+# GitHub run attempt or one naming none (a re-run may pick the same issue at the same attempt, when
+# its first attempt never reached the model). Exit 0 found, 1 missing, 2 unreadable.
 ledger_row() {
   local now this last rows row
   now="$(agent_now_epoch)"
@@ -91,23 +94,26 @@ ledger_row() {
   last="$(jq -rn --argjson e "${now}" '($e | strftime("%Y-%m-01T00:00:00Z") | fromdateiso8601) - 86400 | strftime("%Y-%m")')"
   rows="$(ledger_file "runs/${this}.jsonl")" || return 2
   rows+=$'\n'"$(ledger_file "runs/${last}.jsonl")" || return 2
-  row="$(printf '%s\n' "${rows}" | jq -cs --arg r "$1" --arg a "${2:-}" --arg i "${3:-}" '
+  row="$(printf '%s\n' "${rows}" | jq -cs --arg r "$1" --arg a "${2:-}" --arg i "${3:-}" --arg t "${4:-}" '
     [.[] | select(type == "object" and (.run_id | tostring) == $r and ($a == "" or (.attempt | tostring) == $a)
-      and ($i == "" or .issue == null or (.issue | tostring) == $i))] | last // empty')" \
+      and ($i == "" or .issue == null or (.issue | tostring) == $i)
+      and ($t == "" or .run_attempt == null or (.run_attempt | tostring) == $t))] | last // empty')" \
     || return 2
   [[ -n "${row}" ]] || return 1
   printf '%s\n' "${row}"
 }
 
-# write_sweep_row <run> <role> <issue> <attempt> <outcome> <reason> <started> [pr]: the ledger row the
-# run's finalize never wrote, plus its breaker step; files the breaker request if that trips it.
+# write_sweep_row <run> <role> <issue> <attempt> <outcome> <reason> <started> [pr] [run-attempt]: the
+# ledger row the run's finalize never wrote, plus its breaker step; files the breaker request if that
+# trips it.
 write_sweep_row() {
-  local run="$1" role="$2" issue="$3" attempt="$4" outcome="$5" reason="$6" started="$7" pr="${8:-}" row tripped
-  row="$(jq -cn --arg run "${run}" --arg url "${GITHUB_SERVER_URL:-https://github.com}/${GH_REPO}/actions/runs/${run}" \
+  local run="$1" role="$2" issue="$3" attempt="$4" outcome="$5" reason="$6" started="$7" pr="${8:-}" ra="${9:-}" row tripped
+  row="$(jq -cn --arg run "${run}" --arg ra "${ra}" --arg url "${GITHUB_SERVER_URL:-https://github.com}/${GH_REPO}/actions/runs/${run}" \
     --arg role "${role}" --argjson issue "${issue}" --argjson attempt "${attempt}" --arg outcome "${outcome}" \
     --arg reason "${reason}" --arg pr "${pr}" --arg model "$(policy ".roles[\"${role}\"].model")" \
     --arg started "${started}" --arg ended "$(agent_iso)" '
-      {v: 1, run_id: $run, run_url: $url, role: $role, trigger: "sweep", issue: $issue, attempt: $attempt,
+      {v: 1, run_id: $run, run_attempt: (if $ra == "" then null else ($ra | tonumber) end),
+       run_url: $url, role: $role, trigger: "sweep", issue: $issue, attempt: $attempt,
        pr: (if $pr == "" then null else ($pr | tonumber) end), outcome: $outcome, reason: $reason,
        model: $model, turns: null, duration_ms: null, cost_usd: null,
        started_at: (if $started == "" then $ended else $started end), ended_at: $ended}')"
@@ -123,11 +129,11 @@ write_sweep_row() {
 
 # sweep_one_lock <issue>: prints what it did, one line.
 sweep_one_lock() {
-  local issue="$1" lock run attempt expires role state status conclusion started max now have \
+  local issue="$1" lock run attempt expires role ra state status conclusion started max now have \
     plan add remove kind body reason row lrc prs pr outcome counted
   lock="$(last_lock "${issue}")" || { echo "#${issue}: comments unreadable, left alone"; return 1; }
   if [[ -z "${lock}" ]]; then echo "#${issue}: agent:in-progress with no lock by the bot, left alone"; return 0; fi
-  read -r run attempt expires role <<<"${lock}"
+  read -r run attempt expires role ra <<<"${lock}"
   now="$(agent_iso)"
   if [[ ! "${expires}" < "${now}" ]]; then echo "#${issue}: lock of run ${run} holds until ${expires}"; return 0; fi
   state="$(run_state "${run}")" || { echo "#${issue}: run ${run} unreadable, left alone"; return 1; }
@@ -147,7 +153,7 @@ sweep_one_lock() {
   # ledger row means its finalize ran too, and only the relabel did not land (finalize logs that and
   # carries on). Either way, re-queueing it would spend a run the outbox then refuses.
   prs="$(agent_prs_for "${issue}" "${run}")" || { echo "#${issue}: timeline unreadable, left alone"; return 1; }
-  row="$(ledger_row "${run}" "${attempt}" "${issue}")"
+  row="$(ledger_row "${run}" "${attempt}" "${issue}" "${ra}")"
   lrc=$?
   if [[ "${lrc}" -eq 2 ]]; then echo "#${issue}: ledger unreadable, left alone"; return 1; fi
   ensure_labels || agent_log "sweep: could not ensure labels"
@@ -161,7 +167,7 @@ sweep_one_lock() {
         "${run}" "${role}" "${pr}" "${run}" "${GITHUB_SERVER_URL:-https://github.com}" "${GH_REPO}" "${run}" "${pr}" >"${body}"
       gh issue comment "${issue}" --body-file "${body}" >/dev/null || agent_log "sweep: comment on #${issue} failed"
       rm -f "${body}"
-      write_sweep_row "${run}" "${role}" "${issue}" "${attempt}" pr-opened "" "${started}" "${pr}"
+      write_sweep_row "${run}" "${role}" "${issue}" "${attempt}" pr-opened "" "${started}" "${pr}" "${ra}"
     fi
     echo "#${issue}: run ${run} opened #${pr} -> ${add}"
     return 0
@@ -202,7 +208,7 @@ sweep_one_lock() {
 
   # The run's own finalize writes its ledger row; it never ran, so without this the run would be
   # missing from the daily cap and the breaker.
-  write_sweep_row "${run}" "${role}" "${issue}" "${attempt}" failed "${reason}" "${started}"
+  write_sweep_row "${run}" "${role}" "${issue}" "${attempt}" failed "${reason}" "${started}" "" "${ra}"
   echo "#${issue}: stale lock of run ${run} released -> ${add}"
 }
 
@@ -232,18 +238,19 @@ sweep_locks() {
 # --- fix locks ---------------------------------------------------------------------------------------
 
 # last_fix_lock <pr>: the newest fix-lock comment the BOT wrote on the PR, as
-# "kind n run sha source expires", or nothing.
+# "kind n run sha source expires run_attempt" (run_attempt is empty on a lock written before it
+# existed), or nothing.
 last_fix_lock() {
   local bodies m
   bodies="$(gh api --paginate "repos/${GH_REPO}/issues/$1/comments?per_page=100" \
     --jq ".[] | select(.user.login == \"${BOT}\") | .body")" || return 1
-  m="$(grep -oE '<!-- agent:fix-lock kind=[a-z]+ n=[0-9]+ run=[0-9]+ sha=[0-9a-f]+ source=[a-z0-9-]+ expires=[0-9TZ:-]+ -->' <<<"${bodies}" | tail -1)"
+  m="$(grep -oE '<!-- agent:fix-lock kind=[a-z]+ n=[0-9]+ run=[0-9]+ sha=[0-9a-f]+ source=[a-z0-9-]+ expires=[0-9TZ:-]+( run_attempt=[0-9]+)? -->' <<<"${bodies}" | tail -1)"
   [[ -n "${m}" ]] || return 0
-  sed -E 's/.* kind=([a-z]+) n=([0-9]+) run=([0-9]+) sha=([0-9a-f]+) source=([a-z0-9-]+) expires=([0-9TZ:-]+) .*/\1 \2 \3 \4 \5 \6/' <<<"${m}"
+  sed -E 's/.* kind=([a-z]+) n=([0-9]+) run=([0-9]+) sha=([0-9a-f]+) source=([a-z0-9-]+) expires=([0-9TZ:-]+)( run_attempt=([0-9]+))? -->.*/\1 \2 \3 \4 \5 \6 \8/' <<<"${m}"
 }
 
 sweep_one_fix() {
-  local pr="$1" lock kind n run src expires state status conclusion started have issue
+  local pr="$1" lock kind n run src expires ra state status conclusion started have issue
   lock="$(last_fix_lock "${pr}")" || { echo "#${pr}: comments unreadable, left alone"; return 1; }
   if [[ -z "${lock}" ]]; then
     # Preflight adds the label before it posts the lock, and a run cancelled in between leaves the
@@ -253,7 +260,7 @@ sweep_one_fix() {
     echo "#${pr}: agent:fixing with no fix lock by the bot and no fixer run going: unlocked"
     return 0
   fi
-  read -r kind n run _ src expires <<<"${lock}"
+  read -r kind n run _ src expires ra <<<"${lock}"
   if [[ ! "${expires}" < "$(agent_iso)" ]]; then echo "#${pr}: fix lock of run ${run} holds until ${expires}"; return 0; fi
   state="$(run_state "${run}")" || { echo "#${pr}: run ${run} unreadable, left alone"; return 1; }
   read -r status conclusion started <<<"${state}"
@@ -261,7 +268,7 @@ sweep_one_fix() {
   have="$(gh api "repos/${GH_REPO}/issues/${pr}/labels?per_page=100" --jq '.[].name')" || { echo "#${pr}: labels unreadable"; return 1; }
   grep -Fxq agent:fixing <<<"${have}" || { echo "#${pr}: released meanwhile"; return 0; }
   if grep -Fxq agent:hold <<<"${have}"; then echo "#${pr}: on agent:hold, left alone"; return 0; fi
-  ledger_row "${run}" "${n}" >/dev/null
+  ledger_row "${run}" "${n}" "" "${ra}" >/dev/null
   case $? in
     0)
       relabel_pr "${pr}" "" agent:fixing || { echo "#${pr}: unlock failed"; return 1; }
@@ -270,7 +277,7 @@ sweep_one_fix() {
     1)
       issue="$(pr_issue "$(gh pr view "${pr}" --json body)")"
       OUTCOME=failed REASON="stale fix lock: run ${run} ended (${status}/${conclusion}) without finalizing" \
-        PR="${pr}" ISSUE="${issue:-0}" KIND="${kind}" N="${n}" SOURCE="${src}" RUN_ID="${run}" \
+        PR="${pr}" ISSUE="${issue:-0}" KIND="${kind}" N="${n}" SOURCE="${src}" RUN_ID="${run}" RUN_ATTEMPT="${ra}" \
         RUN_URL="${GITHUB_SERVER_URL:-https://github.com}/${GH_REPO}/actions/runs/${run}" STARTED_AT="${started}" \
         TRIGGER=sweep FINAL_DIR=/nonexistent METRICS_FILE=/nonexistent \
         RUN_CANCELLED="$([[ "${conclusion}" == cancelled ]] && echo true || echo false)" \

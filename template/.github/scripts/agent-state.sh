@@ -11,10 +11,11 @@
 # Usage (all read GH_TOKEN, GH_REPO; outputs go to $GITHUB_OUTPUT):
 #   agent-state.sh gate <role>         go=true|false, reason=…
 #   agent-state.sh pick [<issue>]      issue=N, attempt=K  (empty issue = nothing eligible)
-#   agent-state.sh lock <issue> <attempt>
+#   agent-state.sh lock <issue> <attempt>                 reads RUN_ID, RUN_ATTEMPT, RUN_URL
 #   agent-state.sh snapshot <issue> <out> <since|label>   the task file, from one fetch, re-checked
 #   agent-state.sh finalize            reads OUTCOME, REASON, ISSUE, ATTEMPT, PR_NUMBER, PR_URL, RUN_ID,
-#                                      RUN_URL, FINAL_DIR (summary.md, blocked.md), METRICS_FILE
+#                                      RUN_ATTEMPT (the lock's), RUN_URL, FINAL_DIR (summary.md,
+#                                      blocked.md), METRICS_FILE
 #
 # Env: AGENTS_ENABLED (the repo variable), AGENT_BOT_ID (the App's bot user id), AGENT_STATE_NO_MAIN=1
 #      to load the functions only (Gatehand's tests/workflows/agents-state.test.sh).
@@ -129,16 +130,22 @@ cmd_gate() {
 # Only the bot's lock comments count as attempts; anyone who can comment could otherwise use up an
 # issue's attempts by pasting the marker. gh spells an App author `app/<slug>` or `<slug>`
 # (AGENT_BOT_SLUG comes from agent-lib.sh). A lock whose run never reached the model is voided by
-# the bot's own `<!-- agent:no-attempt run=R -->` (finalize, infra_failure); a person's copy of that
-# marker voids nothing.
+# the bot's own `<!-- agent:no-attempt run=R run_attempt=T -->` (finalize, infra_failure); a person's
+# copy of that marker voids nothing. It voids only the lock of the same run and run attempt, so a
+# re-run ("Re-run all jobs" keeps the run id) is counted apart from its first attempt; a lock or
+# marker without `run_attempt` (written before it existed) matches every attempt of its run.
 JQ_ISSUE_DEFS='
   def names: [.labels[]?.name];
   def has($l): (names | index($l)) != null;
   def by_bot: ((.author.login // "") as $a | ($a == "'"${AGENT_BOT_SLUG}"'" or $a == "app/'"${AGENT_BOT_SLUG}"'" or $a == "'"${AGENT_BOT_SLUG}"'[bot]"));
-  def voided: [.comments[]? | select(by_bot) | (.body // "") | capture("<!-- agent:no-attempt run=(?<r>[0-9A-Za-z]+) -->") | .r];
+  def voided: [.comments[]? | select(by_bot) | (.body // "")
+    | capture("<!-- agent:no-attempt run=(?<r>[0-9A-Za-z]+)(?: run_attempt=(?<t>[0-9]+))? -->")];
+  def same_attempt($a; $b): ($a // "") == "" or ($b // "") == "" or $a == $b;
   def locks: voided as $v
     | [.comments[]? | select(by_bot and ((.body // "") | contains("<!-- agent:lock ")))
-       | select((((.body // "") | capture("<!-- agent:lock [^>]*run=(?<r>[0-9A-Za-z]+)") | .r) // "") as $r | ($v | any(. == $r)) | not)]
+       | ((.body // "") | {r: ((capture("<!-- agent:lock [^>]*run=(?<r>[0-9A-Za-z]+)") | .r) // ""),
+                           t: ((capture("<!-- agent:lock [^>]* run_attempt=(?<t>[0-9]+) -->") | .t) // "")}) as $l
+       | select(($v | any(.r == $l.r and same_attempt(.t; $l.t))) | not)]
     | length;
   def acceptance:
     (.body // "") | test("(?im)^#{2,3} +(recommendation|done when|acceptance( criteria)?|suggested fix|expected( behaviou?r)?)\\b|^\\*\\*(done when|acceptance)");
@@ -411,15 +418,16 @@ relabel() {
 }
 
 cmd_lock() {
-  local issue="$1" attempt="$2" max ttl expires body
+  local issue="$1" attempt="$2" max ttl expires body ra
   max="$(policy ".roles[\"${ROLE}\"].maxAttemptsPerIssue")"
   ttl="$(policy ".roles[\"${ROLE}\"].lockTtlMinutes")"
   expires="$(agent_iso $(($(agent_now_epoch) + ttl * 60)))"
   ensure_labels || return 1
   relabel "${issue}" "agent:in-progress" "agent:ready,agent:blocked,agent:needs-human" || return 1
   body="$(mktemp)"
+  ra="$(agent_run_attempt)"
   {
-    printf '<!-- agent:lock role=%s run=%s attempt=%s expires=%s -->\n' "${ROLE}" "${RUN_ID:-local}" "${attempt}" "${expires}"
+    printf '<!-- agent:lock role=%s run=%s attempt=%s expires=%s%s -->\n' "${ROLE}" "${RUN_ID:-local}" "${attempt}" "${expires}" "${ra:+ run_attempt=${ra}}"
     printf 'The %s agent picked this up (attempt %s of %s): [run](%s). ' "${ROLE}" "${attempt}" "${max}" "${RUN_URL:-}"
     printf 'It may open a PR that says `Refs #%s`. It never closes this issue; that stays with a person after the fix is live.\n' "${issue}"
   } >"${body}"
@@ -1001,7 +1009,8 @@ cmd_finalize() {
   reason="$(printf '%s' "${REASON:-}" | agent_oneline 300)"
   case "${outcome}" in pr-opened | blocked | refused | no-op | failed) ;; *) outcome=failed ;; esac
   local max plan add remove kind body note="${FINAL_DIR:-/nonexistent}/blocked.md" tripped row metrics
-  local counted=true infra="" infra_step="" irc
+  local counted=true infra="" infra_step="" irc ra
+  ra="$(agent_run_attempt)"
   max="$(policy ".roles[\"${ROLE}\"].maxAttemptsPerIssue")"
   # Only a plain failure is ever reclassified: refusals (an untrusted change, a path rule) and
   # everything else keep their meaning.
@@ -1036,7 +1045,7 @@ cmd_finalize() {
     *)
       if [[ "${counted}" == false ]]; then
         # The marker is what voids this run's lock in the attempt count (JQ_ISSUE_DEFS `locks`).
-        printf '<!-- agent:no-attempt run=%s -->\n' "${RUN_ID:-local}" >"${body}"
+        printf '<!-- agent:no-attempt run=%s%s -->\n' "${RUN_ID:-local}" "${ra:+ run_attempt=${ra}}" >"${body}"
         printf 'The %s agent'"'"'s [run](%s) failed before the agent started, at the step **%s**. It did no work, so it does not count as attempt %s, as a run today or towards the breaker. It is back in the queue.\n' \
           "${ROLE}" "${RUN_URL:-}" "${infra_step}" "${attempt}" >>"${body}"
       else
@@ -1064,13 +1073,13 @@ cmd_finalize() {
   if [[ -s "${METRICS_FILE:-}" ]] && jq -e 'type == "object"' "${METRICS_FILE}" >/dev/null 2>&1; then
     metrics="$(jq -c . "${METRICS_FILE}")"
   fi
-  row="$(jq -cn --arg run "${RUN_ID:-local}" --arg url "${RUN_URL:-}" --arg role "${ROLE}" \
+  row="$(jq -cn --arg run "${RUN_ID:-local}" --arg ra "${ra}" --arg url "${RUN_URL:-}" --arg role "${ROLE}" \
     --arg trigger "${TRIGGER:-workflow_dispatch}" --argjson issue "${issue}" --argjson attempt "${attempt}" \
     --arg pr "${PR_NUMBER:-}" --arg outcome "${outcome}" --arg reason "${reason}" \
     --arg model "$(policy ".roles[\"${ROLE}\"].model")" --arg started "${STARTED_AT:-}" \
     --arg ended "$(agent_iso)" --argjson m "${metrics}" --argjson counted "${counted}" --arg infra "${infra_step}" '
-      {v: 1, run_id: $run, run_url: $url, role: $role, trigger: $trigger, issue: $issue,
-       attempt: $attempt, pr: (if $pr == "" then null else ($pr | tonumber) end),
+      {v: 1, run_id: $run, run_attempt: (if $ra == "" then null else ($ra | tonumber) end),
+       run_url: $url, role: $role, trigger: $trigger, issue: $issue, attempt: $attempt, pr: (if $pr == "" then null else ($pr | tonumber) end),
        outcome: $outcome, reason: $reason, model: $model, counted: $counted,
        infra_step: (if $infra == "" then null else $infra end),
        turns: ($m.turns // null), duration_ms: ($m.duration_ms // null), cost_usd: ($m.cost_usd // null),
