@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.1 (2026-11-15)
 
 - Sweep: a stale coder lock is matched only to a ledger row for its own issue. "Re-run all jobs" on
   a coder run whose first attempt died before the model keeps the run id and attempt number but
@@ -21,6 +21,8 @@
   re-uses that attempt's lock, so a re-run that then reaches the model is still not counted towards
   the attempt caps (it does count towards the breaker). Installed repositories need an update
   (`bash bin/render.sh <repo>`) to get it.
+- Installed repositories need an update (`bash bin/render.sh <repo>`, or the update skill) to get
+  both fixes: they are in the installed scripts and the coder and fixer workflows.
 
 ## 0.8.0 (2026-11-15)
 
