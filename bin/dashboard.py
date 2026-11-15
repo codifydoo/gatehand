@@ -1482,12 +1482,15 @@ def fixer_refusal(d, pr):
 
 def review_fixes(repo, n, bot):
     """agent-fixup.sh fix_locks <pr> review: the review fixes the bot started on the PR, less those
-    its finalize voided because they never reached the model. Only the bot's comments count."""
+    its finalize voided because they never reached the model. Only the bot's comments count. A
+    marker voids the lock of its own run and run attempt; one without run_attempt, or a lock without
+    it, matches every attempt of the run."""
     items, _ = rest_pages("repos/%s/issues/%d/comments" % (repo, n), 30)
     bodies = "\n".join(c.get("body") or "" for c in items if (c.get("user") or {}).get("login") == bot)
-    voided = set(re.findall(r"<!-- agent:fix-no-attempt run=([0-9A-Za-z]+) -->", bodies))
-    runs = re.findall(r"<!-- agent:fix-lock kind=review [^\n]*? run=([0-9A-Za-z]+) ", bodies)
-    return len([r for r in runs if r not in voided])
+    voided = re.findall(r"<!-- agent:fix-no-attempt run=([0-9A-Za-z]+)(?: run_attempt=([0-9]+))? -->", bodies)
+    locks = re.findall(r"<!-- agent:fix-lock kind=review [^\n]*? run=([0-9A-Za-z]+) [^\n]*?(?: run_attempt=([0-9]+))? -->", bodies)
+    return len([(r, t) for r, t in locks
+                if not any(vr == r and (not vt or not t or vt == t) for vr, vt in voided)])
 
 
 def plan_verdict(repo, d, viewer, body):

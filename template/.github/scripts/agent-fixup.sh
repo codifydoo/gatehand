@@ -67,17 +67,22 @@ pr_refusal() {
 open_agent_prs() { gh pr list --state open --label agent:pr --limit 100 --json number --jq '.[].number'; }
 
 # fix_locks <pr> <kind>: how many fix attempts of <kind> the bot has started on the PR. A fix-lock
-# whose run never reached the model is voided by the bot's own `<!-- agent:fix-no-attempt run=R -->`
-# (cmd_finalize, infra_failure); only the bot's comments are read, so nobody else can void one.
+# whose run never reached the model is voided by the bot's own
+# `<!-- agent:fix-no-attempt run=R run_attempt=T -->` (cmd_finalize, infra_failure); only the bot's
+# comments are read, so nobody else can void one. It voids only the lock of the same run and run
+# attempt, so a re-run ("Re-run all jobs" keeps the run id) is counted apart from its first attempt;
+# a lock or marker without `run_attempt` (written before it existed) matches every attempt of its run.
 fix_locks() {
-  local bodies voided
+  local bodies
   bodies="$(gh api --paginate "repos/${GH_REPO}/issues/$1/comments?per_page=100" \
     --jq ".[] | select(.user.login == \"${BOT}\") | .body")" || return 1
-  voided="$(grep -oE '<!-- agent:fix-no-attempt run=[0-9A-Za-z]+ -->' <<<"${bodies}" | sed -E 's/.*run=([0-9A-Za-z]+) .*/\1/' || true)"
-  grep -E "<!-- agent:fix-lock kind=$2 " <<<"${bodies}" \
-    | grep -oE ' run=[0-9A-Za-z]+ ' | tr -d ' ' | sed 's/^run=//' \
-    | { if [[ -n "${voided}" ]]; then grep -vxF -f <(printf '%s\n' "${voided}"); else cat; fi; } \
-    | grep -c . || true
+  jq -Rsr --arg k "$2" '
+    def same_attempt($a; $b): ($a // "") == "" or ($b // "") == "" or $a == $b;
+    [scan("<!-- agent:fix-no-attempt run=([0-9A-Za-z]+)(?: run_attempt=([0-9]+))? -->")] as $v
+    | [scan("<!-- agent:fix-lock kind=" + $k + " [^>]*-->")
+       | {r: (capture(" run=(?<r>[0-9A-Za-z]+) ") | .r), t: ((capture(" run_attempt=(?<t>[0-9]+) -->") | .t) // "")}
+       | . as $l | select(($v | any(.[0] == $l.r and same_attempt(.[1]; $l.t))) | not)]
+    | length' <<<"${bodies}"
 }
 
 # --- route -------------------------------------------------------------------------------------------
@@ -377,11 +382,11 @@ reason_text() {
 }
 
 # cmd_preflight. Env: PR, KIND, SOURCE, AGENTS_ENABLED, AGENT_BOT_ID, RUN_REF, DEFAULT_BRANCH,
-# RUN_ID, RUN_URL, TASK_FILE, AGENT_INBOX_ISSUE, AGENT_OWNER_LOGIN.
+# RUN_ID, RUN_ATTEMPT, RUN_URL, TASK_FILE, AGENT_INBOX_ISSUE, AGENT_OWNER_LOGIN.
 # Outputs: go=true|false, reason, issue, branch, head, n (this attempt's number for its kind).
 cmd_preflight() {
   local pr="${PR:-}" kind="${KIND:-}" src="${SOURCE:-}" decision json why issue head branch n cap \
-    note ttl expires body ask open=0
+    note ttl expires body ask open=0 ra
   output go false
   # Strict: the source goes into the lock comment's marker, and `044` would not share `44`'s
   # concurrency group.
@@ -489,8 +494,9 @@ cmd_preflight() {
   ensure_labels || return 1
   relabel_pr "${pr}" agent:fixing "" || { output reason "could not lock #${pr}"; return 1; }
   body="$(mktemp)"
+  ra="$(agent_run_attempt)"
   {
-    printf '<!-- agent:fix-lock kind=%s n=%s run=%s sha=%s source=%s expires=%s -->\n' "${kind}" "$((n + 1))" "${RUN_ID:-local}" "${head}" "${src}" "${expires}"
+    printf '<!-- agent:fix-lock kind=%s n=%s run=%s sha=%s source=%s expires=%s%s -->\n' "${kind}" "$((n + 1))" "${RUN_ID:-local}" "${head}" "${src}" "${expires}" "${ra:+ run_attempt=${ra}}"
     printf 'The fixer agent is working on this (%s fix %s of %s): [run](%s).\n' "${kind}" "$((n + 1))" "${cap}" "${RUN_URL:-}"
   } >"${body}"
   # Without its comment the lock is neither counted against the cap nor freed by the sweep, and the
@@ -554,13 +560,14 @@ cancel_by_person() {
 }
 
 # cmd_finalize. Env: OUTCOME (fix-pushed|blocked|no-op|refused|failed), REASON, PR, ISSUE, KIND,
-# SOURCE, N, NEW_HEAD, RUN_ID, RUN_URL, FINAL_DIR (blocked.md), METRICS_FILE, STARTED_AT, TRIGGER,
+# SOURCE, N, NEW_HEAD, RUN_ID, RUN_ATTEMPT (the fix lock's), RUN_URL, FINAL_DIR (blocked.md), METRICS_FILE, STARTED_AT, TRIGGER,
 # FIX_RESULT (needs.fix.result), RUN_CANCELLED (the sweep: the run's conclusion was `cancelled`). A
 # run a person cancelled is neither retried nor blocked; one in which a job hit its time limit is a
 # failure (cancel_by_person tells them apart).
 cmd_finalize() {
   local outcome="${OUTCOME:-failed}" pr="${PR:?}" issue="${ISSUE:-0}" kind="${KIND:-ci}" n="${N:-1}" reason cap \
-    note body metrics row tripped by_person=false cancel counted=true infra infra_step="" irc
+    note body metrics row tripped by_person=false cancel counted=true infra infra_step="" irc ra
+  ra="$(agent_run_attempt)"
   reason="$(printf '%s' "${REASON:-}" | agent_oneline 300)"
   case "${outcome}" in fix-pushed | blocked | refused | no-op | failed) ;; *) outcome=failed ;; esac
   # A fix job that failed before the model step did no work (infra_failure): it costs the PR no fix
@@ -593,7 +600,7 @@ cmd_finalize() {
       body="$(mktemp)"
       if [[ "${counted}" == false ]]; then
         # The marker is what voids this run's fix-lock in fix_locks.
-        printf '<!-- agent:fix-no-attempt run=%s -->\n' "${RUN_ID:-local}" >"${body}"
+        printf '<!-- agent:fix-no-attempt run=%s%s -->\n' "${RUN_ID:-local}" "${ra:+ run_attempt=${ra}}" >"${body}"
         printf 'The fixer'"'"'s [run](%s) failed before the agent started, at the step **%s**. It did no work, so it does not count as %s fix %s of %s or towards the breaker.\n' \
           "${RUN_URL:-}" "${infra_step}" "${kind}" "${n}" "${cap}" >>"${body}"
       else
@@ -642,12 +649,12 @@ cmd_finalize() {
   if [[ -s "${METRICS_FILE:-}" ]] && jq -e 'type == "object"' "${METRICS_FILE}" >/dev/null 2>&1; then
     metrics="$(jq -c . "${METRICS_FILE}")"
   fi
-  row="$(jq -cn --arg run "${RUN_ID:-local}" --arg url "${RUN_URL:-}" --arg trigger "${TRIGGER:-workflow_dispatch}" \
+  row="$(jq -cn --arg run "${RUN_ID:-local}" --arg ra "${ra}" --arg url "${RUN_URL:-}" --arg trigger "${TRIGGER:-workflow_dispatch}" \
     --argjson issue "${issue}" --argjson pr "${pr}" --argjson attempt "${n}" --arg kind "${kind}" \
     --arg outcome "${outcome}" --arg reason "${reason}" --arg model "$(policy '.roles.fixer.model')" \
     --arg started "${STARTED_AT:-}" --arg ended "$(agent_iso)" --arg head "${NEW_HEAD:-}" --argjson m "${metrics}" \
     --argjson counted "${counted}" --arg infra "${infra_step}" '
-      {v: 1, run_id: $run, run_url: $url, role: "fixer", trigger: $trigger, issue: $issue, pr: $pr,
+      {v: 1, run_id: $run, run_attempt: (if $ra == "" then null else ($ra | tonumber) end), run_url: $url, role: "fixer", trigger: $trigger, issue: $issue, pr: $pr,
        attempt: $attempt, kind: $kind, outcome: $outcome, reason: $reason, model: $model,
        counted: $counted, infra_step: (if $infra == "" then null else $infra end),
        head: (if $head == "" then null else $head end),

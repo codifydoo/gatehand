@@ -35,6 +35,8 @@
 #      scripts' own regexes accept, on the ref each workflow needs. A verdict, posted, reads as meant
 #      through the real review_verdict (both readers, GitHub's render recorded), and a note cannot
 #      move it. Only Gatehand's runs are cancelled; only AGENTS_ENABLED and AGENT_AUTO_MERGE are set.
+#      Starting the fixer counts review fixes as agent-fixup.sh fix_locks does: a bot's no-attempt
+#      marker voids only the lock of its own run and run attempt (a re-run's lock still counts).
 #   9. Limits and schedules: a role limit policy.json does not set is null, never a default. The
 #      schedules come from the workflow files on the default branch, not policy.json; no `schedule:`
 #      (or no file) is null; a file, or a shape of `on:`, that cannot be read is "unknown" and listed
@@ -1076,6 +1078,13 @@ PR50_COMMENTS="$(jq -nc --arg bot "${BOT}" '[{user: {login: $bot}, body: "<!-- a
 expect "the fixer past its review-fix cap (it would block the PR instead): refused" "$(vcode "${FIXR}")" 409
 PR50_COMMENTS="$(jq -c --arg bot "${BOT}" '.[1].user.login = $bot' <<<"${PR50_COMMENTS}")"; xrules
 expect "a fix the bot voided (it never reached the model) does not count" "$(vcode "${FIXR}")" 200
+PR50_COMMENTS="$(jq -nc --arg bot "${BOT}" '[
+  {user: {login: $bot}, body: "<!-- agent:fix-lock kind=review n=1 run=92 sha=abc source=comment-5 expires=x run_attempt=1 -->"},
+  {user: {login: $bot}, body: "<!-- agent:fix-no-attempt run=92 run_attempt=1 -->"},
+  {user: {login: $bot}, body: "<!-- agent:fix-lock kind=review n=1 run=92 sha=abc source=comment-5 expires=x run_attempt=2 -->"}]')"; xrules
+expect "a re-run's fix is not voided by its first attempt's marker: past the cap, refused" "$(vcode "${FIXR}")" 409
+PR50_COMMENTS="$(jq -c '.[2].body |= sub("run_attempt=2"; "run_attempt=1") | .[2].body |= sub("expires=x run_attempt=1"; "expires=x")' <<<"${PR50_COMMENTS}" | jq -c 'del(.[0])')"; xrules
+expect "a lock without run_attempt is voided by its run's marker" "$(vcode "${FIXR}")" 200
 PR50_COMMENTS='[]'; xrules
 Q2_SAVE="${Q2_OUT}"; Q2_OUT="$(q2 'null' "$(jq -nc '{text: ({fixer: {tripped_at: "2026-11-14T07:00:00Z"}} | tojson), isTruncated: false}')")"; xrules
 expect "the fixer while its breaker is tripped: refused" "$(vcode "${FIXR}")" 409

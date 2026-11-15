@@ -28,6 +28,13 @@ agent_now_epoch() {
 # on how to format an arbitrary epoch and these scripts are tested on both.
 agent_iso() { jq -rn --argjson e "${1:-$(agent_now_epoch)}" '$e | todate'; }
 
+# agent_run_attempt: RUN_ATTEMPT (GitHub's github.run_attempt of the attempt that took the lock), or
+# nothing when it is unset or not a number. "Re-run all jobs" keeps the run id and counts this up, so
+# the lock, no-attempt markers and ledger rows carry it as `run_attempt` to tell a re-run from its
+# first attempt; a marker or row without it (written before it existed, or a local run) matches any
+# attempt of its run.
+agent_run_attempt() { if [[ "${RUN_ATTEMPT:-}" =~ ^[1-9][0-9]*$ ]]; then printf '%s' "${RUN_ATTEMPT}"; fi; }
+
 # output <key> <value>: a step output when running in Actions, stdout otherwise. The value is
 # flattened to ONE line: GITHUB_OUTPUT is `key=value` lines and a later line wins, so a newline in
 # a value that carries agent text (a refusal reason quoting pr.json) could otherwise add or override

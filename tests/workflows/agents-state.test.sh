@@ -13,6 +13,11 @@
 #   3. Finalize leaves exactly one state: a PR → agent:pr-open; a question or a protected path →
 #      agent:blocked + agent:needs-human with an inbox request; a failure with attempts left →
 #      back to agent:ready; the last failed attempt → blocked with a request. It never closes.
+#   (3b) A run that failed before the model costs no attempt: the bot's no-attempt marker voids its
+#      lock. The lock, the marker and the ledger row carry GitHub's run_attempt, and the marker voids
+#      only the lock of the same run attempt: "Re-run all jobs" keeps the run id, and a re-run that
+#      reached the model must count even when its first attempt's marker is on the issue. A lock or
+#      marker without run_attempt (older) matches every attempt of its run.
 # AGENT_TRUST_CACHE is reset here and read by the sourced agent-state.sh.
 # shellcheck disable=SC2034
 set -uo pipefail
@@ -523,6 +528,23 @@ attempts_json="$(jq -cn --arg bot "${AGENT_BOT_SLUG}" '{comments: [
   {author: {login: $bot}, body: "<!-- agent:lock role=coder run=222 attempt=1 expires=x -->"},
   {author: {login: "mallory"}, body: "<!-- agent:no-attempt run=222 -->"}]}')"
 expect "attempts: the bot's marker voids its run's lock; anyone else's voids nothing" "$(jq -r "${JQ_ISSUE_DEFS} locks" <<<"${attempts_json}")" 1
+# "Re-run all jobs" on run 333: its first attempt died before the model, so the re-run picked the
+# issue again as attempt 1, reached the model and failed. The first attempt's marker is not its own.
+rerun_json="$(jq -cn --arg bot "${AGENT_BOT_SLUG}" '{state: "OPEN", body: "## Done when\nx", labels: [], comments: [
+  {author: {login: $bot}, body: "<!-- agent:lock role=coder run=333 attempt=1 expires=x run_attempt=1 -->"},
+  {author: {login: $bot}, body: "<!-- agent:no-attempt run=333 run_attempt=1 -->"},
+  {author: {login: $bot}, body: "<!-- agent:lock role=coder run=333 attempt=1 expires=x run_attempt=2 -->"},
+  {author: {login: $bot}, body: "Attempt 1 of 1 by the coder agent ended without a PR: **failed**"}]}')"
+expect "attempts: a re-run's lock is not voided by its first attempt's marker" "$(jq -r "${JQ_ISSUE_DEFS} locks" <<<"${rerun_json}")" 1
+expect "attempts: so with one attempt allowed the issue is not picked again" "$(jq -r "${JQ_ISSUE_DEFS} skip_reason(1)" <<<"${rerun_json}")" "already attempted 1 times"
+expect "attempts: a marker voids its own run attempt's lock" \
+  "$(jq -c '.comments += [{author: {login: "'"${AGENT_BOT_SLUG}"'"}, body: "<!-- agent:no-attempt run=333 run_attempt=2 -->"}]' <<<"${rerun_json}" | jq -r "${JQ_ISSUE_DEFS} locks")" 0
+old_json="$(jq -cn --arg bot "${AGENT_BOT_SLUG}" '{comments: [
+  {author: {login: $bot}, body: "<!-- agent:lock role=coder run=444 attempt=1 expires=x run_attempt=2 -->"},
+  {author: {login: $bot}, body: "<!-- agent:no-attempt run=444 -->"},
+  {author: {login: $bot}, body: "<!-- agent:lock role=coder run=445 attempt=1 expires=x -->"},
+  {author: {login: $bot}, body: "<!-- agent:no-attempt run=445 run_attempt=3 -->"}]}')"
+expect "attempts: a marker or lock without run_attempt matches any attempt of its run" "$(jq -r "${JQ_ISSUE_DEFS} locks" <<<"${old_json}")" 0
 
 ledger_rows() { git --git-dir="${TMP}/ledger.git" show agent-ledger:runs/2026-11.jsonl | jq -c 'select(.run_id == "555")' | tail -1; }
 coder_breaker() { git --git-dir="${TMP}/ledger.git" show agent-ledger:state/breaker.json | jq -r '.coder.consecutive // 0'; }
@@ -539,6 +561,11 @@ if grep -Fq '**project toolchain**' <<<"${note}"; then t_pass "infra: and names 
 expect_no_call "infra: no inbox request" "issue comment 99"
 expect "infra: the ledger row is not counted and names the step" "$(ledger_rows | jq -r '"\(.counted) \(.infra_step) \(.outcome)"')" "false project toolchain failed"
 expect "infra: no breaker step" "$(coder_breaker)" "${before}"
+RUN_ATTEMPT=2 CODE_RESULT=failure JOBS="$(codesteps 'project toolchain')" finalize_with failed 1 "the code job ended as failure"
+expect "infra: on a re-run the marker names its run attempt" "$(stub_gh_last_body 'issue comment 7 *' | head -1)" "<!-- agent:no-attempt run=555 run_attempt=2 -->"
+expect "infra: and so does the ledger row" "$(ledger_rows | jq -r '"\(.run_attempt) \(.counted)"')" "2 false"
+RUN_ATTEMPT='2 -->' CODE_RESULT=failure JOBS="$(codesteps 'project toolchain')" finalize_with failed 1 "the code job ended as failure"
+expect "infra: a run attempt that is not a number is left out" "$(stub_gh_last_body 'issue comment 7 *' | head -1)" "<!-- agent:no-attempt run=555 -->"
 CODE_RESULT=failure JOBS="$(codesteps 'implement')" finalize_with failed 1 "the code job ended as failure"
 expect "infra: a failure of the model step itself is counted" "$(ledger_rows | jq -r '"\(.counted) \(.infra_step)"')" "true null"
 CODE_RESULT=failure JOBS_FAIL=1 finalize_with failed 1 "the code job ended as failure"
@@ -633,6 +660,9 @@ if ROLE=coder RUN_ID=555 cmd_lock 7 1 >/dev/null 2>&1; then t_fail "a lock whose
 stub_gh_reset_rules
 stub_gh_on 'label list *' "${labels_all}"
 if ROLE=coder RUN_ID=555 cmd_lock 7 1 >/dev/null 2>&1; then t_pass "a lock whose comment posted succeeds"; else t_fail "a posted lock failed"; fi
+expect "the lock marker without RUN_ATTEMPT" "$(stub_gh_last_body 'issue comment 7 *' | head -1 | sed -E 's/expires=[^ ]+/expires=E/')" "<!-- agent:lock role=coder run=555 attempt=1 expires=E -->"
+ROLE=coder RUN_ID=555 RUN_ATTEMPT=3 cmd_lock 7 1 >/dev/null 2>&1
+expect "the lock marker names its run attempt" "$(stub_gh_last_body 'issue comment 7 *' | head -1 | sed -E 's/expires=[^ ]+/expires=E/')" "<!-- agent:lock role=coder run=555 attempt=1 expires=E run_attempt=3 -->"
 
 # request_review: once per head, again when that request went nowhere (a dispatched review that
 # ended without posting, 2026-11-10), at most twice, then once in the inbox. Now is 12:00; a request

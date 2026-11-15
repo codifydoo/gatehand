@@ -6,8 +6,20 @@
   a coder run whose first attempt died before the model keeps the run id and attempt number but
   picks its issue again, so the run's row could be another issue's; the sweep then labelled the
   first issue `agent:pr-open` for a PR that was never its own. Now that lock is released as stale
-  (back to `agent:ready`, or blocked on the last attempt). A re-run that picks the same issue again
-  is not told apart from its first attempt yet. Installed repositories need an update
+  (back to `agent:ready`, or blocked on the last attempt). Installed repositories need an update
+  (`bash bin/render.sh <repo>`) to get it.
+- A coder or fixer run re-run with "Re-run all jobs" is told apart from its first attempt. The lock, the
+  `no-attempt` markers and the ledger rows now carry GitHub's `run_attempt` (the attempt that took
+  the lock), and a `no-attempt` marker voids only the lock of its own run attempt. Before, when a
+  run's first attempt failed before the model and someone re-ran it on the same issue: the first
+  attempt's marker voided the re-run's lock too, so a re-run that reached the model and failed never
+  counted towards `maxAttemptsPerIssue` (or the fixer's caps); and when the re-run died before its
+  finalize, the sweep took the first attempt's uncounted row for its own and re-queued it with no
+  row, comment or breaker step, even on the last attempt. Markers and rows written before this
+  carry no `run_attempt` and still match every attempt of their run. The dashboard counts review
+  fixes the same way. Not covered: "Re-run failed jobs" after the first attempt's finalize ran
+  re-uses that attempt's lock, so a re-run that then reaches the model is still not counted towards
+  the attempt caps (it does count towards the breaker). Installed repositories need an update
   (`bash bin/render.sh <repo>`) to get it.
 
 ## 0.8.0 (2026-11-15)
