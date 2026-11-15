@@ -78,10 +78,11 @@ run_state() {
   return 1
 }
 
-# ledger_row <run-id> [attempt]: the run's row from this month's or last month's ledger, as one JSON
-# line; with [attempt], only a row of that attempt ("Re-run all jobs" keeps the run id, so a re-run
-# that died must not be taken for its first run, which finalized). Exit 0 found, 1 missing, 2
-# unreadable.
+# ledger_row <run-id> [attempt] [issue]: the run's row from this month's or last month's ledger, as
+# one JSON line; with [attempt], only a row of that attempt ("Re-run all jobs" keeps the run id, so a
+# re-run that died must not be taken for its first run, which finalized); with [issue], only a row
+# for that issue or one naming none (a coder re-run picks its issue again, so the run id's row may
+# be another issue's). Exit 0 found, 1 missing, 2 unreadable.
 ledger_row() {
   local now this last rows row
   now="$(agent_now_epoch)"
@@ -90,8 +91,9 @@ ledger_row() {
   last="$(jq -rn --argjson e "${now}" '($e | strftime("%Y-%m-01T00:00:00Z") | fromdateiso8601) - 86400 | strftime("%Y-%m")')"
   rows="$(ledger_file "runs/${this}.jsonl")" || return 2
   rows+=$'\n'"$(ledger_file "runs/${last}.jsonl")" || return 2
-  row="$(printf '%s\n' "${rows}" | jq -cs --arg r "$1" --arg a "${2:-}" '
-    [.[] | select(type == "object" and (.run_id | tostring) == $r and ($a == "" or (.attempt | tostring) == $a))] | last // empty')" \
+  row="$(printf '%s\n' "${rows}" | jq -cs --arg r "$1" --arg a "${2:-}" --arg i "${3:-}" '
+    [.[] | select(type == "object" and (.run_id | tostring) == $r and ($a == "" or (.attempt | tostring) == $a)
+      and ($i == "" or .issue == null or (.issue | tostring) == $i))] | last // empty')" \
     || return 2
   [[ -n "${row}" ]] || return 1
   printf '%s\n' "${row}"
@@ -145,7 +147,7 @@ sweep_one_lock() {
   # ledger row means its finalize ran too, and only the relabel did not land (finalize logs that and
   # carries on). Either way, re-queueing it would spend a run the outbox then refuses.
   prs="$(agent_prs_for "${issue}" "${run}")" || { echo "#${issue}: timeline unreadable, left alone"; return 1; }
-  row="$(ledger_row "${run}" "${attempt}")"
+  row="$(ledger_row "${run}" "${attempt}" "${issue}")"
   lrc=$?
   if [[ "${lrc}" -eq 2 ]]; then echo "#${issue}: ledger unreadable, left alone"; return 1; fi
   ensure_labels || agent_log "sweep: could not ensure labels"

@@ -8,7 +8,9 @@
 #      marker cannot free an issue. A failed attempt with attempts left goes back to agent:ready
 #      (allow-protected removed, it is one-shot), the last one to agent:blocked + an inbox request.
 #      A run that opened its PR makes the issue agent:pr-open; a run that has its ledger row gets
-#      that row's outcome, without a second comment or request. agent:hold is never touched.
+#      that row's outcome, without a second comment or request; only a row for this issue counts,
+#      as a re-run of a coder run picks again and may have worked another issue under the same run
+#      id. agent:hold is never touched.
 #   2. A run whose publish job never wrote its ledger row gets one, so it counts against the daily
 #      cap and the breaker; a run that has its row does not get a second. Last month's rows are
 #      read too, on the 1st of every month as well; an unreadable ledger leaves the issue alone.
@@ -138,7 +140,14 @@ LEDGER_RUNS='{"run_id":"577","role":"coder","attempt":1,"outcome":"failed"}' LED
   lock_case "$(comments "gatehand[bot]|$(lock 577 2 "${EXPIRED}")")" "${COMPLETED}"
 if stub_gh_any_body 'kind=failed -->'; then t_pass "a re-run (same run id, attempt 2) that died is not its first run's row: the last-attempt request is filed"; else t_fail "a dead re-run was taken for its finalized first run"; fi
 expect "and it gets its own row" "$(ledger_rows | jq -r 'select(.run_id == "577" and .attempt == 2) | .outcome')" failed
-LEDGER_RUNS='{"run_id":"570","role":"coder","attempt":1,"outcome":"blocked","reason":"needs a decision"}' LEDGER_RC=0 \
+# "Re-run all jobs" on a coder run whose first attempt died before the model: the re-run picks again,
+# and the row under the same run id and attempt number is another issue's.
+LEDGER_RUNS='{"run_id":"578","role":"coder","issue":8,"attempt":1,"outcome":"pr-opened","pr":78}' LEDGER_RC=0 \
+  lock_case "$(comments "gatehand[bot]|$(lock 578 1 "${EXPIRED}")")" "${COMPLETED}"
+expect_no_call "another issue's row under the same run id is not this issue's: no agent:pr-open" "--add-label agent:pr-open"
+expect_call "the lock is stale like any other: back to agent:ready" "issue edit 7 --add-label agent:ready"
+expect "and it gets its own row" "$(ledger_rows | jq -r 'select(.run_id == "578" and .issue == 7) | .outcome')" failed
+LEDGER_RUNS='{"run_id":"570","role":"coder","issue":7,"attempt":1,"outcome":"blocked","reason":"needs a decision"}' LEDGER_RC=0 \
   lock_case "$(comments "gatehand[bot]|$(lock 570 1 "${EXPIRED}")")" "${COMPLETED}"
 expect_call "a finalized run whose relabel never landed gets its row's outcome (blocked), not 'failed'" \
   "issue edit 7 --add-label agent:blocked --add-label agent:needs-human --remove-label agent:in-progress"

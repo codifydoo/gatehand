@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Sweep: a stale coder lock is matched only to a ledger row for its own issue. "Re-run all jobs" on
+  a coder run whose first attempt died before the model keeps the run id and attempt number but
+  picks its issue again, so the run's row could be another issue's; the sweep then labelled the
+  first issue `agent:pr-open` for a PR that was never its own. Now that lock is released as stale
+  (back to `agent:ready`, or blocked on the last attempt). A re-run that picks the same issue again
+  is not told apart from its first attempt yet. Installed repositories need an update
+  (`bash bin/render.sh <repo>`) to get it.
+
 ## 0.8.0 (2026-11-15)
 
 - Hand back to the merge gate says in its confirm whether the PR's head moved since it was blocked:
