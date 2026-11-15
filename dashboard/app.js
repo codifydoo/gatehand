@@ -3,7 +3,7 @@
 // never as HTML, and only https://github.com/ links become hrefs.
 "use strict";
 
-const state = { token: "", session: null, repos: {}, selected: "", gate: {}, inbox: {}, drafts: {} };
+const state = { token: "", session: null, repos: {}, selected: "", gate: {}, inbox: {} };
 const $ = (id) => document.getElementById(id);
 
 // --- session secret: from the URL fragment once, then from this tab's sessionStorage -----------------
@@ -271,8 +271,8 @@ function needRows(repo) {
       route: repoRoute(repo) });
   }
 
-  // Stopped roles, each with its breaker request when there is one. "Reset the breaker" answers the
-  // request and is on the Pipeline tab; Resume, for a role stopped with no request, is on Agents.
+  // Stopped roles, each with its breaker request when there is one. Both answers are in the role's
+  // pane: "Reset the breaker" answers the request; Resume is for a role stopped with no request.
   const known = !!d.breakers; // breaker.json unread: the role's state is not claimed either way
   const breakers = d.breakers || {};
   const roles = new Set([...Object.keys(breakers).filter((r) => breakers[r] && breakers[r].tripped_at), ...Object.keys(roleReq)]);
@@ -281,7 +281,7 @@ function needRows(repo) {
     const r = roleReq[role] || null;
     // /resume resets a breaker without answering its request, so a request can outlive the stop.
     const stopped = !!b.tripped_at;
-    // The Pipeline tab has "Reset the breaker" only for a request whose comment it read.
+    // The role's pane has "Reset the breaker" only for a request whose comment it read.
     const viaReq = !!(r && comments && comments.some((c) => c.id === r.id));
     add({ kind: "role", role, key: `${repo}|role|${role}|${b.tripped_at || (r && r.id)}`, at: b.tripped_at || (r ? r.created_at : "") || "", req: r,
       title: stopped ? `${roleName(role)} stopped` : `${roleName(role)}: breaker request ${known ? "still open" : "open"}`,
@@ -411,10 +411,20 @@ function renderSide() {
   const item = (route, on, text, badge, badgeKind, cls, title) => routeLink(route,
     { class: `${cls || "side-item"}${on ? " on" : ""}`, "aria-current": on ? "page" : null, title: title || null },
     h("span", { class: "side-label" }, text), badge ? h("span", { class: `badge ${badgeKind || ""}` }, badge) : null);
+  const none = !!state.session && !repos.length;
+  const pre = !state.session; // before the first load nothing is known: no counts, not zeros
+  // On a narrow window the sidebar folds into one line naming where you are; ☰ opens it.
+  const blank = pre || none;
+  const here = { needs: ["Needs you", blank || c.needsText === "0" ? "" : c.needsText], activity: ["Activity", blank ? "" : c.runningText], week: ["Week", blank ? "" : c.costText],
+    repos: ["Repositories", String(repos.length)], repo: [routeRepo() ? label(routeRepo()) : "Repository", ""] }[r.view] || ["", ""];
+  $("side").classList.toggle("open", !!state.sideOpen);
   replace($("side"),
-    item("/needs", r.view === "needs", "Needs you", c.needsText, c.needs ? "attn" : (c.needsUnknown ? "warn" : "")),
-    item("/activity", r.view === "activity", "Activity", c.runningText),
-    item("/week", r.view === "week", "Week", c.costText, c.costKind),
+    h("button", { type: "button", class: "side-toggle quiet", "aria-expanded": state.sideOpen ? "true" : "false",
+      onclick: (e) => { state.sideOpen = !state.sideOpen; $("side").classList.toggle("open", state.sideOpen); e.currentTarget.setAttribute("aria-expanded", String(state.sideOpen)); } }, "☰ ", h("strong", {}, here[0]), here[1] ? ` ${here[1]}` : ""),
+    // No badge at zero; with no repositories at all, the three views are greyed, not hidden.
+    item("/needs", r.view === "needs", "Needs you", pre || c.needsText === "0" ? null : c.needsText, c.needs ? "attn" : (c.needsUnknown ? "warn" : ""), none ? "side-item dim" : null),
+    item("/activity", r.view === "activity", "Activity", blank ? null : c.runningText, null, none ? "side-item dim" : null),
+    item("/week", r.view === "week", "Week", blank ? null : c.costText, blank ? null : c.costKind, none ? "side-item dim" : null),
     item("/repos", r.view === "repos", `Repositories · ${repos.length}`, null, null, "side-head"),
     repos.map((repo) => {
       const [badge, kind] = repoBadge(repo);
@@ -423,6 +433,8 @@ function renderSide() {
     // Already on #/repos the address does not change, so the link goes to the form itself.
     item("/repos", false, `Find · add${ex.length ? ` · ${ex.length} hidden` : ""}`, null, null, "side-foot"));
   $("side").lastChild.addEventListener("click", () => { if (state.route.view === "repos") $("add-repo").focus(); });
+  // Any link in the folded sidebar folds it again, the current view's included (no hashchange then).
+  $("side").onclick = (e) => { if (e.target.closest("a") && state.sideOpen) { state.sideOpen = false; $("side").classList.remove("open"); $("side").firstChild.setAttribute("aria-expanded", "false"); } };
   document.title = c.needsText === "0" ? "Gatehand" : `(${c.needsText}) Gatehand`;
 }
 
@@ -440,7 +452,8 @@ function needRow(r, isNew, on) {
       `${short(r.repo)} · ${KIND_LABEL[r.kind]}${r.at ? ` · ${ago(r.at)}` : ""}`, isNew ? h("span", { class: "new" }, "NEW") : null),
     h("div", { class: "ltitle" }, h("strong", {}, r.title), r.text ? ` ${r.text}` : ""),
     h("div", { class: "lhint" }, r.hint)];
-  return routeLink(needsRoute(state.route.kind, r.key), { class: `lrow${on ? " on" : ""}`, title: r.repo,
+  // On a narrow window the open row, tapped again, closes its item.
+  return routeLink(needsRoute(state.route.kind, on && NARROW.matches ? "-" : r.key), { class: `lrow${on ? " on" : ""}`, title: r.repo,
     "aria-current": on ? "true" : null }, kids);
 }
 
@@ -457,10 +470,10 @@ function needsView() {
   const more = c.needsLoading || c.needsUnknown ? "+" : "";
   const chip = (k, label, count) => routeLink(needsRoute(k),
     { class: `chip${kind === k ? " on" : ""}`, "aria-current": kind === k ? "page" : null }, `${label} ${count}`);
-  const chips = h("div", { class: "chips" }, chip("", "All", c.needsText),
+  const chips = !state.session ? null : h("div", { class: "chips" }, chip("", "All", c.needsText),
     CHIPS.filter(([k]) => of(k).length || kind === k).map(([k, label]) => chip(k, label, `${of(k).length}${more}`)));
   const newCount = rows.filter(isNew).length;
-  const summary = [
+  const summary = !state.session ? [] : [
     `${c.needsText} in ${c.needsRepos} ${c.needsRepos === 1 ? "repository" : "repositories"}`,
     newCount ? ` · ${newCount} new` : "",
     c.needsLoading ? " · still loading" : "",
@@ -470,7 +483,8 @@ function needsView() {
   // item). Rows in a folded group come after the others, as they are shown.
   const shownRows = kind ? of(kind) : [...rows.filter((r) => !FOLDED[r.kind]), ...Object.keys(FOLDED).flatMap(of)];
   const want = state.route.open;
-  const sel = want ? shownRows.find((r) => r.key === want) || null : shownRows[0] || null;
+  const closed = want === "-"; // closed by tapping its row on a narrow window
+  const sel = closed ? null : (want ? shownRows.find((r) => r.key === want) || null : shownRows[0] || null);
   // The top row, once open, is pinned in the address: a newer row arriving does not take the pane
   // from under you, and once it is answered the pane says what happened instead of moving on.
   // Only while the address itself still says Needs you with nothing open: a navigation not yet handled wins.
@@ -479,7 +493,18 @@ function needsView() {
     state.route.open = sel.key;
     history.replaceState(null, "", `${location.pathname}#${needsRoute(kind, sel.key)}`);
   }
-  const row = (r) => needRow(r, isNew(r), sel === r);
+  let pane = sel ? itemPane(sel) : (want && !closed ? gonePane(want, c) : null);
+  // Nothing to open: where the item would be, what is true and the one useful next step.
+  const zero = !pane && !kind && !rows.length && state.session && !c.needsLoading;
+  if (zero) pane = zeroPane(c, repos);
+  // A narrow window: the open item expands in place, under its row, as in a mail app; otherwise it
+  // sits beside the list.
+  const narrow = NARROW.matches;
+  const paneBox = (inPlace) => h("section", { class: `pane card${inPlace ? " in-place" : ""}`, id: "pane", "aria-label": "Item" }, pane);
+  state.shownKeys = shownRows.map((r) => r.key); // for the keys: j/k move through the list as shown
+  state.selKey = sel ? sel.key : "";
+  if (sel) state.lastSelKey = sel.key;
+  const row = (r) => (narrow && sel === r && pane ? [needRow(r, isNew(r), true), paneBox(true)] : needRow(r, isNew(r), sel === r));
   let list;
   if (kind) {
     list = of(kind).map(row);
@@ -495,15 +520,70 @@ function needsView() {
     x.notes.map((n) => h("div", {}, n)),
     routeLink(repoRoute(repo), {}, `Open ${repo}`)));
   const any = rows.length && (!kind || of(kind).length);
-  const pane = sel ? itemPane(sel) : (want ? gonePane(want, c) : null);
+  // Still being read: one line per repository, after the rows, until it answers.
+  const reading = per.filter(([, x]) => x.loading).map(([repo]) => {
+    const d = state.repos[repo];
+    return h("div", { class: "lrow reading" }, h("div", { class: "lmeta" },
+      `${short(repo)} · ${!d || d.loading ? "reading…" : `reading ${[needsInbox(d) && !state.inbox[repo] ? "its inbox" : "",
+        needsGate(d) && !state.gate[repo] ? "the merge gate's report" : ""].filter(Boolean).join(" and ") || "the rest"}…`}`));
+  });
+  const aside = pane && !(narrow && sel); // beside the list, or (narrow, the item gone) above it
   return [viewHead("Needs you", ...summary), chips,
-    h("div", { class: `needs-split${pane ? "" : " no-pane"}` },
-      h("div", { class: "needs-list" }, any ? list
-        : empty(c.needsLoading && !rows.length ? "Loading…"
-          : (kind ? "None of these." : (c.unread.length ? "Nothing that could be read needs you." : "Nothing needs you."))),
-      kind ? null : unread),
-      pane ? h("section", { class: "pane card", id: "pane", "aria-label": "Item" }, pane) : null)];
+    h("div", { class: `needs-split${aside && !narrow ? "" : " no-pane"}` },
+      narrow && aside ? paneBox(false) : null,
+      h("div", { class: "needs-list" }, any ? list : null, reading,
+        any || reading.length || zero ? null : empty(!state.session ? (state.sessionFailed ? `Could not load: ${state.sessionFailed}` : "Loading…")
+          : (!repos.length ? "No repositories yet."
+            : (c.unread.length ? `None that could be read; could not read ${c.unread.map(short).join(", ")}.` : "None of these."))),
+      kind ? null : unread,
+      any ? h("p", { class: "keys muted" }, state.keysHelp ? KEYS_HELP : "j/k move · o open · a primary · r reject · ? keys") : null),
+      aside && !narrow ? paneBox(false) : null)];
 }
+// Needs you has nothing in it. Each says what is true, then the one useful next step; never an "all
+// clear" while a repository is unread.
+function zeroPane(c, repos) {
+  if (!repos.length) {
+    const notes = state.session.scan_notes || [];
+    const hidden = (state.session.excluded || []).length;
+    return [h("h2", {}, state.session.scan_error ? "Finding repositories failed." : "No repositories with Gatehand found."),
+      state.session.scan_error ? h("p", {}, state.session.scan_error) : null,
+      hidden ? h("p", {}, `${hidden} ${hidden === 1 ? "repository is" : "repositories are"} hidden.`) : null,
+      notes.length ? h("ul", { class: "items" }, notes.map((n) => h("li", { class: "muted" }, n))) : null,
+      h("p", {}, routeLink("/repos", { class: "cta" }, "Find repositories again, or add one →")),
+      h("p", { class: "muted" }, "To install it in a repository, run /gatehand:install there in Claude Code.")];
+  }
+  if (c.unread.length) {
+    return [h("h2", {}, "Nothing that could be read needs you."),
+      h("p", {}, `${c.unread.map(short).join(", ")} could not be read, so this is not "nothing".`),
+      h("p", {}, routeLink(repoRoute(c.unread[0]), {}, `Open ${short(c.unread[0])} →`))];
+  }
+  // What the agents are doing meanwhile, from what was read.
+  // (Every repository was read here: an unread one returned above.)
+  let queued = 0;
+  const busy = new Set();
+  for (const repo of repos) {
+    const d = state.repos[repo];
+    queued += d.issues.ready.length;
+    if (d.issues.ready.length || (d.active_runs || []).length) busy.add(repo);
+  }
+  const more = c.runningUnknown ? "+" : "";
+  const running = c.running ? `${c.running}${more} ${c.running === 1 && !more ? "run is" : "runs are"} going` : "";
+  const q = queued ? `${queued} ${queued === 1 ? "issue is" : "issues are"} queued` : "";
+  return [h("h2", {}, "Nothing needs you."),
+    running || q ? h("p", {}, `${[running, q].filter(Boolean).join(" and ")} in ${busy.size}${more} ${busy.size === 1 && !more ? "repository" : "repositories"}.`) : null,
+    c.runningUnknown && !c.running ? h("p", {}, "Whether anything is running could not be read in every repository.") : null,
+    h("p", {}, routeLink("/activity", {}, "See Activity →"))];
+}
+
+// The width below which the list and the pane do not fit side by side (app.css has the same number).
+const NARROW = window.matchMedia("(max-width: 1000px)");
+NARROW.addEventListener("change", () => {
+  if (state.route.view !== "needs") return;
+  renderView();
+  // The pane moved (beside the list, or under its row): a field you are typing in stays in view.
+  const a = document.activeElement;
+  if (a && $("pane") && $("pane").contains(a)) a.scrollIntoView({ block: "nearest" });
+});
 
 // --- the item pane: the one place to act on a row ------------------------------------------------------
 // Every pane: a header line and the title; then, as its kind has them, a stage track, why it is stuck
@@ -570,7 +650,7 @@ const REQ_PANE = {
     why: (n) => `Someone without write access changed #${n} after the label the run trusts, or its trust check failed, so nothing reached the agent.`,
     next: (n) => `Nothing runs on #${n} until a person with write access vouches for its text.`,
     step: (n, url) => [h("strong", {}, "Read the change, then re-apply agent:ready yourself "), link(url, `on #${n} on GitHub ↗`),
-      h("div", { class: "muted" }, "Only your own label vouches for the text. Then Acknowledge here, which ticks the request and changes nothing, and rerun the coder from the Pipeline tab.")],
+      h("div", { class: "muted" }, "Only your own label vouches for the text. Then Acknowledge here, which ticks the request and changes nothing; the issue then has its own item in Needs you, to rerun the coder from.")],
   },
 };
 const REQUEUE = new Set(["blocked", "failed", "protected"]);
@@ -1044,7 +1124,7 @@ function issuePane(r) {
   const issue = Object.values(d.issues || {}).flat().find((i) => i && i.number === n) || null;
   const got = state.inbox[repo];
   // An `untrusted` request the checklist missed: /rerun re-labels as the bot, which vouches for
-  // nothing, so the run would be refused again (as rerunBtn says on the Pipeline tab).
+  // nothing, so the run would be refused again.
   const untrusted = got && got.requests && got.requests.some((x) => x.kind === "untrusted" && !x.answered && x.issue === n);
   const s = d.stats && d.stats.coder;
   const expect = ["Its reply on the inbox within a minute or two."];
@@ -1131,17 +1211,189 @@ function closePane(r) {
     h("details", fold("gh"), h("summary", {}, "GitHub detail"), h("div", {}, issue ? `labels: ${issue.labels.join(", ") || "none"}` : "not among the open issues just read"))];
 }
 
+// --- Activity: what runs now, what is not moving and why, what finished today -------------------------
+// Three lists across every repository, filled in as each repository arrives. A part of a repository
+// that could not be read is named under the list it belongs to and makes that list's count "n+" (or
+// "?"), as in the sidebar: it is never read as "nothing running" or "nothing stuck".
+const atLeast = (n, unread, loading) => (unread && !n && !loading ? "?" : `${n}${unread || loading ? "+" : ""}`);
+const roleList = (roles) => cap1(roles.join(", "));
+// The coder's gate counts runs per UTC day (agent-state.sh cmd_gate), so a daily limit lifts at 00:00 UTC.
+function untilUtcMidnight() {
+  const now = new Date();
+  const m = Math.ceil((Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1) - now) / 60000);
+  return m < 90 ? `${m} min` : `${Math.round(m / 60)} h`;
+}
+const isToday = (t) => { const x = new Date(t || ""); return !isNaN(x) && x.toDateString() === new Date().toDateString(); };
+
+// The next scheduled runs, said under "Nothing is running.": per scheduled workflow, the soonest next
+// run across the repositories (from each workflow file's cron, as the server reads it) and how many
+// repositories run then. A repository with no such schedule (null), or archived, adds nothing; one
+// whose agents are off adds only the digest, the one scheduled workflow the switch does not stop. A
+// workflow is left out of the line altogether when any repository's time for it is not known (its
+// schedule "unknown", its next run null, its variables unreadable for a switched workflow, the
+// repository unreadable): the soonest time and the count would be a guess. A time already past is
+// "due now": the payload can be some minutes old (the server's one-minute cache, the page's
+// five-minute refresh).
+const SCHEDULES = [["coder", "coder"], ["merge", "merge gate"], ["sweep", "sweep"], ["triage", "triage"], ["digest", "digest"]];
+function nextRunText(t) {
+  if (t === 0) return "due now";
+  const x = new Date(t), now = new Date();
+  if (x.toDateString() === now.toDateString()) return hhmm(x);
+  // Within the coming six calendar days a weekday is unambiguous; further out it needs the date.
+  // Counted between local midnights, so a 23-hour day (daylight saving) cannot shorten the week.
+  const days = Math.round((new Date(t).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)) / 86400000);
+  const opts = days < 6 ? { weekday: "short" } : { weekday: "short", day: "numeric", month: "short" };
+  return `${x.toLocaleDateString([], opts)} ${hhmm(x)}`;
+}
+function nextRunsLine(repos) {
+  const soonest = {}, unknown = new Set();
+  for (const repo of repos) {
+    const d = state.repos[repo];
+    if (!d || d.loading) continue;
+    if (d.failed || !d.schedules) { for (const [key] of SCHEDULES) unknown.add(key); continue; }
+    if (d.archived) continue; // GitHub runs no workflow in an archived repository
+    for (const [key] of SCHEDULES) {
+      const s = d.schedules[key];
+      if (s === null || s === undefined) continue;
+      if (key !== "digest") {
+        if (!d.vars) { unknown.add(key); continue; }
+        if (d.vars.AGENTS_ENABLED !== "true") continue;
+      }
+      let t = typeof s === "object" ? Date.parse(s.next_run || "") : NaN;
+      if (isNaN(t)) { unknown.add(key); continue; }
+      if (t <= Date.now()) t = 0;
+      const cur = soonest[key];
+      if (!cur || t < cur.t) soonest[key] = { t, n: 1 };
+      else if (t === cur.t) cur.n += 1;
+    }
+  }
+  const parts = SCHEDULES.filter(([k]) => soonest[k] && !unknown.has(k)).sort(([a], [b]) => soonest[a].t - soonest[b].t)
+    .map(([k, name], i) => `${name} ${nextRunText(soonest[k].t)} in ${soonest[k].n}${i ? "" : ` ${soonest[k].n === 1 ? "repository" : "repositories"}`}`);
+  return parts.length ? h("p", { class: "muted next" }, `Next: ${parts.join(", ")}.`) : null;
+}
+
+// Why a repository's agents are not moving, without anyone being asked: one row per cause, each with
+// when it moves where this page's data can say so (and nothing where it cannot: a role's next
+// scheduled run is not used here, since a run at its limit or stopped does nothing). The causes are
+// those of the coder gate (agent-state.sh gate_decide) that the design lists, plus a lock no run
+// holds; a stale runner ref is a health item, not one of these.
+function stillRows(repo, d) {
+  const rows = [], unread = [];
+  const add = (cause, what, moves) => rows.push({ repo, cause, what, moves });
+  const stats = d.stats || {};
+  const roles = (pred) => Object.keys(stats).filter((r) => stats[r] && pred(stats[r])).sort();
+  if (!d.vars) unread.push("the variables (agents on or off)");
+  else if (d.vars.AGENTS_ENABLED !== "true") {
+    // Off stops the scheduled agents and the sweep too, so every other cause waits behind this one.
+    const v = d.vars.AGENTS_ENABLED;
+    add("Agents off", `AGENTS_ENABLED is ${v === null || v === undefined ? "not set" : `“${oneLine(v, 40)}”`}: the coder, fixer, merge gate, sweep and triage do not run.`,
+      ["When someone turns them on, in ", routeLink(repoRoute(repo, "settings"), {}, "Settings"), "."]);
+    return { rows, unread };
+  }
+  if (!d.breakers) unread.push("the breaker state");
+  else {
+    const stopped = Object.keys(d.breakers).filter((r) => d.breakers[r] && d.breakers[r].tripped_at).sort();
+    if (stopped.length) {
+      add(`${roleList(stopped)} stopped`, stopped.map((r) => `${r}: the circuit breaker tripped ${String(d.breakers[r].tripped_at).slice(0, 16).replace("T", " ")} UTC${
+        d.breakers[r].reason ? `, ${oneLine(d.breakers[r].reason, 160)}` : ""}.`).join(" "),
+        ["When its breaker is reset, from ", routeLink(needsRoute("role"), {}, "Needs you"), "."]);
+    }
+  }
+  // Without policy.json the server sends no limits, though the repository's own gate still has them.
+  if (d.policy_ok === false) unread.push("policy.json (runsPerDay, maxOpenPrs)");
+  if (!d.stats) unread.push("the ledger (runs today)");
+  else {
+    const full = roles((s) => typeof s.cap === "number" && s.today >= s.cap);
+    if (full.length) {
+      const lifts = full.some((r) => stats[r].cap > 0);
+      add("Daily limit reached", full.map((r) => `${r}: ${stats[r].today} of ${stats[r].cap} runs today.`).join(" "), [
+        lifts ? `The count starts again at 00:00 UTC, in ${untilUtcMidnight()}.` : "",
+        full.some((r) => stats[r].cap <= 0) ? `${lifts ? " " : ""}A limit of 0 lifts only when runsPerDay in policy.json is raised.` : ""]);
+    }
+  }
+  if (!d.prs) unread.push("the open PRs");
+  else if (d.stats) {
+    // Only the coder's gate applies maxOpenPrs; it counts every open PR labelled agent:pr, as d.prs does.
+    const full = roles((s) => typeof s.max_open_prs === "number" && d.prs.length >= s.max_open_prs).filter((r) => r === "coder");
+    if (full.length) {
+      add("Open-PR limit reached", full.map((r) => `${r}: ${d.prs.length} open agent PRs, at most ${stats[r].max_open_prs}.`).join(" "),
+        "When an agent PR merges or is closed.");
+    }
+  }
+  if (!d.issues || !d.active_runs || !d.prs) unread.push("the issues or runs (locks)");
+  else {
+    // An agent's label still on an issue or PR with no run of that agent active: the run ended without
+    // releasing its lock, and the hourly sweep puts the item back once the lock expires. As the sweep
+    // (agent-sweep.sh): it waits while a coder run, or a dispatched fixer run, is in progress, and it
+    // leaves an item on agent:hold alone, so those are not listed as moving at the sweep.
+    const inProgress = (agent, event) => d.active_runs.some((r) => r.agent === agent && r.status === "in_progress" && (!event || r.event === event));
+    const free = (x) => !(x.labels || []).includes("agent:hold");
+    const held = [
+      ...(inProgress("coder") ? [] : d.issues.in_progress.filter(free).map((i) => link(i.url, `#${i.number} ${i.title}`))),
+      ...(inProgress("fixer", "workflow_dispatch") ? [] : d.prs.filter((p) => free(p) && (p.labels || []).includes("agent:fixing"))
+        .map((p) => link(p.url, `PR #${p.number} ${p.title}`)))];
+    if (held.length) {
+      add("Locked, no run", [`${held.length === 1 ? "Marked" : `${held.length} marked`} in progress with no run of its agent holding it: `,
+        held.map((x, i) => [i ? ", " : "", x])], "At the first hourly sweep after its lock expires.");
+    }
+  }
+  return { rows, unread };
+}
+
+function stillRow(x) {
+  return h("div", { class: "lrow" },
+    h("div", { class: "lmeta" }, routeLink(repoRoute(x.repo), { title: x.repo }, short(x.repo))),
+    h("div", { class: "ltitle" }, h("strong", {}, x.cause), " ", x.what),
+    h("div", { class: "lhint" }, "Moves: ", x.moves));
+}
+function runningRow({ repo, d, r }) {
+  return h("div", { class: "lrow arow" },
+    h("div", {},
+      h("div", { class: "lmeta" }, `${short(repo)} · ${r.agent} · ${r.event || "?"}${r.created_at ? ` · started ${ago(r.created_at)}` : ""}`),
+      h("div", { class: "ltitle" }, link(r.url, r.name || String(r.id)), " ", pill(r.status || "?", "attn"))),
+    cancelBtn(repo, d)(r));
+}
+function finishedRow({ repo, d, r }) {
+  const num = (n) => /^[0-9]+$/.test(String(n ?? ""));
+  const target = num(r.pr) ? link(`${d.url}/pull/${r.pr}`, `PR #${r.pr}`) : (num(r.issue) ? link(`${d.url}/issues/${r.issue}`, `#${r.issue}`) : null);
+  const outcome = r.outcome || "?";
+  return h("div", { class: "lrow" },
+    h("div", { class: "lmeta" }, `${short(repo)} · ${r.role || "?"} · ${hhmm(r.ended_at || r.started_at)}${typeof r.cost_usd === "number" ? ` · ${usd(r.cost_usd)}` : ""}`),
+    h("div", { class: "ltitle" }, target, target ? " · " : null, r.run_url ? link(r.run_url, outcome) : outcome),
+    r.reason ? h("div", { class: "lhint" }, oneLine(r.reason, 160)) : null);
+}
+
 function activityView() {
   const c = counts();
-  const blocks = (state.session ? state.session.repos : []).map((repo) => {
+  const repos = state.session ? state.session.repos : [];
+  const loading = repos.filter((repo) => !state.repos[repo] || state.repos[repo].loading);
+  const running = [], still = [], done = [];
+  const unread = { running: [], still: [], done: [] };
+  for (const repo of repos) {
     const d = state.repos[repo];
-    if (!d || d.loading) return null;
-    if (d.failed) return h("div", { class: "group" }, repoHeading(repo), empty(`Could not read this repository: ${d.failed}`));
-    if (d.active_runs && !d.active_runs.length) return null;
-    return h("div", { class: "group" }, repoHeading(repo), runsTable(d.active_runs, cancelBtn(repo, d)));
-  }).filter(Boolean);
-  return [viewHead("Activity", `Gatehand's runs that are running or waiting to start · ${c.runningText}`),
-    blocks.length ? blocks : empty(c.loading ? "Loading…" : "Nothing is running.")];
+    if (!d || d.loading) continue;
+    if (d.failed) { for (const k of Object.keys(unread)) unread[k].push([repo, `could not read this repository: ${d.failed}`]); continue; }
+    if (d.active_runs) running.push(...d.active_runs.map((r) => ({ repo, d, r })));
+    else unread.running.push([repo, "could not read its Actions runs"]);
+    const s = stillRows(repo, d);
+    still.push(...s.rows);
+    if (s.unread.length) unread.still.push([repo, `could not read ${s.unread.join(", ")}`]);
+    // The ledger: a row per agent run, written when the run ends.
+    if (d.runs) done.push(...d.runs.filter((r) => r && isToday(r.ended_at || r.started_at)).map((r) => ({ repo, d, r })));
+    else unread.done.push([repo, "could not read the ledger"]);
+  }
+  const at = (x) => String(x.r.ended_at || x.r.started_at || x.r.created_at || "");
+  const newest = (a, b) => (at(a) < at(b) ? 1 : at(a) > at(b) ? -1 : 0);
+  const section = (title, rows, notes, none) => h("section", { class: "act" },
+    h("h3", {}, `${title} · ${atLeast(rows.length, notes.length > 0, loading.length > 0)}`),
+    h("div", { class: "alist" }, rows,
+      notes.map(([repo, text]) => h("div", { class: "lrow unread" },
+        h("div", { class: "lmeta" }, routeLink(repoRoute(repo), { title: repo }, short(repo)), ` · ${text} · not counted`))),
+      rows.length || notes.length ? null : (loading.length ? empty("Loading…") : none)));
+  return [viewHead("Activity", c.runningText, loading.length ? ` · still loading ${loading.map(short).join(", ")}` : ""),
+    section("Running now", running.sort(newest).map(runningRow), unread.running, [empty("Nothing is running."), nextRunsLine(repos)]),
+    section("Not moving and not waiting on you", still.map(stillRow), unread.still, empty("Nothing is held up.")),
+    section("Finished today", done.sort(newest).map(finishedRow), unread.done, empty("No agent run finished today."))];
 }
 
 // --- Week: seven days of cost against the weekly budget kept on this machine ---------------------------
@@ -1481,25 +1733,6 @@ function actBtn(text, blocked, onclick, kind) {
     onclick: (e) => { e.preventDefault(); e.stopPropagation(); onclick(e.currentTarget); } }, text);
 }
 
-async function act(repo, payload, question, btn) {
-  if (!(await ask(question))) return null;
-  if (btn) btn.disabled = true;
-  try {
-    const out = await api("/api/action", { method: "POST", body: Object.assign({ repo, viewer: state.session.viewer }, payload) });
-    if (out.posted) watchAnswer(repo, payload.req);
-    notice(out.posted
-      ? `Posted “${out.posted}” on the inbox (#${out.inbox}). The Agent inbox workflow applies it within a minute or two; this page checks back.`
-      : `Done: ${out.done}.`);
-    await loadRepo(repo, true);
-    return out;
-  } catch (e) {
-    notice(`Not done: ${e.message}`);
-    if (btn) btn.disabled = false;
-    loadRepo(repo, true);
-    return null;
-  }
-}
-
 // Runs, verdicts and switches: the server first says exactly what it would do (the GitHub calls, the
 // comment, what to expect, anything in the way) and hands back a one-time token; the action is done
 // only with that token, and only if nothing changed in between.
@@ -1571,55 +1804,7 @@ const KIND_APPROVE = {
 };
 const SEEN_ONLY = new Set(["fixer", "merger", "review"]);
 
-function requestActions(repo, d, r) {
-  if (r.answered) return null;
-  const blocked = r.pending ? "Your answer is posted; waiting for the Agent inbox workflow to apply it." : answerBlock(d);
-  const [text, effect] = KIND_APPROVE[r.kind] || ["Approve", "the repository's own hook for this kind of request runs"];
-  const approve = actBtn(text, blocked, async (b) => {
-    await act(repo, { type: "inbox_command", command: "approve", req: r.id },
-      `Post “/approve ${r.id}” on the inbox as ${state.session.viewer}?\n\nWhat happens: ${effect}.`, b);
-  }, "primary");
-  if (SEEN_ONLY.has(r.kind)) return h("div", { class: "actions" }, approve);
-  const rejectEffect = r.kind === "breaker" ? `the ${r.role} stays stopped`
-    : KIND_APPROVE[r.kind] ? `#${r.issue} stays as it is, gets the reason as a comment, and loses agent:needs-human`
-      : "the repository's own hook for this kind of request decides";
-  const reject = actBtn("Reject…", blocked, async (b) => {
-    const reason = await ask(`Reject ${r.id}. Reason (optional, one line of at most 300 characters):`, "");
-    if (reason === null) return;
-    const line = `/reject ${r.id} ${oneLine(reason, 300)}`.trimEnd();
-    await act(repo, { type: "inbox_command", command: "reject", req: r.id, reason },
-      `Post “${line}” on the inbox as ${state.session.viewer}?\n\nWhat happens: ${rejectEffect}.`, b);
-  });
-  return h("div", { class: "actions" }, approve, reject);
-}
-
-function labelBtn(repo, d, n, op, label, text, why) {
-  return actBtn(text, labelBlock(d), (b) => act(repo, { type: "label", op, label, number: n },
-    `${op === "add" ? "Add" : "Remove"} ${label} ${op === "add" ? "to" : "from"} #${n} as ${state.session.viewer}?\n\n${why}`, b));
-}
-function rerunBtn(repo, d, n) {
-  // An `untrusted` request: someone without write access changed the issue's text since a person
-  // queued it. /rerun re-labels as the bot, which vouches for nothing, so the run would be refused
-  // again: a person reads the issue and re-applies agent:ready on GitHub first.
-  const got = state.inbox[repo];
-  const untrusted = got && got.requests && got.requests.some((r) => r.kind === "untrusted" && !r.answered && r.issue === n);
-  return actBtn("Rerun coder", untrusted
-    ? `#${n}'s text was changed by someone without write access: read it on GitHub and re-apply agent:ready there, then Acknowledge its untrusted request; a rerun before that would be refused.`
-    : answerBlock(d), (b) => act(repo, { type: "inbox_command", command: "rerun", issue: n },
-    `Post “/rerun coder #${n}” on the inbox as ${state.session.viewer}?\n\nWhat happens: #${n} goes back in the queue (agent:blocked and agent:needs-human come off) and the coder starts on it.`, b));
-}
 const HOLD = "Agents never touch an issue or PR while it carries agent:hold.";
-
-function issueList(list, emptyText, actions) {
-  if (!list) return empty("Could not read the issues.");
-  if (!list.length) return empty(emptyText);
-  return h("ul", { class: "items" }, list.map((i) => h("li", {},
-    link(i.url, `#${i.number} ${i.title}`), " ",
-    i.priority ? pill(i.priority) : null,
-    i.labels.filter((l) => l.startsWith("agent:") && !["agent:ready", "agent:pr"].includes(l)).map((l) => pill(l, "label")),
-    h("span", { class: "muted" }, ` · updated ${ago(i.updated_at)}`),
-    actions ? h("span", { class: "actions inline" }, actions(i)) : null)));
-}
 
 function runsTable(list, cancel) {
   if (!list) return empty("Could not read the Actions runs.");
@@ -1633,58 +1818,8 @@ function runsTable(list, cancel) {
       cancel ? h("td", {}, cancel(r)) : null)))));
 }
 
-function switchesBlock(repo, d) {
-  const why = d.vars ? writerBlock(d) : "Cannot read this repository's variables.";
-  const row = (name, label, on, offText, onText) => {
-    const cur = d.vars ? d.vars[name] : undefined;
-    const isOn = cur === "true";
-    return h("li", {}, h("strong", {}, label), " ",
-      !d.vars ? pill("unknown", "warn") : (isOn ? pill(on, "ok") : pill(offText, "off")),
-      h("span", { class: "muted" }, ` ${name} = ${cur === undefined ? "?" : (cur === null ? "not set" : cur)}`),
-      h("span", { class: "actions inline" }, actBtn(isOn ? `Turn ${label.toLowerCase()} off` : `Turn ${label.toLowerCase()} on`, why,
-        (b) => previewAct(repo, { type: "set_variable", name, value: isOn ? "false" : "true" }, b), isOn ? "quiet" : "primary")),
-      h("div", { class: "gate" }, onText));
-  };
-  return h("ul", { class: "items" },
-    row("AGENTS_ENABLED", "Agents", "on", "off", "Off stops the coder, fixer, merge gate, sweep and triage; the inbox, the Claude review of new PRs, the PR guard and the digest still run."),
-    row("AGENT_AUTO_MERGE", "Auto-merge", "live", "dry run", "Off, the merge gate only reports what it would merge."));
-}
-
 function cancelBtn(repo, d) {
   return (r) => actBtn("Cancel", writerBlock(d), (b) => previewAct(repo, { type: "cancel_run", run: r.id }, b));
-}
-
-// A verdict on an agent PR, as the merge gate and the fixer read one from a person with write access.
-// Request changes needs a note, kept as a draft across re-renders.
-function verdictActions(repo, d, p) {
-  const key = `${repo}#${p.number}`;
-  const draft = state.drafts[key];
-  const why = writerBlock(d);
-  return [
-    actBtn("Approve…", why, (b) => previewAct(repo, { type: "review_verdict", pr: p.number, verdict: "approve" }, b), "primary"),
-    actBtn(draft ? "Close the note" : "Request changes…", why, () => {
-      if (draft) delete state.drafts[key]; else state.drafts[key] = { note: "", fixer: true };
-      renderView();
-    }),
-    actBtn("Run review", why, (b) => previewAct(repo, { type: "dispatch", workflow: "review", pr: p.number }, b)),
-    actBtn("Run merge gate", why, (b) => previewAct(repo, { type: "dispatch", workflow: "merge", pr: p.number }, b)),
-  ];
-}
-function verdictForm(repo, p) {
-  const key = `${repo}#${p.number}`;
-  const draft = state.drafts[key];
-  if (!draft) return null;
-  const note = h("textarea", { rows: 4, maxlength: 2000, placeholder: "What to change (plain text: no HTML, no ``` fences). The fixer works from this.",
-    oninput: (e) => { draft.note = e.target.value; } });
-  note.value = draft.note;
-  const fixer = h("input", { type: "checkbox", onchange: (e) => { draft.fixer = e.target.checked; } });
-  fixer.checked = draft.fixer;
-  return h("form", { class: "verdict", onsubmit: async (e) => {
-    e.preventDefault();
-    const done = await previewAct(repo, { type: "review_verdict", pr: p.number, verdict: "request-changes", note: draft.note, start_fixer: draft.fixer },
-      e.currentTarget.querySelector("button"));
-    if (done) { delete state.drafts[key]; renderView(); }
-  } }, note, h("label", {}, fixer, " Start the fixer on it"), h("button", { type: "submit", class: "small" }, "Request changes…"));
 }
 
 function ledgerTables(d) {
@@ -1711,90 +1846,165 @@ function ledgerTables(d) {
   return [h("div", { class: "scroll" }, summary), detail];
 }
 
-function breakerList(repo, d) {
-  if (d.breakers === null || d.breakers === undefined) return empty("Could not read the breaker state.");
-  // Every role in policy.json, with its breaker if it has stepped.
-  const roles = [...new Set([...Object.keys((d.policy && d.policy.roles) || {}), ...Object.keys(d.breakers)])].sort();
-  if (!roles.length) return empty("No roles.");
-  return h("ul", { class: "items" }, roles.map((role) => {
-    const b = d.breakers[role] && typeof d.breakers[role] === "object" ? d.breakers[role] : {};
-    const stopped = !!b.tripped_at;
-    const cmd = stopped ? "resume" : "pause";
-    return h("li", {},
-      h("strong", {}, role), " ",
-      stopped ? pill(`stopped since ${String(b.tripped_at).slice(0, 16).replace("T", " ")} UTC`, "bad") : pill("running", "ok"),
-      ` ${b.consecutive || 0} failure(s) in a row`,
-      b.reason ? h("span", { class: "muted" }, ` · ${b.reason}`) : null,
-      b.last_outcome ? h("span", { class: "muted" }, ` · last: ${b.last_outcome}`) : null,
-      d.policy && d.policy.roles && d.policy.roles[role] ? h("span", { class: "actions inline" },
-        actBtn(stopped ? "Resume" : "Pause", answerBlock(d), (btn) => act(repo, { type: "inbox_command", command: cmd, role },
-          `Post “/${cmd} ${role}” on the inbox as ${state.session.viewer}?\n\nWhat happens: ${stopped
-            ? `the ${role}'s circuit breaker is reset and it runs again.` : `the ${role} stops until someone sends /resume ${role}.`}`, btn))) : null);
-  }));
+// --- a repository's four tabs: Pipeline, Agents, Runs and spend, Settings ---------------------------------
+// Lists route; they do not act. A thing with a pane in Needs you (a request, a stopped role, a held PR,
+// a blocked issue, to merge, to close) opens that pane. Only what has no pane is acted on here: pause a
+// running role, the two switches, unqueue, hold and release an issue, start the coder, run the merge
+// gate, cancel a run, the quieter actions on an agent PR nobody holds, and a request the inbox's
+// checklist missed. Each opens the same confirm as a pane, under its own button (paneActions).
+
+// The Needs you row for something on these tabs, if it has one. The rows are worked out once per
+// render of a tab (repoView), not once per thing listed.
+let tabRows = { repo: "", rows: [] };
+function needRowFor(repo, test) {
+  if (tabRows.repo !== repo) tabRows = { repo, rows: needRows(repo).rows };
+  return tabRows.rows.find(test) || null;
+}
+const rowAbout = (repo, n, pr) => needRowFor(repo, (x) => (pr ? x.pr === n
+  : x.issue === n || (x.req && x.req.issue === n && x.kind === "request")));
+function openItem(row) {
+  return row ? h("div", { class: "lhint" }, row.title, " · ", routeLink(needsRoute("", row.key), { class: "open-item" }, "Open item →")) : null;
+}
+// A place on this page that acts: a key of its own in state.pane, never a Needs you row's. The action
+// ids are made unique on the page, so only the confirm of the button pressed opens. Its time is when
+// the repository was read: what was done from it is said until a read a minute or more later.
+// A command still waiting for its answer is kept until watchAnswer replaces it.
+function spot(repo, id, extra) {
+  const key = `${repo}|here|${id}`;
+  const waiting = state.paneMsg[key] && state.paneMsg[key].kind === "waiting";
+  return Object.assign({ repo, key, at: waiting ? "" : (state.repos[repo] || {}).fetched_at || "" }, extra);
+}
+function spotActs(r, acts, beside) {
+  return paneActions(r, acts.map((a) => Object.assign({}, a, { id: `${r.key}|${a.id}` })), beside, { quiet: true });
+}
+// Why every button of a list is disabled, said once above it (a quiet button keeps it in its title).
+const offNote = (why) => (why ? h("p", { class: "muted" }, why) : null);
+
+// Times on this machine's clock: "18:11" today, else "Nov 16 18:11".
+function clock(iso) {
+  const t = Date.parse(iso);
+  if (!isFinite(t)) return "";
+  const day = new Date(t);
+  return day.toDateString() === new Date().toDateString() ? hhmm(t) : `${day.toLocaleDateString([], { month: "short", day: "numeric" })} ${hhmm(t)}`;
+}
+// A workflow's next scheduled run, as the server read it from the workflow file; "" when it has no
+// schedule, the file could not be read, or its cron could not be followed. Never a guess.
+function nextRun(d, key) {
+  const s = d.schedules && d.schedules[key];
+  if (!s || typeof s !== "object" || !s.next_run) return "";
+  return Date.parse(s.next_run) <= Date.now() ? "due now" : clock(s.next_run);
+}
+function cronText(d, key) {
+  const s = d.schedules ? d.schedules[key] : undefined;
+  if (s === null) return "no schedule";
+  return s && typeof s === "object" ? `${s.cron.join(" · ")} (UTC)` : "?";
+}
+// A limit from policy.json, or null where it does not set one (then "n", never "n of" a default).
+function limit(d, role, key) {
+  const v = d.policy && d.policy.roles && d.policy.roles[role] ? d.policy.roles[role][key] : null;
+  return typeof v === "number" ? v : null;
+}
+const ofCap = (n, cap) => (cap === null ? `${n}` : `${n} of ${cap}`);
+const fig = (k, v) => h("span", {}, h("span", { class: "k" }, k), v);
+const breakerOf = (d, role) => (d.breakers && d.breakers[role] && typeof d.breakers[role] === "object" ? d.breakers[role] : {});
+
+// When a role runs next, by the run gate's rules (agent-state.sh gate_decide) in its order; "" as soon
+// as one it needs could not be read, never a time the gate might refuse. runner_ref compares the
+// coder's workflow only, so it says nothing of the fixer's (agent-fixup.yml): the fixer gets its
+// reasons not to run, never a promise that it will. AGENT_BOT_ID is not read; nor is it checked here.
+function roleNext(d, role) {
+  const coder = role === "coder";
+  const s = d.stats ? d.stats[role] || { today: 0 } : null;
+  const cap = limit(d, role, "runsPerDay");
+  const maxPrs = coder ? limit(d, role, "maxOpenPrs") : null; // the fixer's gate ignores the open-PR limit
+  const queued = d.issues ? d.issues.ready.filter((i) => !i.labels.includes("agent:hold")).length : null;
+  const runner = (d.policy && d.policy.runnerRef) || "the runner branch";
+  if (!d.vars) return "";
+  if (d.vars.AGENTS_ENABLED !== "true") return "none while the agents are off";
+  if (coder && (d.runner_ref === "stale" || d.runner_ref === "missing")) return `none until ${runner} matches ${d.default_branch || "the default branch"}`;
+  if (coder && (d.runner_ref !== "ok" || (d.policy && d.policy.runnerRef === d.default_branch))) return "";
+  if (!d.breakers) return "";
+  if (breakerOf(d, role).tripped_at) return `none until it is reset${role === "coder" && queued !== null ? ` · ${queued} queued` : ""}`;
+  if (cap !== null && !s) return "";
+  if (s && cap !== null && s.today >= cap) return "none today: the daily limit is used";
+  if (maxPrs !== null && !d.prs) return "";
+  if (maxPrs !== null && d.prs.length >= maxPrs) return "none until an agent PR closes";
+  if (d.policy_ok === false) return ""; // its limits unread: the gate may refuse on them
+  if (coder) return d.schedules && d.schedules.coder === null ? "only when started" : (nextRun(d, "coder") ? `next run ${nextRun(d, "coder")}` : "");
+  return "";
 }
 
-function inboxBlock(repo, d) {
+// An issue list where each issue may carry a route to its item, or its own actions under it.
+function issueRows(list, emptyText, after) {
+  if (!list) return empty("Could not read the issues.");
+  if (!list.length) return empty(emptyText);
+  return list.map((i) => h("div", { class: "spot" },
+    h("div", {}, link(i.url, `#${i.number} ${i.title}`), " ", i.priority ? pill(i.priority) : null,
+      i.labels.filter((l) => l.startsWith("agent:") && !["agent:ready", "agent:pr"].includes(l)).map((l) => pill(l, "label")),
+      h("span", { class: "muted" }, ` · updated ${ago(i.updated_at)}`)),
+    after ? after(i) : null));
+}
+function holdAct(r, d, n, held, what) {
+  return labelAct(r, { id: "hold", number: n, text: held ? "Release" : "Hold", title: `${held ? "Release" : "Hold"} ${what}?`, off: labelBlock(d),
+    labels: [[held ? "remove" : "add", "agent:hold"]], postText: held ? "Take agent:hold off" : "Add agent:hold",
+    lines: [["Then", held ? "The agents may pick it up again." : HOLD]], doneText: `Done: ${held ? "took agent:hold off" : "added agent:hold to"} ${what}.` });
+}
+
+function requestList(repo, d) {
   if (!d.inbox) return d.inbox_state === "unknown" ? h("p", { class: "warn" }, "Could not tell which issue is the inbox; see above.") : empty("No inbox issue found.");
   const got = state.inbox[repo];
   const head = h("p", {}, link(d.inbox.url, `Inbox issue #${d.inbox.number}`),
     d.owner_login ? h("span", { class: "muted" }, ` · answered only by ${d.owner_login}`) : null);
   if (!got) return [head, empty("Loading requests…")];
   if (got.error) return [head, h("p", { class: "bad" }, got.error)];
-  const open = got.requests.filter((r) => !r.answered);
-  const done = got.requests.filter((r) => r.answered).slice(0, 10);
-  const one = (r) => h("div", { class: "req" }, h("details", {},
-    h("summary", {}, h("code", {}, r.id), " ", pill(r.kind), " ", `${r.role} · `,
-      r.issue ? link(`${d.url}/issues/${r.issue}`, `#${r.issue}`) : "no issue", h("span", { class: "muted" }, ` · ${ago(r.created_at)}`)),
-    h("pre", { class: "body" }, r.body),
-    h("p", {}, link(r.url, "The request on GitHub"))),
-    requestActions(repo, d, r));
-  const why = answerBlock(d);
+  const open = got.requests.filter((q) => !q.answered);
+  const done = got.requests.filter((q) => q.answered).slice(0, 10);
+  // An open request is answered from its item; one the checklist missed has no item, so it is answered here.
+  const rowOf = (q) => needRowFor(repo, (x) => (x.req && x.req.id === q.id) || (x.reqs || []).some((y) => y.id === q.id));
+  let here = 0;
+  const one = (q, answered) => {
+    const row = answered ? null : rowOf(q);
+    const r = spot(repo, `req|${q.id}`, { req: q });
+    if (!answered && !row) here += 1;
+    return h("div", { class: "req" }, h("details", {},
+      h("summary", {}, h("code", {}, q.id), " ", pill(q.kind), " ", `${q.role} · `,
+        q.issue ? link(`${d.url}/issues/${q.issue}`, `#${q.issue}`) : "no issue", h("span", { class: "muted" }, ` · ${ago(q.created_at)}`)),
+      h("pre", { class: "body" }, q.body),
+      h("p", {}, link(q.url, "The request on GitHub"))),
+    answered ? null : (row ? openItem(row) : spotActs(r, requestActs(r, d, q))));
+  };
+  const rows = open.map((q) => one(q, false));
+  const why = here ? answerBlock(d) : "";
   return [head,
-    open.length && why ? h("p", { class: "muted" }, why) : null,
     got.truncated ? h("p", { class: "warn" }, "Only the newest 1,000 inbox comments were read.") : null,
-    open.length ? open.map(one) : empty("No open requests."),
-    done.length ? h("details", {}, h("summary", { class: "muted" }, `${done.length} recently answered`), done.map(one)) : null];
+    offNote(why),
+    rows.length ? rows : empty("No open requests."),
+    done.length ? h("details", {}, h("summary", { class: "muted" }, `${done.length} recently answered`), done.map((q) => one(q, true))) : null];
 }
 
-function prBlock(repo, d) {
+function prList(repo, d) {
   if (!d.prs) return empty("Could not read the PRs.");
   if (!d.prs.length) return empty("No open agent PRs.");
   const gate = state.gate[repo];
+  let here = 0;
+  const rows = d.prs.map((p) => {
+    const row = needRowFor(repo, (x) => (x.kind === "pr" || x.kind === "merge") && x.pr === p.number);
+    const r = spot(repo, `pr|${p.number}`);
+    if (!row) here += 1;
+    return h("div", { class: "spot" },
+      h("div", {}, link(p.url, `PR #${p.number} ${p.title}`), " ",
+        p.labels.filter((l) => l.startsWith("agent:") && l !== "agent:pr").map((l) => pill(l, "label")),
+        h("span", { class: "muted" }, ` · opened ${ago(p.created_at)}`)),
+      gateLine(gate, p.number),
+      row ? openItem(row) : spotActs(r, prSideActs(r, d, p, { approve: true })));
+  });
   return [
     gate && gate.run ? h("p", { class: "muted" }, "Merge gate, newest run that ran ", link(gate.run.url, ago(gate.run.created_at)),
       "; each PR's line is from the newest run that reported it.") : null,
     gate && gate.error ? h("p", { class: "warn" }, `Merge gate report unreadable: ${gate.error}`) : null,
     gate && gate.note ? h("p", { class: "muted" }, `Merge gate: ${gate.note}.`) : null,
-    h("div", { class: "actions" }, actBtn("Run the merge gate on every agent PR", writerBlock(d),
-      (b) => previewAct(repo, { type: "dispatch", workflow: "merge" }, b))),
-    h("ul", { class: "items" }, d.prs.map((p) => h("li", {},
-      link(p.url, `PR #${p.number} ${p.title}`), " ",
-      p.labels.filter((l) => l.startsWith("agent:") && l !== "agent:pr").map((l) => pill(l, "label")),
-      h("span", { class: "muted" }, ` · opened ${ago(p.created_at)}`),
-      h("span", { class: "actions inline" }, prActions(repo, d, p)),
-      gateLine(gate, p.number),
-      verdictForm(repo, p))))];
-}
-
-function prActions(repo, d, p) {
-  const stuck = p.labels.filter((l) => l === "agent:blocked" || l === "agent:needs-human");
-  const out = [];
-  if (stuck.length) {
-    out.push(actBtn("Hand back to the merge gate", labelBlock(d), async (b) => {
-      if (!(await ask(`Remove ${stuck.join(" and ")} from PR #${p.number} as ${state.session.viewer}?\n\nDo this once you have fixed the PR yourself: the merge gate and the fixer pick it up again.`))) return;
-      b.disabled = true;
-      for (const label of stuck) {
-        try { await api("/api/action", { method: "POST", body: { repo, viewer: state.session.viewer, type: "label", op: "remove", label, number: p.number } }); }
-        catch (e) { notice(`Not done: ${e.message}`); b.disabled = false; loadRepo(repo, true); return; }
-      }
-      notice(`Done: PR #${p.number} is back with the merge gate.`);
-      loadRepo(repo, true);
-    }));
-  }
-  out.push(p.labels.includes("agent:hold")
-    ? labelBtn(repo, d, p.number, "remove", "agent:hold", "Release", "The fixer and the merge gate pick it up again.")
-    : labelBtn(repo, d, p.number, "add", "agent:hold", "Hold", HOLD));
-  return out.concat(verdictActions(repo, d, p));
+    offNote(here ? writerBlock(d) : ""),
+    rows];
 }
 
 function gateLine(gate, n) {
@@ -1803,52 +2013,257 @@ function gateLine(gate, n) {
   return h("div", { class: "gate" }, "Gate ", link(g.url, ago(g.at)), `: ${g.text}`);
 }
 
-// A repository's four tabs. Every list and button the page had is on one of them.
+// The agents are off: said above the rows, which stay. Counts only of what was read.
+function agentsOffState(repo, d) {
+  const n = (v, one, many) => `${v} ${v === 1 ? one : many}`;
+  const queued = d.issues ? d.issues.ready.filter((i) => !i.labels.includes("agent:hold")).length : 0; // a held one waits on its hold
+  const parts = [queued ? n(queued, "queued issue", "queued issues") : "", d.prs && d.prs.length ? n(d.prs.length, "open PR", "open PRs") : ""].filter(Boolean);
+  return h("div", { class: "state off" }, h("strong", {}, `The agents are off in ${short(repo)}.`),
+    h("div", {}, `The coder, fixer, merge gate, sweep and triage skip their runs.${parts.length ? ` ${parts.join(" and ")} wait.` : ""} Your inbox answers still work.`),
+    h("div", {}, routeLink(repoRoute(repo, "settings"), {}, "Turn agents on in Settings →")));
+}
+// Nothing queued: the page never queues, so it says where that is done.
+function nothingQueued(repo, d) {
+  const c = d.issues.candidate.length;
+  return h("div", { class: "state off" }, h("strong", {}, `Nothing is queued in ${short(repo)}.`),
+    h("div", {}, "The page never queues work: you add agent:ready to an issue on GitHub, next to its text."),
+    c ? h("div", {}, link(`${d.url}/issues?q=is%3Aopen+label%3Aagent%3Acandidate`, `${c} suggested ${c === 1 ? "issue" : "issues"} on GitHub ↗`)) : null);
+}
+
 function pipelineTab(repo, d) {
   const i = d.issues;
+  const s = d.stats && d.stats.coder;
+  const next = roleNext(d, "coder");
+  const off = d.vars && d.vars.AGENTS_ENABLED !== "true";
   return [
-    h("h3", {}, "Inbox requests"), inboxBlock(repo, d),
-    h("h3", {}, "Agent PRs"), prBlock(repo, d),
+    off ? agentsOffState(repo, d) : null,
+    h("h3", {}, "Inbox requests"), requestList(repo, d),
+    h("h3", {}, "Agent PRs"), prList(repo, d),
     h("h3", {}, "Queue"),
-    i && i.ready && i.ready.length ? h("div", { class: "actions" }, actBtn("Start the coder on the next one", writerBlock(d),
-      (b) => previewAct(repo, { type: "dispatch", workflow: "coder" }, b))) : null,
-    issueList(i && i.ready, "Nothing is queued for the coder.", (x) => [
-      labelBtn(repo, d, x.number, "remove", "agent:ready", "Unqueue", "The coder no longer picks it."),
-      x.labels.includes("agent:hold") ? null : labelBtn(repo, d, x.number, "add", "agent:hold", "Hold", HOLD)]),
-    h("h3", {}, "In progress"), issueList(i && i.in_progress, "Nothing."),
-    h("h3", {}, "Blocked or waiting on a person"), issueList(i && i.blocked, "Nothing.", (x) => [rerunBtn(repo, d, x.number),
-      x.labels.includes("agent:hold") ? null : labelBtn(repo, d, x.number, "add", "agent:hold", "Hold", HOLD)]),
+    h("p", { class: "muted" }, [next ? `Coder: ${next}` : "", s ? `today ${ofCap(s.today, limit(d, "coder", "runsPerDay"))} runs` : ""].filter(Boolean).join(" · "),
+      " ", routeLink(repoRoute(repo, "agents"), {}, "Start the coder on Agents →")),
+    i && i.ready && i.ready.length ? offNote(labelBlock(d)) : null,
+    i && i.ready && !i.ready.length ? nothingQueued(repo, d) : issueRows(i && i.ready, "", (x) => {
+      const r = spot(repo, `queue|${x.number}`);
+      return [off && !x.labels.includes("agent:hold") ? h("div", { class: "lhint" }, "Waiting on: agents off") : null, spotActs(r, [labelAct(r, { id: "unqueue", number: x.number, text: "Unqueue", title: `Unqueue #${x.number}?`, off: labelBlock(d),
+        labels: [["remove", "agent:ready"]], postText: "Take agent:ready off", lines: [["Then", "The coder no longer picks it."]],
+        doneText: `Done: took agent:ready off #${x.number}.` }),
+      x.labels.includes("agent:hold") ? null : holdAct(r, d, x.number, false, `#${x.number}`)].filter(Boolean))];
+    }),
+    h("h3", {}, "In progress"), issueRows(i && i.in_progress, "Nothing."),
+    h("h3", {}, "Blocked or waiting on a person"), issueRows(i && i.blocked, "Nothing.", (x) => openItem(rowAbout(repo, x.number))),
     // Queueing is done on GitHub, next to the issue's text: agent:ready vouches for that text as it
     // stands, and this page does not show it.
-    h("h3", {}, "Candidates"), issueList(i && i.candidate, "None.", (x) => x.labels.includes("agent:ready") ? null
-      : h("a", { href: x.url, class: "button-link", title: "agent:ready makes the agents trust the issue's text as it is now: read it, then add the label there." }, "Read and queue on GitHub")),
-    h("h3", {}, "On hold"), issueList(i && i.hold, "None.", (x) => labelBtn(repo, d, x.number, "remove", "agent:hold", "Release", "The agents may work on it again.")),
-    h("h3", {}, "Merged, to close once live"), issueList(i && i.done_pending_deploy, "None.")];
+    h("h3", {}, "Candidates"), issueRows(i && i.candidate, "None.", (x) => (x.labels.includes("agent:ready") ? null
+      : h("div", { class: "actions" }, h("a", { href: x.url, class: "button-link", title: "agent:ready makes the agents trust the issue's text as it is now: read it, then add the label there." }, "Read and queue on GitHub")))),
+    // Only the issue's own pane has Release; a request's or a to-close pane does not, so those keep it here.
+    h("h3", {}, "On hold"), issueRows(i && i.hold, "None.", (x) => {
+      const row = rowAbout(repo, x.number);
+      if (row && row.kind === "issue") return openItem(row);
+      const r = spot(repo, `hold|${x.number}`);
+      return [openItem(row), spotActs(r, [holdAct(r, d, x.number, true, `#${x.number}`)])];
+    }),
+    h("h3", {}, "Merged, to close once live"), issueRows(i && i.done_pending_deploy, "None.", (x) => openItem(needRowFor(repo, (y) => y.kind === "close" && y.issue === x.number)))];
 }
+
+// The workflows that run on a schedule or an event, by their key in `schedules` and their name in runs.
+const SCHEDULED_WF = [
+  { key: "coder", agent: "coder" }, { key: "merge", agent: "merge gate" }, { key: "sweep", agent: "sweep" },
+  { key: "", agent: "review", when: "when a PR opens or is marked ready, and when the fixer or merge gate asks for one" }, { key: "digest", agent: "digest" }, { key: "triage", agent: "triage" }];
+// The ones AGENTS_ENABLED stops (bin/dashboard.py SWITCHES).
+const SWITCHED = new Set(["coder", "merge gate", "sweep", "triage"]);
+
 function agentsTab(repo, d) {
-  return [h("h3", {}, "Breakers"), breakerList(repo, d),
-    h("h3", {}, "Running now"), runsTable(d.active_runs, cancelBtn(repo, d))];
+  const known = !!d.breakers;
+  const off = d.vars && d.vars.AGENTS_ENABLED !== "true";
+  const roles = [...new Set([...Object.keys((d.policy && d.policy.roles) || {}), ...Object.keys(d.breakers || {})])].sort();
+  const roleBlock = (role) => {
+    const b = breakerOf(d, role);
+    const stopped = !!b.tripped_at;
+    const paused = b.reason === "paused by the owner";
+    const s = d.stats ? d.stats[role] || { today: 0 } : null;
+    const maxPrs = limit(d, role, "maxOpenPrs");
+    const running = (d.active_runs || []).filter((x) => x.agent === role);
+    const next = roleNext(d, role);
+    const row = needRowFor(repo, (x) => x.kind === "role" && x.role === role);
+    const inPolicy = !!(d.policy && d.policy.roles && d.policy.roles[role]);
+    const r = spot(repo, `role|${role}`);
+    return h("div", { class: "spot" },
+      h("div", { class: "spot-head" }, h("strong", {}, role),
+        !known ? pill("state unknown", "warn") : (stopped ? pill(`${paused ? "Paused" : "Stopped"} ${clock(b.tripped_at)}`, "bad")
+          : (!d.active_runs ? pill("running ?", "warn") : (running.length ? pill("Running", "attn") : pill("Idle", "ok")))),
+        running.map((x) => link(x.url, x.name || String(x.id)))),
+      h("div", { class: "figs" },
+        fig("Today", s ? ofCap(s.today, limit(d, role, "runsPerDay")) : "?"),
+        fig("Failures in a row", known ? ofCap(b.consecutive || 0, limit(d, role, "breakerThreshold")) : "?"),
+        maxPrs !== null ? fig("Open PRs", d.prs ? ofCap(d.prs.length, maxPrs) : "?") : null,
+        next ? fig("Next", next) : null),
+      openItem(row),
+      known && !stopped && inPolicy ? spotActs(r, [inboxAct(r, { id: "pause", text: "Pause…", title: `Pause the ${role} in ${short(repo)}?`,
+        off: inboxOff(d, null, state.paneMsg[r.key], false), cmd: () => `/pause ${role}`, payload: () => ({ command: "pause", role }),
+        then: `the Agent inbox workflow opens the ${role}'s breaker with the reason "paused by the owner"`,
+        expect: `Its reply on the inbox within a minute or two. ${running.length ? "The run going now finishes. " : ""}No new ${role} runs until you resume it${role === "fixer"
+          ? "; red CI on agent PRs waits" : (role === "coder" ? "; the queue waits" : "")}. Resume is then in its item in Needs you.` })]) : null);
+  };
+
+  const coderStopped = !!breakerOf(d, "coder").tripped_at;
+  const coderRow = needRowFor(repo, (x) => x.kind === "role" && x.role === "coder");
+  const wfBlock = (w) => {
+    const last = d.recent_runs ? d.recent_runs.find((x) => x.agent === w.agent) || null : null;
+    const stoppedHere = w.agent === "coder" && coderStopped;
+    let next = w.key ? nextRun(d, w.key) : w.next;
+    if (next && w.key && (stoppedHere || (off && SWITCHED.has(w.agent)))) next = `${next} · skips while ${stoppedHere ? "the coder is stopped" : "the agents are off"}`;
+    const r = spot(repo, `wf|${w.agent}`);
+    let acts = [];
+    let why = "";
+    if (w.agent === "coder") {
+      why = coderStopped ? "the coder's breaker is open; reset it first" : (d.issues && !d.issues.ready.length ? "nothing is queued for the coder" : "");
+      acts = [previewAct2(r, { id: "start", text: "Start on the next one", title: `Start the coder on the next queued issue in ${short(repo)}?`,
+        off: writerBlock(d) || cap1(why), payload: () => ({ type: "dispatch", workflow: "coder" }) })];
+    } else if (w.agent === "merge gate") {
+      why = d.prs && !d.prs.length ? "no agent PR is open" : "";
+      acts = [previewAct2(r, { id: "gate", text: "Run merge gate…", title: `Run the merge gate on every agent PR in ${short(repo)}?`,
+        off: writerBlock(d) || cap1(why), payload: () => ({ type: "dispatch", workflow: "merge" }) })];
+    }
+    return h("div", { class: "spot" },
+      h("div", { class: "spot-head" }, h("strong", {}, w.agent), h("span", { class: "muted" }, w.when || cronText(d, w.key))),
+      h("div", { class: "figs" },
+        fig("Last run", !d.recent_runs ? "?" : (last ? [clock(last.created_at), " · ", link(last.url, last.conclusion || last.status)]
+          : h("span", { title: "Not among the newest finished runs read" }, "–"))),
+        next ? fig("Next", next) : null,
+        w.agent === "review" ? fig("Run it", "per PR, in its item or under Agent PRs") : null),
+      acts.length ? spotActs(r, acts) : null,
+      why && !writerBlock(d) ? h("div", { class: "off-line" }, `“${acts[0].text}” is off: ${why}.`,
+        stoppedHere && coderRow ? [" ", routeLink(needsRoute("", coderRow.key), {}, "Reset it →")] : null) : null);
+  };
+
+  const limits = (role) => {
+    const l = (k) => limit(d, role, k);
+    const n = (v, one, many) => (v === null ? null : `${v} ${v === 1 ? one : many}`);
+    const bits = [n(l("runsPerDay"), "run a day", "runs a day"), n(l("maxAttemptsPerIssue"), "attempt an issue", "attempts an issue"),
+      n(l("maxOpenPrs"), "open PR", "open PRs"), n(l("maxCiFixes"), "CI fix", "CI fixes"), n(l("maxReviewFixes"), "review fix", "review fixes"),
+      l("timeoutMinutes") === null ? null : `${l("timeoutMinutes")} min`, l("breakerThreshold") === null ? null : `stops after ${l("breakerThreshold")}`].filter(Boolean);
+    return h("li", {}, h("strong", {}, `${role}: `), bits.length ? bits.join(" · ") : h("span", { class: "muted" }, "none set"));
+  };
+  const policyUrl = `${d.url}/blob/${d.default_branch || "main"}/.github/agents/policy.json`;
+  const runs = d.active_runs;
+  return [
+    h("h3", {}, "Roles you can pause"),
+    !known ? h("p", { class: "warn" }, "Could not read the breaker state, so whether a role is stopped is not known.") : null,
+    offNote(known ? answerBlock(d) : ""),
+    roles.length ? roles.map(roleBlock) : empty(d.policy_ok === false ? "policy.json could not be read." : "No roles."),
+    h("h3", {}, "Runs on a schedule or an event"),
+    offNote(writerBlock(d)),
+    SCHEDULED_WF.map(wfBlock),
+    h("h3", {}, "Running now"),
+    !runs ? empty("Could not read the Actions runs.") : (!runs.length ? empty("Nothing is running.") : runs.map((x) => {
+      const r = spot(repo, `run|${x.id}`);
+      return h("div", { class: "spot" },
+        h("div", { class: "spot-head" }, h("strong", {}, x.agent), link(x.url, x.name || String(x.id)), pill(x.status, "attn"),
+          h("span", { class: "muted" }, `${x.event} · ${ago(x.created_at)}`)),
+        spotActs(r, [previewAct2(r, { id: "cancel", text: "Cancel…", title: `Cancel this ${x.agent} run?`, off: writerBlock(d),
+          payload: () => ({ type: "cancel_run", run: x.id }) })]));
+    })),
+    h("h3", {}, "Limits · read-only, from ", link(policyUrl, "policy.json ↗")),
+    d.policy_ok === false ? empty("policy.json could not be read.")
+      : h("ul", { class: "items" }, Object.keys((d.policy && d.policy.roles) || {}).sort().map(limits))];
 }
+
+// The Week screen for one repository, and its ledger rows. Each row's issue or PR opens its item when it
+// has one in Needs you, else GitHub; its outcome links to its run.
 function runsTab(repo, d) {
-  return [h("h3", {}, "Agent runs, last seven days"), ledgerTables(d),
-    h("h3", {}, "Recent finished runs"), runsTable(d.recent_runs)];
+  const cell = (label, ...v) => h("td", { "data-label": label }, ...v);
+  const recent = d.recent_runs;
+  const finished = [h("h3", {}, "Finished runs on GitHub"), h("p", { class: "muted" }, "The newest of Gatehand's nine workflows, Claude review runs included."),
+    !recent ? empty("Could not read the Actions runs.") : (!recent.length ? empty("None.") : h("div", { class: "scroll" }, h("table", { class: "grid stack" },
+      h("thead", {}, h("tr", {}, ["Workflow", "Run", "Event", "Result", "Started"].map((c) => h("th", {}, c)))),
+      h("tbody", {}, recent.map((x) => h("tr", {}, cell("Workflow", x.agent), cell("Run", link(x.url, x.name || String(x.id))), cell("Event", x.event),
+        cell("Result", pill(x.conclusion || x.status, x.conclusion === "success" ? "ok" : (x.conclusion === "failure" ? "bad" : ""))),
+        cell("Started", h("span", { class: "muted" }, ago(x.created_at)))))))))];
+  if (!d.stats) return [empty("Could not read the ledger branch."), finished];
+  const rows = d.runs || [];
+  const counted = rows.filter((x) => x.counted !== false);
+  const noCost = rows.filter((x) => typeof x.cost_usd !== "number").length;
+  const spent = rows.reduce((a, x) => a + (typeof x.cost_usd === "number" ? x.cost_usd : 0), 0);
+  const roles = Object.entries(d.stats).filter(([, s]) => s.runs || s.cap !== undefined);
+  const on = (x) => {
+    const n = x.pr || x.issue;
+    if (!n) return "–";
+    const row = x.pr ? rowAbout(repo, x.pr, true) : rowAbout(repo, x.issue);
+    const text = x.pr ? `PR #${x.pr}` : `#${x.issue}`;
+    return row ? routeLink(needsRoute("", row.key), { title: row.title }, `${text} →`) : link(`${d.url}/${x.pr ? "pull" : "issues"}/${n}`, `${text} ↗`);
+  };
+  const shownRows = rows.slice(0, 40);
+  return [
+    h("p", {}, h("strong", {}, `${usd(spent)}${noCost ? "+" : ""}`), ` over the last seven days · ${counted.length} ${counted.length === 1 ? "run" : "runs"}`,
+      rows.length > counted.length ? ` · ${rows.length - counted.length} never reached the agent` : "",
+      noCost || rows.length ? h("span", { class: "muted" }, " · at least: a run with no cost recorded adds nothing, and Claude review runs are not in the ledger") : null),
+    h("h3", {}, "By role"),
+    roles.length ? h("div", { class: "scroll" }, h("table", { class: "grid stack" },
+      h("thead", {}, h("tr", {}, ["Role", "Runs", "Outcomes", "Today", "Turns", "Time", "Cost"].map((c) => h("th", {}, c)))),
+      h("tbody", {}, roles.map(([role, s]) => h("tr", {},
+        cell("Role", h("strong", {}, role)), cell("Runs", String(s.runs)),
+        cell("Outcomes", s.outcomes.map(([o, n]) => `${n} ${o}`).join(", ") + (s.not_counted ? ` (${s.not_counted} not counted)` : "")),
+        cell("Today", ofCap(s.today, s.cap === null || s.cap === undefined ? null : s.cap)),
+        cell("Turns", s.turns ?? "–"), cell("Time", mins(s.duration_ms)), cell("Cost", usd(s.cost_usd))))))) : empty("No roles."),
+    h("h3", {}, "Ledger rows"),
+    shownRows.length ? [rows.length > shownRows.length ? h("p", { class: "muted" }, `The newest ${shownRows.length} of ${rows.length}.`) : null,
+      h("div", { class: "scroll" }, h("table", { class: "grid stack" },
+        h("thead", {}, h("tr", {}, ["Started", "Role", "On", "Outcome", "Reason", "Turns", "Cost"].map((c) => h("th", {}, c)))),
+        h("tbody", {}, shownRows.map((x) => h("tr", {},
+          cell("Started", h("span", { class: "muted" }, String(x.started_at || x.ended_at || "").slice(0, 16).replace("T", " "))),
+          cell("Role", x.role || "?"), cell("On", on(x)),
+          cell("Outcome", x.run_url ? link(x.run_url, x.outcome || "?") : (x.outcome || "?"), x.counted === false ? h("span", { class: "muted" }, " · not counted") : null),
+          cell("Reason", h("span", { class: "muted" }, String(x.reason || "").slice(0, 160))),
+          cell("Turns", x.turns ?? "–"), cell("Cost", typeof x.cost_usd === "number" ? usd(x.cost_usd) : h("span", { class: "muted" }, "no cost")))))))]
+      : empty("No runs in the last seven days."),
+    finished];
 }
+
 function settingsTab(repo, d) {
   const v = d.vars;
   const def = d.default_branch || "the default branch";
   const ref = { ok: pill(`matches ${def}`, "ok"), stale: pill(`differs from ${def}`, "bad"), missing: pill("missing", "bad") }[d.runner_ref] || pill("unknown", "warn");
-  return [h("h3", {}, "Switches"), switchesBlock(repo, d),
-    h("h3", {}, "Set up"),
+  const why = v ? writerBlock(d) : "Cannot read this repository's variables.";
+  const gate = state.gate[repo];
+  const passing = gate && gate.prs ? (d.prs || []).filter((p) => { const g = gate.prs[String(p.number)]; return g && /^would merge /.test(g.text) && !p.labels.some((l) => l === "agent:hold" || l === "agent:fixing" || STUCK.includes(l)); }) : [];
+  const gateNext = nextRun(d, "merge");
+  const sw = (name, label, onWord, offWord, meaning, expect) => {
+    const cur = v ? v[name] : undefined;
+    const isOn = cur === "true";
+    const r = spot(repo, `var|${name}`);
+    const act = previewAct2(r, { id: "set", text: `Turn ${label.toLowerCase()} ${isOn ? "off" : "on"}…`, title: `Turn ${label.toLowerCase()} ${isOn ? "off" : "on"} in ${short(repo)}?`,
+      off: why, payload: () => ({ type: "set_variable", name, value: isOn ? "false" : "true" }) });
+    act.lines = [["Expect", expect(isOn)]];
+    return h("div", { class: "spot" },
+      h("div", { class: "spot-head" }, h("strong", {}, label), h("code", {}, name),
+        !v ? pill("unknown", "warn") : (isOn ? pill(onWord, "ok") : pill(offWord, "off")),
+        h("span", { class: "muted" }, cur === undefined ? "" : (cur === null ? "not set" : `= ${cur}`))),
+      h("div", { class: "gate" }, v ? meaning(isOn) : "Not known."),
+      spotActs(r, [act]));
+  };
+  return [h("h3", {}, "Switches"), offNote(why),
+    sw("AGENTS_ENABLED", "Agents", "On", "Off",
+      (on) => (on ? "The coder runs on its schedule; the fixer, merge gate, sweep and triage run."
+        : "The coder, fixer, merge gate, sweep and triage skip their runs. The inbox, the Claude review of new PRs, the PR guard and the digest still run."),
+      (on) => (on ? "Runs already going finish and may still open a PR or push a fix; to stop one now, cancel it on Agents."
+        : `The coder from its next scheduled run${nextRun(d, "coder") ? `, ${nextRun(d, "coder")}` : ""}.`)),
+    sw("AGENT_AUTO_MERGE", "Auto-merge", "On", "Dry run",
+      (on) => (on ? "The merge gate merges an agent PR once CI, the review and every rule agree." : "The merge gate reports what it would merge and merges nothing."),
+      (on) => (on ? `The merge gate merges nothing from its next run${gateNext ? `, ${gateNext}` : ""}.`
+        : `From the next gate run${gateNext ? `, ${gateNext}` : ""}.${passing.length ? ` ${passing.map((p) => `PR #${p.number}`).join(", ")} already ${passing.length === 1 ? "passes" : "pass"} the gate in its dry run, so that run may merge ${passing.length === 1 ? "it" : "them"}.` : ""}`)),
+    h("h3", {}, "Set up · read-only"),
     h("ul", { class: "items" },
       h("li", {}, h("strong", {}, "Who can answer "), v ? (v.AGENT_OWNER_LOGIN || pill("not set", "warn")) : pill("unknown", "warn"),
         h("span", { class: "muted" }, " AGENT_OWNER_LOGIN")),
-      h("li", {}, h("strong", {}, "Inbox "), d.inbox ? link(d.inbox.url, `#${d.inbox.number}`) : (d.inbox_state === "unknown" ? pill("unknown", "warn") : "none found")),
+      h("li", {}, h("strong", {}, "Inbox "), d.inbox ? link(d.inbox.url, `#${d.inbox.number} ↗`) : (d.inbox_state === "unknown" ? pill("unknown", "warn") : "none found"),
+        h("span", { class: "muted" }, " AGENT_INBOX_ISSUE")),
       h("li", {}, h("strong", {}, "Version "), d.version || "?"),
       h("li", {}, h("strong", {}, "Runner branch "), ref, h("span", { class: "muted" }, ` ${(d.policy && d.policy.runnerRef) || ""}`)),
       h("li", {}, h("strong", {}, "Limits and schedules "),
-        link(`${d.url}/blob/${d.default_branch || "main"}/.github/agents/policy.json`, "policy.json on GitHub"),
-        h("span", { class: "muted" }, " · changed there, not here"))),
-    h("h3", {}, "This dashboard"),
+        link(`${d.url}/blob/${d.default_branch || "main"}/.github/agents/policy.json`, "policy.json on GitHub ↗"),
+        h("span", { class: "muted" }, " · changed there, not here; shown on Agents"))),
+    h("h3", {}, "This dashboard · kept on this machine"),
     h("p", {}, removeBtn(repo, "Hide this repository"), h("span", { class: "muted" }, " Keeps it out of the list and later scans. Changes nothing on GitHub."))];
 }
 
@@ -1863,10 +2278,12 @@ function repoView() {
     d && !d.loading && !d.failed ? [
       d.vars ? pill(d.vars.AGENTS_ENABLED === "true" ? "Agents on" : "Agents off", d.vars.AGENTS_ENABLED === "true" ? "ok" : "off") : pill("Agents ?", "warn"),
       d.vars ? pill(d.vars.AGENT_AUTO_MERGE === "true" ? "Auto-merge on" : "Auto-merge: dry run", d.vars.AGENT_AUTO_MERGE === "true" ? "ok" : "off") : pill("Auto-merge ?", "warn"),
-      h("span", { class: "muted" }, ` Gatehand ${d.version || "?"} · you have ${String(d.viewer_permission || "?").toLowerCase()} access · read ${ago(d.fetched_at)}`)] : null);
+      h("span", { class: "muted" }, ` Gatehand ${d.version || "?"} · you have ${String(d.viewer_permission || "?").toLowerCase()} access`,
+        d.vars && d.vars.AGENT_OWNER_LOGIN ? ` · answers by ${d.vars.AGENT_OWNER_LOGIN}` : "", ` · read ${ago(d.fetched_at)}`)] : null);
   if (!d || d.loading) return [head, empty("Loading…")];
   if (d.failed) return [head, h("p", { class: "bad" }, d.failed), removeBtn(repo, "Hide this repository")];
   const tab = state.route.tab;
+  tabRows = { repo: "", rows: [] }; // read afresh for this render
   return [head,
     (d.errors || []).length ? h("div", { class: "notice" }, h("strong", {}, "Could not read everything:"),
       h("ul", {}, d.errors.map((e) => h("li", {}, e)))) : null,
@@ -1940,6 +2357,7 @@ async function loadExtras(repo, fresh) {
 function onRoute() {
   const was = state.route.view;
   const wasOpen = state.route.open;
+  state.sideOpen = false; // a link in the folded sidebar was followed: fold it again
   state.route = parseRoute();
   // Another item opened: a confirm left open on the last one closes; what was posted from it stays.
   if (state.route.open !== wasOpen) state.pane = { key: "", confirm: "", text: "", fixer: true, preview: null };
@@ -1950,12 +2368,13 @@ function onRoute() {
   state.selected = repo;
   renderAll();
   if (opened) loadExtras(repo, false);
-  // Opening an item keeps the list where it is; where the pane sits under the list, it is brought into view.
+  // Opening an item keeps the list where it is; on a narrow window, where the item opens under its
+  // row, that row is brought to the top.
   if (state.route.view === "needs" && was === "needs") {
-    const pane = $("pane");
-    if (pane && named && getComputedStyle(pane.parentNode).gridTemplateColumns.split(" ").length < 2) {
-      window.scrollTo(0, pane.getBoundingClientRect().top + window.scrollY - document.querySelector(".bar").offsetHeight - 8);
-    }
+    const on = document.querySelector(".needs-list .lrow.on");
+    if (on && state.keyMoved && !NARROW.matches) on.scrollIntoView({ block: "nearest" });
+    state.keyMoved = false;
+    if (on && named && NARROW.matches) window.scrollTo(0, on.getBoundingClientRect().top + window.scrollY - document.querySelector(".bar").offsetHeight - 8);
   } else window.scrollTo(0, 0);
 }
 
@@ -1979,12 +2398,70 @@ async function refresh(fresh) {
     $("updated").textContent = `updated ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
   } catch (e) {
     notice(e.message);
+    if (!state.session) { state.sessionFailed = e.message; renderAll(); } // not "Loading…" forever
   } finally {
     $("refresh").disabled = false;
   }
 }
 
 window.addEventListener("hashchange", onRoute);
+
+// --- keys, on Needs you: j/k move through the list, o goes into the open item, a opens its primary
+// action's confirm (Enter then confirms: two keys, as two clicks), r opens Reject…, Esc closes a
+// confirm, ? shows them all. Never while you type in a field, and never with a modifier.
+const KEYS_HELP = "j / k next or previous item · o go into the open item (or open it) · a the item's primary action, then Enter to confirm · r Reject… · Esc close the confirm · ? hide this";
+document.addEventListener("keydown", (e) => {
+  if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || state.route.view !== "needs") return;
+  if (document.querySelector("dialog[open]")) return;
+  const t = e.target;
+  const typing = t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+  const pane = $("pane");
+  if (e.isComposing || e.keyCode === 229) return; // an input method is composing: its keys are its own
+  if (e.key === "Escape") {
+    const cancel = pane && [...pane.querySelectorAll(".confirm button")].find((b) => b.textContent === "Cancel");
+    if (cancel && !cancel.disabled) { e.preventDefault(); cancel.click(); }
+    return;
+  }
+  if (typing) return;
+  const keys = state.shownKeys || [];
+  // With the item closed (narrow window) or gone, j/k go on from the one last open.
+  const at = keys.indexOf(state.selKey || state.lastSelKey);
+  const move = (i) => {
+    if (i < 0 || i >= keys.length) return;
+    state.keyMoved = true;
+    go(needsRoute(state.route.kind, keys[i]));
+  };
+  // Caps Lock still means the letter; Shift is only for "?".
+  if (e.shiftKey && e.key !== "?") return;
+  switch (e.key.length === 1 && !e.shiftKey ? e.key.toLowerCase() : e.key) {
+    case "j": e.preventDefault(); move(at < 0 ? 0 : at + 1); break;
+    case "k": e.preventDefault(); move(at < 0 ? 0 : at - 1); break;
+    case "o": {
+      e.preventDefault();
+      if (!pane || !state.selKey) { move(Math.max(at, 0)); break; }
+      const f = pane.querySelector("button:not(:disabled), a[href]");
+      pane.scrollIntoView({ block: "nearest" });
+      if (f) f.focus({ preventScroll: true });
+      break;
+    }
+    case "a": {
+      // Only the first control of the pane's first row of actions, and only if it is the primary
+      // (a filled button, or a link-only pane's GitHub link) and enabled: never a confirm's own post
+      // button, so a write always takes Enter on the confirm.
+      const first = pane && pane.querySelector(".step .actions");
+      const b = first && first.firstElementChild;
+      if (b && !b.classList.contains("quiet") && !b.disabled && (b.tagName === "BUTTON" || b.matches("a.cta[href]"))) { e.preventDefault(); b.click(); }
+      break;
+    }
+    case "r": {
+      const b = pane && [...pane.querySelectorAll(".step .actions > button")].find((x) => x.textContent === "Reject…" && !x.disabled);
+      if (b) { e.preventDefault(); b.click(); }
+      break;
+    }
+    case "?": e.preventDefault(); state.keysHelp = !state.keysHelp; renderView(); break;
+    default:
+  }
+});
 $("refresh").addEventListener("click", () => refresh(true));
 $("rescan").addEventListener("click", async () => {
   $("rescan").disabled = true;
