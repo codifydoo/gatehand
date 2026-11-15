@@ -54,25 +54,16 @@
   and schedules.
 - In a narrow window the open item of Needs you expands in place under its row, as in a mail app,
   and the sidebar folds into one line with ☰.
-- Keys on Needs you: j/k move, o goes into the item, a opens its primary action's confirm (Enter
-  confirms), r opens Reject…, Esc closes the confirm, ? lists them.
 - Needs you with nothing in it says what is true and what to do next: nothing needs you (with what
   is running and queued), nothing that could be read (naming what could not), or no repositories
   found; a repository still being read shows a "reading…" line.
+- Keys on Needs you: j/k move, o goes into the item, a opens its primary action's confirm (Enter
+  confirms), r opens Reject…, Esc closes the confirm, ? lists them.
 - What could not be read has a health row at the end of Needs you, never counted, whose pane says
   why (the server's cause) and the one thing that helps: authorize gh for an organization's SSO,
   find a repository that moved, ask for access; "Check again" re-reads that repository only. A
   signed-out gh and the API limit are said once under the bar, and Refresh is off until the limit
   resets.
-  branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only
-  (#21, #22); Activity shows the next scheduled runs, and a repository's Agents tab shows the limits
-  and schedules.
-=======
-- Needs you with nothing in it says what is true and what to do next: nothing needs you (with what
-  is running and queued), nothing that could be read (naming what could not), or no repositories
-  found; a repository still being read shows a "reading…" line.
-- Keys on Needs you: j/k move, o goes into the item, a opens its primary action's confirm (Enter
-  confirms), r opens Reject…, Esc closes the confirm, ? lists them.
 - Dashboard: Pause all's record. A `set_variable` that turns `AGENTS_ENABLED` off can carry
   `"pause_all": true`; once that write succeeds, the repository is kept in a `paused` list in the
   dashboard's local config file, which `/api/session` returns, so Resume turns on only what Pause
