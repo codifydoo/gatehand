@@ -286,6 +286,21 @@ else
   t_fail "step 4 names \"### ${heading}\" but the Output Format has no such heading"
 fi
 
+# Case 12b: the Output Format says how to write the two headings, not only what they are called.
+# The merge gate (markdown_verdict in .github/scripts/agent-state.sh) reads the verdict from the
+# line under `### Verdict`. From 2026-10-15 to 2026-11-14, 45 of 316 reviews in one installation
+# wrote that heading another way (<h3>, bold, `**Verdict:** Approve` on one line, underlined), and
+# the gate read 10 of them as unknown, which leaves an agent PR waiting for a person. The parser
+# refuses those forms on purpose, so the instruction is the fix, and these needles keep it.
+for needle in 'plain markdown, `###` at the start of the line' \
+  'The line under `### Verdict` holds `Approve` or `Request changes`'; do
+  if grep -qF "${needle}" <<<"${body}"; then
+    t_pass "command carries: \"${needle}\""
+  else
+    t_fail "command lost \"${needle}\" — reviews go back to writing the Verdict heading in forms the merge gate reads as unknown"
+  fi
+done
+
 # Case 13: the command tells the CI reviewer what it cannot run, and that stays true. Without the
 # paragraph, runs spent 1-11 turns each on denied git/test/shellcheck calls (counted from the run
 # logs on 2026-11-07). It must sit in the CI branch of `## Input`. The paragraph claims "no git, no package manager, no test runner", which is

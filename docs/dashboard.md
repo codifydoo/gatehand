@@ -108,7 +108,10 @@ happened; a request answered elsewhere while its pane was open says how and when
 - what the agent wrote, from its request comment, shown as plain text;
 - where an answer must go first, as a link to GitHub: for `blocked`, a comment on the issue itself
   (the next run reads comments from people with write access, not the inbox); for `failed`, an edit
-  if the issue was unclear; for `untrusted`, re-applying `agent:ready` yourself;
+  if the issue was unclear; for `untrusted`, re-applying `agent:ready` yourself. Under it, for an
+  open `blocked` or `failed` request, whether someone with write access has commented on the issue
+  since the request, and who and when (never what they wrote); nothing until that is first read, or
+  when it cannot be told;
 - the primary action (named for the kind, as in the table under What you can do from it) and
   Reject…, with the requesting role's runs on the issue and their cost over the last seven days
   beside them (runs that never reached the agent left out; the cost a floor: a run with no cost
@@ -154,8 +157,10 @@ issue's coder runs and cost beside it, and Hold or Release. Rerun is disabled, w
 while the issue has an open `untrusted` request, or carries `agent:hold` (a run named for a held
 issue does not take it). If the issue also carries `agent:ready` and not `agent:hold`, the pane says
 the coder may take it on its next scheduled run. The server refuses a second command until the inbox
-workflow replies; after that, a rerun from a page not yet refreshed would be posted again, since a
-rerun names no request.
+workflow replies. A rerun names no request, so before posting one the server reads the issue's
+labels afresh and refuses, with the reason, when it is no longer `agent:blocked` or
+`agent:needs-human`, or is `agent:in-progress` or `agent:pr-open`: a second click from a page not yet
+refreshed posts nothing.
 
 **To merge, to close.** The two folded groups open link-only panes, since the page merges nothing
 and closes nothing. "To merge" says the gate found nothing in the way and auto-merge is a dry run,
@@ -184,8 +189,8 @@ then access, then not found).
 and says whether it is still unread (and why) or readable again. It writes nothing. Two causes hit
 every repository and are said once, under the bar, instead of in rows: `gh` signed out (with the
 command to copy and Check again), and the API limit, with when reads resume; Refresh, the
-five-minute refresh, and Pause all, Resume n… and Retry n… (which read every repository first) are
-off until then.
+five-minute refresh, whether a writer has commented on a request's issue, and Pause all, Resume n…
+and Retry n… (which read every repository first) are off until then.
 
 ### Keys
 
@@ -334,7 +339,9 @@ Before posting, the server checks what the inbox workflow will check, and refuse
 rather than post something that would be ignored: you are `AGENT_OWNER_LOGIN` to the letter; the
 inbox issue is open, carries `<!-- agent-inbox -->` and was opened by the agent bot or the owner; the
 request is one the agent bot filed and nobody has answered yet; no command of yours is still waiting
-for its answer; a role is one in `policy.json`. Labels are never changed on the inbox issue itself. The
+for its answer; a role is one in `policy.json`; a rerun is of an open issue that is still blocked
+(`agent:blocked` or `agent:needs-human`), not `agent:in-progress` or `agent:pr-open`, with no open
+`untrusted` request. Labels are never changed on the inbox issue itself. The
 command line it posts is built by the server in exactly the grammar `agent-inbox.sh` parses; a reject
 reason is cut to one line of 300 characters. `agent:allow-protected` is never offered: opening
 protected paths stays behind approving the agent's own `protected` request.
@@ -494,6 +501,28 @@ The first three are tried in that order, then a GraphQL error's type, then `HTTP
 `null` when that limit is not exhausted (a secondary limit, whose end GitHub does not say), has
 reset since it was read, or cannot be read. A cause is never guessed: what matches nothing is
 `unknown`.
+
+### Whether a writer answered
+
+`/api/repo/<owner>/<name>/request/<REQ-id>` answers for one open `blocked` or `failed` request (any
+other id, kind, or an answered request is a 404). The page asks for the open pane only: each time a
+request's pane opens and on each refresh, never for every request on a page load, and not during the
+API limit. The answer is cached for a minute and each commenter's access for ten, both read again
+with `?fresh=1`, which the page sends whenever it has asked before.
+
+```json
+{"id": "REQ-20261113-ab12", "issue": 42, "writer_comment": {"login": "maintainer", "at": "2026-11-14T08:00:00Z"}}
+```
+
+`writer_comment` is the newest comment on the request's issue made after the request by an account
+with write access or more (`admin`, `maintain` or `write` from
+`GET /repos/<repo>/collaborators/<login>/permission`, as `agent-lib.sh` `actor_trusted` decides; never
+`author_association`), or `null` when there is none. The agent bot's own comments do not count, and
+an App's never do. Only the login and the time are sent: the server does not ask GitHub for the
+comment's text. Comments are read newest first back to the request, at most 300; when more than
+that came after the request and none of them is a writer's, `writer_comment` is left out (not
+known), and the page says nothing. A permission lookup that fails for any reason but a 404 fails
+the request, as any read does, rather than count someone as not a writer.
 
 ### Limits and schedules
 

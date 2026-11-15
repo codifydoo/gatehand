@@ -71,6 +71,11 @@ the merge, write "None." under `### Blocking problems`.
 
 ## Output Format
 
+Write both headings exactly as below: plain markdown, `###` at the start of the line, never as
+HTML or bold text. The line under `### Verdict` holds `Approve` or `Request changes` and nothing
+else. The merge gate reads the verdict from that line, and a verdict it cannot read leaves the PR
+waiting for a person.
+
 ### Blocking problems
 - `path/to/file:line` — why it's wrong. How to show it fails: …
 

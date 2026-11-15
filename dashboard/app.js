@@ -827,6 +827,31 @@ const REQ_PANE = {
 };
 const REQUEUE = new Set(["blocked", "failed", "protected"]);
 
+// Whether someone with write access has commented on a blocked or failed request's issue since the
+// request: read for the open pane only, each time a pane opens and on every refresh (past the server's
+// cache once read before), never for every request on a page load, and not during the API limit. The
+// server sends a login and a time only, never the comment. Nothing is said before the first answer,
+// when the read failed, or when the server could not tell (writer_comment left out); while it is read
+// again, the last answer stays.
+state.writer = {}; // `${repo}|${id}` -> the server's answer, { asking }, { error }; stale: read it again
+const writerStale = () => { for (const x of Object.values(state.writer)) x.stale = true; };
+function writerLine(repo, q, n) {
+  const k = `${repo}|${q.id}`;
+  const was = state.writer[k];
+  if ((!was || (was.stale && !was.asking)) && !limited()) {
+    state.writer[k] = Object.assign({}, was, { stale: false, asking: true });
+    // A refresh while this is in flight marks it stale: kept, so the pane reads it again after.
+    const keep = (x) => { state.writer[k] = Object.assign(x, { stale: !!(state.writer[k] && state.writer[k].stale) }); };
+    api(`/api/repo/${repo}/request/${q.id}${was ? "?fresh=1" : ""}`)
+      .then(keep, () => keep({ error: true })).then(renderView);
+  }
+  const got = state.writer[k];
+  if (!got || got.error || !("writer_comment" in got)) return null;
+  const c = got.writer_comment;
+  return h("div", { class: "muted" }, c ? `${c.login}, who has write access, commented on #${n} ${ago(c.at)}, after the request.`
+    : `No one with write access has commented on #${n} since the request.`);
+}
+
 function requestActs(r, d, full) {
   const q = r.req;
   const n = q.issue;
@@ -877,7 +902,8 @@ function requestPane(r) {
     kv("What happens next", kindText && n ? kindText.next(n) : "Nothing until you answer."),
     h("div", { class: "said" }, h("div", { class: "muted" }, "What the agent wrote (plain text from GitHub)"),
       h("pre", { class: "body" }, full ? full.body : q.summary)),
-    kindText && kindText.step && n ? h("div", { class: "step" }, h("span", { class: "num" }, "1"), h("div", {}, kindText.step(n, issueUrl))) : null,
+    kindText && kindText.step && n ? h("div", { class: "step" }, h("span", { class: "num" }, "1"), h("div", {}, kindText.step(n, issueUrl),
+      (q.kind === "blocked" || q.kind === "failed") && full && !full.answered ? writerLine(repo, q, n) : null)) : null,
     h("div", { class: "step" }, kindText && kindText.step && n ? h("span", { class: "num" }, "2") : null,
       h("div", {}, paneActions(r, requestActs(r, d, full), beside))),
     events.length ? h("details", fold("timeline"), h("summary", {}, `Timeline${n ? ` #${n}` : ""} · ${events.length} ${events.length === 1 ? "event" : "events"} (last 7 days)`),
@@ -2772,7 +2798,10 @@ function onRoute() {
   state.sideOpen = false; // a link in the folded sidebar was followed: fold it again
   state.route = parseRoute();
   // Another item opened: a confirm left open on the last one closes; what was posted from it stays.
-  if (state.route.open !== wasOpen) state.pane = { key: "", confirm: "", text: "", fixer: true, preview: null };
+  if (state.route.open !== wasOpen) {
+    state.pane = { key: "", confirm: "", text: "", fixer: true, preview: null };
+    writerStale(); // a request pane opened again reads whether a writer has commented since, afresh
+  }
   const named = state.route.open; // the item the address named, before the render pins the top one
   if (state.route.view === "needs" && was !== "needs") lookAgain();
   const repo = routeRepo();
@@ -2797,6 +2826,8 @@ async function refresh(fresh) {
   }
   $("refresh").disabled = true;
   state.refreshing = (state.refreshing || 0) + 1;
+  writerStale(); // the open request pane reads it again
+
   try {
     applySession(await api(`/api/session${fresh ? "?fresh=1" : ""}`));
     state.sessionCause = null;

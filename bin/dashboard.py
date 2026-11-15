@@ -894,6 +894,63 @@ def read_inbox(repo, number, bot, owner_login=""):
     return {"requests": requests, "truncated": truncated, "awaiting_reply": bool(waiting)}
 
 
+# No body: a comment's text never reaches the dashboard, only who wrote it and when.
+ISSUE_COMMENTS_Q = """query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){
+issue(number:$number){comments(last:100,before:$cursor){pageInfo{hasPreviousPage startCursor}
+nodes{author{__typename login} createdAt}}}}}"""
+MAX_ISSUE_COMMENT_PAGES = 3
+ANSWERABLE = ("blocked", "failed")  # the kinds whose answer is a comment on the issue itself
+LOGIN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")  # a person's login, an EMU's `name_short` too
+
+
+def has_write(repo, login, cache, fresh=False):
+    """agent-lib.sh actor_trusted, without the bot: write access or more, never author_association
+    (COLLABORATOR and MEMBER include read-only and triage accounts). A 404 is no; any other failure
+    raises, so an outage never reads as "not a writer"."""
+    if not LOGIN_RE.fullmatch(login or ""):  # an App ("x[bot]") or a deleted account: never a collaborator
+        return False
+    got = cache.get("perm:%s:%s" % (repo, login.lower()), lambda: gh_or_404(
+        ["api", "repos/%s/collaborators/%s/permission" % (repo, login)]), fresh, ttl=600)
+    return (got or {}).get("permission") in ("admin", "maintain", "write")
+
+
+def read_writer_comment(repo, req, bot, cache, fresh=False):
+    """For an open blocked or failed request: who with write access last commented on its issue after
+    the request was filed, and when ({login, at}), or None. The newest comments first, back to the
+    request, at most MAX_ISSUE_COMMENT_PAGES pages; past that, and with no writer among them, the
+    answer is not known and writer_comment is left out. The agent bot's own comments do not count.
+    On Refresh (fresh) each commenter's access is looked up again, once per read."""
+    owner, name = repo.split("/", 1)
+    since = req.get("created_at") or ""
+    out = {"id": req["id"], "issue": req["issue"]}
+    if not since:
+        return out  # when the request was filed is not known: neither is what came after it
+    cursor, writer = None, {}
+    for _ in range(MAX_ISSUE_COMMENT_PAGES):
+        kw = {"cursor": cursor} if cursor else {}
+        c = ((((graphql(ISSUE_COMMENTS_Q, owner=owner, name=name, number=req["issue"], **kw) or {}).get("repository") or {})
+              .get("issue") or {}).get("comments") or {})
+        nodes = [n for n in c.get("nodes") or [] if n]
+        for n in sorted(nodes, key=lambda n: n.get("createdAt") or "", reverse=True):
+            at = n.get("createdAt") or ""
+            if at <= since:
+                out["writer_comment"] = None
+                return out
+            a = n.get("author") or {}
+            login = (a.get("login") or "") + ("[bot]" if a.get("__typename") == "Bot" else "")
+            if login and login != bot and login not in writer:
+                writer[login] = has_write(repo, login, cache, fresh)
+            if writer.get(login):
+                out["writer_comment"] = {"login": login, "at": at}
+                return out
+        info = c.get("pageInfo") or {}
+        if not info.get("hasPreviousPage"):
+            out["writer_comment"] = None
+            return out
+        cursor = info.get("startCursor")
+    return out  # more comments since the request than were read, none of them a writer's: unknown
+
+
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 
@@ -1045,9 +1102,33 @@ def _do_inbox_command(repo, d, viewer, body):
             raise ApiError(404, "%s is not a request the agent made in #%d" % (body["req"], number))
         if r["answered"]:
             raise ApiError(409, "%s is already answered" % body["req"])
+    if body.get("command") == "rerun":
+        rerun_refusal(repo, body["issue"], got["requests"])
     out = gh_json(["api", "repos/%s/issues/%d/comments" % (repo, number), "--input", "-"],
                   stdin=json.dumps({"body": line})) or {}
     return {"posted": line, "url": out.get("html_url"), "inbox": number}
+
+
+def rerun_refusal(repo, n, requests):
+    """A rerun names no request, so nothing else stops a second one from a page not yet refreshed:
+    the issue's labels, read afresh, must still say it is blocked and not taken."""
+    item = gh_json(["api", "repos/%s/issues/%d" % (repo, n)]) or {}
+    if "pull_request" in item:
+        raise ApiError(409, "#%d is a PR; the coder reruns issues" % n)
+    if item.get("state") != "open":
+        raise ApiError(409, "#%d is not open" % n)
+    labels = {(l or {}).get("name") for l in item.get("labels") or []}
+    if "agent:in-progress" in labels:
+        raise ApiError(409, "#%d is agent:in-progress: the coder is already on it" % n)
+    if "agent:pr-open" in labels:
+        raise ApiError(409, "#%d is agent:pr-open: the coder already opened a PR for it" % n)
+    # agent:needs-human too: the page lists it as blocked, and /rerun takes both labels off.
+    if not labels & {"agent:blocked", "agent:needs-human"}:
+        raise ApiError(409, "#%d is no longer blocked (a rerun or a person got there first): refresh the page" % n)
+    r = next((x for x in requests if x["kind"] == "untrusted" and x["issue"] == n and not x["answered"]), None)
+    if r:
+        raise ApiError(409, "#%d has an open untrusted request (%s): re-apply agent:ready on GitHub and "
+                       "Acknowledge it first; a rerun before that would be refused" % (n, r["id"]))
 
 
 def do_label(repo, d, body):
@@ -1809,7 +1890,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(200, dict(self.repo_list(), viewer=user.get("login"), scan_error=scan_error,
                                        scan_cause=scan_cause, budget=cfg.budget(), rate={k: rate.get(k) for k in ("core", "graphql")},
                                        now=iso(now_utc())))
-        m = re.fullmatch(r"/api/repo/([^/]+)/([^/]+)(/inbox|/gate)?", path)
+        m = re.fullmatch(r"/api/repo/([^/]+)/([^/]+)(/inbox|/gate|/request/(REQ-[0-9]{8}-[0-9a-f]{4}))?", path)
         if not m:
             raise ApiError(404, "not found")
         repo = self.repo_from(m.group(1), m.group(2))
@@ -1824,8 +1905,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise ApiError(404, "no inbox issue in %s" % repo)
         bot = d["policy"]["botLogin"]
         owner = (d.get("vars") or {}).get("AGENT_OWNER_LOGIN") or ""
-        got = cache.get("inbox:" + repo, lambda: read_inbox(repo, d["inbox"]["number"], bot, owner), fresh)
-        return self.send(200, dict(got, inbox=d["inbox"]))
+        got = cache.get("inbox:" + repo, lambda: read_inbox(repo, d["inbox"]["number"], bot, owner), fresh and not m.group(4))
+        if not m.group(4):
+            return self.send(200, dict(got, inbox=d["inbox"]))
+        # One request, read when its pane opens or on Refresh: whether a writer has commented on its
+        # issue since. Only an open request the bot filed, of a kind answered on the issue.
+        req = next((r for r in got["requests"] if r["id"] == m.group(4)), None)
+        if not req or req["answered"] or req["kind"] not in ANSWERABLE:
+            raise ApiError(404, "%s is not an open blocked or failed request in %s" % (m.group(4), repo))
+        return self.send(200, cache.get("writer:%s:%s" % (repo, req["id"]),
+                                        lambda: read_writer_comment(repo, req, bot, cache, fresh), fresh))
 
     def fresh_state(self, body):
         """The repository, the login gh acts as now and the repository read afresh: every action is

@@ -8,6 +8,17 @@
   ("its last one, REQ-…, was rejected by you on Nov 11: not now"), as does a request's pane once someone answered first ("approved at
   17:29") and the Pipeline tab's recently answered requests. Installed repositories need no update:
   the dashboard runs from the package.
+- A blocked or failed request's pane says under step 1 whether someone with write access has
+  commented on the issue since the request, and who and when (#24). The server reads it per request,
+  for the open pane only (when it opens and on each refresh), from the new
+  `/api/repo/<owner>/<name>/request/<REQ-id>`; the comment's text is never read, and the agent bot's
+  comments do not count. Installed repositories
+  need no update: the dashboard runs from the package.
+- Dashboard: "Rerun coder" is refused, with the reason, when the issue is no longer blocked
+  (neither `agent:blocked` nor `agent:needs-human`), is `agent:in-progress` or `agent:pr-open`, is
+  closed or a PR, or has an open `untrusted` request; the server reads the issue's labels afresh
+  before posting, so two clicks from stale pages no longer post two reruns (#27). Installed
+  repositories need no update: the dashboard runs from the package.
 - Week shows the last seven days' cost as a floor against a weekly budget you set on the page (kept
   on this machine, #28), with its warning line; cost by day against the budget's pace, by repository
   and outcomes by role; PRs merged by the gate and coder runs that opened a PR. Runs with no cost
@@ -95,7 +106,13 @@
 - `docs/dashboard.md` describes the page as built, in the order you meet it: the bar and sidebar,
   Needs you with its panes, health and keys, Activity, Week, a repository's tabs, then the actions,
   the security model, and what the server sends. Repositories now lists every column it shows.
-- Nothing installed into repositories changes: no update is needed.
+- Review: `/verify-pr` now says how to write its two headings (plain `###` markdown, with the
+  verdict alone on the line under `### Verdict`). In one installation, 45 of 316 reviews in a month
+  wrote the Verdict heading as HTML, in bold or on one line with the verdict, and the merge gate
+  read 10 of them as unknown, which leaves an agent PR waiting for a person. Installed repositories
+  get the wording on their next update.
+- Nothing else installed into repositories changes: an update is needed only to get the review
+  wording above.
 
 ## 0.7.0 (2026-11-14)
 
