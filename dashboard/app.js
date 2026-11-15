@@ -2604,7 +2604,7 @@ async function sendPause() {
     state.session.paused = p.mode === "resume" ? rest : rest.concat([...done]);
   }
   renderPause();
-  await Promise.all(asked.map((x) => loadRepo(x.repo, true)));
+  if (!limited()) await Promise.all(asked.map((x) => loadRepo(x.repo, true))); // a failed read would replace the last one
 }
 
 function pauseChange(p, x) {
@@ -2660,7 +2660,7 @@ function pauseConfirm(p) {
     old && !p.sending ? h("div", { class: "state note" }, "These previews are about to expire: ask again before confirming.") : null,
     h("div", { class: "actions" },
       old && !p.sending
-        ? h("button", { type: "button", id: "pause-go", onclick: () => openPause(p.mode) }, "Ask again")
+        ? h("button", { type: "button", id: "pause-go", disabled: limited(), title: pauseOff() || null, onclick: () => openPause(p.mode) }, "Ask again")
         : h("button", { type: "button", id: "pause-go", disabled: p.sending || loading || !go.length, onclick: sendPause },
           p.sending ? (resume ? "Turning on…" : "Turning off…") : `Turn ${resume ? "on" : "off"} in ${go.length}`),
       cancel,

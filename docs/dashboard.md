@@ -111,8 +111,9 @@ then access, then not found).
 "Check again" reads that repository only, past the cache, with its inbox and the merge gate's report,
 and says whether it is still unread (and why) or readable again. It writes nothing. Two causes hit
 every repository and are said once, under the bar, instead of in rows: `gh` signed out (with the
-command to copy and Check again), and the API limit, with when reads resume; Refresh, and the
-five-minute refresh, are off until then. On a health item, `a` runs Check again (a read).
+command to copy and Check again), and the API limit, with when reads resume; Refresh, the
+five-minute refresh, and Pause all, Resume n… and Retry n… (which read every repository first) are
+off until then. On a health item, `a` runs Check again (a read).
 
 ### Why a read failed
 
