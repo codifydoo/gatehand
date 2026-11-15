@@ -49,16 +49,19 @@
 - Dashboard: the repository payload carries each role's `maxAttemptsPerIssue`, `maxCiFixes`,
   `breakerThreshold` and `timeoutMinutes` (null when `policy.json` does not set one), and each
   scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
-  branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only;
-  the page does not show them yet (#21, #22).
+  branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only
+  (#21, #22); Activity shows the next scheduled runs, and a repository's Agents tab shows the limits
+  and schedules.
 - In a narrow window the open item of Needs you expands in place under its row, as in a mail app,
   and the sidebar folds into one line with ☰.
 - Keys on Needs you: j/k move, o goes into the item, a opens its primary action's confirm (Enter
   confirms), r opens Reject…, Esc closes the confirm, ? lists them.
-=======
-  branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only
-  (#21, #22); Activity shows the next scheduled runs, and a repository's Agents tab shows the limits
-  and schedules.
+- Dashboard: Pause all's record. A `set_variable` that turns `AGENTS_ENABLED` off can carry
+  `"pause_all": true`; once that write succeeds, the repository is kept in a `paused` list in the
+  dashboard's local config file, which `/api/session` returns, so Resume turns on only what Pause
+  all turned off. The list is dropped per repository when the page turns its agents on, or a read
+  finds them on. No new write to GitHub; a config file from before loads unchanged. The page does
+  not offer Pause all yet (#29).
 - Dashboard: a weekly budget in US dollars and a warning line (a share of it, 80% by default), kept
   in the dashboard's local config file, set through `POST /api/budget` and returned by
   `/api/session`. A setting on this machine only: nothing is written to GitHub, no agent reads it,

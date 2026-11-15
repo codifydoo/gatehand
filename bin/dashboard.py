@@ -1361,16 +1361,25 @@ def plan_variable(repo, d, viewer, body):
         raise ApiError(400, "name must be %s" % " or ".join(sorted(SWITCHES)))
     if value not in ("true", "false"):
         raise ApiError(400, "value must be \"true\" or \"false\"")
+    # Pause all is this same write; the marker only decides whether the dashboard remembers it.
+    pause_all = body.get("pause_all", False)
+    if not isinstance(pause_all, bool):
+        raise ApiError(400, "pause_all must be true or false")
+    if pause_all and (name, value) != ("AGENTS_ENABLED", "false"):
+        raise ApiError(400, "pause_all is only for setting AGENTS_ENABLED to false")
     need_writer(repo, d, "Changing %s" % name)
     if d.get("vars") is None:
         raise ApiError(409, "cannot read %s's variables, so cannot tell what %s is now" % (repo, name))
     cur = d["vars"].get(name)
     if cur == value:
         raise ApiError(409, "%s is already %s" % (name, cur))
+    if pause_all and cur != "true":  # already off (unset or anything but true): not Pause all's to resume
+        raise ApiError(409, "the agents are already off (AGENTS_ENABLED is %s)" % ("unset" if cur is None else cur))
     c = (call("POST", "repos/%s/actions/variables" % repo, {"name": name, "value": value}) if cur is None
          else call("PATCH", "repos/%s/actions/variables/%s" % (repo, name), {"name": name, "value": value}))
     return {"summary": "Set %s from %s to %s" % (name, "unset" if cur is None else cur, value),
-            "effect": SWITCHES[name][value], "warnings": [], "calls": [c], "done": "set %s to %s" % (name, value)}
+            "effect": SWITCHES[name][value], "warnings": [], "calls": [c], "done": "set %s to %s" % (name, value),
+            "pause_all": pause_all}
 
 
 PLANNERS = {"dispatch": plan_dispatch, "cancel_run": plan_cancel, "review_verdict": plan_verdict,
@@ -1483,18 +1492,20 @@ def budget_number(v, name, top=None):
 
 class Config:
     """discovered (the last scan), added (by hand), excluded (removed by hand; a rescan keeps them out),
+    paused (the repositories whose agents Pause all turned off, so Resume turns on only those),
     and the viewer's weekly budget (budget_usd, US dollars) and its warning line (budget_warn, a share
     of it): settings on this machine only, which warn and stop nothing, and which no agent reads."""
 
     def __init__(self, path):
         self.path = path
         self.lock = threading.Lock()
-        self.data = {"discovered": [], "added": [], "excluded": [], "scanned_at": None,
+        self.data = {"discovered": [], "added": [], "excluded": [], "paused": [], "scanned_at": None,
                      "budget_usd": None, "budget_warn": None}
+        self.paused_at = {}  # in memory: when each repository was last added to "paused" (time.monotonic)
         try:
             with open(path) as f:
                 got = json.load(f)
-            for k in ("discovered", "added", "excluded"):
+            for k in ("discovered", "added", "excluded", "paused"):
                 if isinstance(got.get(k), list):
                     self.data[k] = [r for r in got[k] if valid_repo(r)]
             self.data["scanned_at"] = got.get("scanned_at") if isinstance(got.get("scanned_at"), str) else None
@@ -1531,9 +1542,26 @@ class Config:
     def has(self, repo):
         return repo.lower() in {r.lower() for r in self.repos()}
 
+    def set_paused(self, repo, on, read_since=None):
+        """Add repo to the Pause all record, or take it off. read_since (time.monotonic) is when the read
+        that says the agents are on began: one that began before the repository was added says nothing
+        about the pause. Writes the file only on a change."""
+        key = repo.lower()
+        def apply(c):
+            if not on and read_since is not None and read_since <= self.paused_at.get(key, float("-inf")):
+                return False
+            if (key in {r.lower() for r in c["paused"]}) == on:
+                return False
+            if on:
+                self.paused_at[key] = time.monotonic()
+            c["paused"] = [r for r in c["paused"] if r.lower() != key] + ([repo] if on else [])
+        self.update(apply)
+
     def update(self, fn):
+        """fn changes the data under the lock; returning False means no change, and nothing is written."""
         with self.lock:
-            fn(self.data)
+            if fn(self.data) is False:
+                return
             os.makedirs(os.path.dirname(self.path), mode=0o700, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=os.path.dirname(self.path), prefix=".dashboard.")
             try:
@@ -1560,15 +1588,20 @@ class Cache:
         self.key_locks = {}
 
     def get(self, key, fn, fresh=False, ttl=CACHE_TTL):
+        return self.get_stamped(key, fn, fresh, ttl)[0]
+
+    def get_stamped(self, key, fn, fresh=False, ttl=CACHE_TTL):
+        """The value, and when the read that made it began (time.monotonic)."""
         with self.lock:
             kl = self.key_locks.setdefault(key, threading.Lock())
         with kl:
             hit = self.vals.get(key)
             if hit and not fresh and hit[0] > time.monotonic():
-                return hit[1]
+                return hit[1], hit[2]
+            began = time.monotonic()
             val = fn()
-            self.vals[key] = (time.monotonic() + ttl, val)
-            return val
+            self.vals[key] = (time.monotonic() + ttl, val, began)
+            return val, began
 
     def drop(self, prefix):
         with self.lock:
@@ -1722,7 +1755,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise ApiError(404, "not found")
         repo = self.repo_from(m.group(1), m.group(2))
         if m.group(3) is None:
-            return self.send(200, cache.get("repo:" + repo, lambda: read_repo(repo), fresh))
+            d, began = cache.get_stamped("repo:" + repo, lambda: read_repo(repo), fresh)
+            self.note_switch(repo, d, began)
+            return self.send(200, d)
         if m.group(3) == "/gate":
             return self.send(200, cache.get("gate:" + repo, lambda: read_gate(repo), fresh))
         d = cache.get("repo:" + repo, lambda: read_repo(repo))
@@ -1743,10 +1778,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         cache = self.server.cache
         # The login gh will post as now (gh auth switch mid-session).
         viewer = (cache.get("user", lambda: gh_json(["api", "user"]) or {}, fresh=True, ttl=3600) or {}).get("login") or ""
-        d = cache.get("repo:" + repo, lambda: read_repo(repo), fresh=True)
+        d, began = cache.get_stamped("repo:" + repo, lambda: read_repo(repo), fresh=True)
+        self.note_switch(repo, d, began)
         if body.get("viewer") != viewer:  # the page's confirm named the login it will act as
             raise ApiError(409, "gh is now signed in as %s, not %s as this page says: reload the page" % (viewer, body.get("viewer")))
         return repo, viewer, d
+
+    def note_switch(self, repo, d, began):
+        """Someone turned the agents on elsewhere: Pause all no longer holds this repository off. Only a
+        read that began after the pause counts (one cached from before it, or in flight, does not)."""
+        if (d.get("vars") or {}).get("AGENTS_ENABLED") == "true":
+            self.server.config.set_paused(repo, False, read_since=began)
 
     def plan(self, repo, viewer, d, body):
         p = PLANNERS[body["type"]](repo, d, viewer, body)
@@ -1788,6 +1830,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     raise ApiError(409, "this has changed since the preview (a new head, a run, a variable): preview it again")
                 run_calls(p["calls"])
                 out = {"done": p["done"]}
+                if kind == "set_variable" and p["calls"][0]["body"]["name"] == "AGENTS_ENABLED":
+                    # Only after this repository's own write succeeded; any turn-on ends the pause.
+                    self.server.config.set_paused(repo, p["pause_all"])
             else:
                 raise ApiError(400, "type must be inbox_command, label or %s" % ", ".join(sorted(PLANNERS)))
         finally:  # a write that failed half way changed something too
@@ -1798,9 +1843,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def repo_list(self):
         c = self.server.config
+        on = {r.lower() for r in c.repos()}
         return {"repos": c.repos(), "excluded": list(c.data["excluded"]), "scanned_at": c.data["scanned_at"],
                 "scan_notes": list(c.data.get("scan_notes") or []),
-                "scan_unreadable": list(c.data.get("scan_unreadable") or [])}
+                "scan_unreadable": list(c.data.get("scan_unreadable") or []),
+                "paused": [r for r in c.data["paused"] if r.lower() in on]}
 
     def rescan(self):
         found, notes, unreadable = discover()
@@ -1896,7 +1943,7 @@ def main(argv=None):
     ap.add_argument("--print-url", action="store_true", help="print the URL with its session secret")
     ap.add_argument("--idle-minutes", type=int, default=120, help="stop after this long with no page open (0: never)")
     ap.add_argument("--ready-file", help="write {port, token} here (mode 0600) once listening; for scripts and tests")
-    ap.add_argument("--config", help="the repository list and the weekly budget (default: %s)" % config_path())
+    ap.add_argument("--config", help="the repository list, the Pause all record and the weekly budget (default: %s)" % config_path())
     a = ap.parse_args(argv)
 
     token = secrets.token_urlsafe(32)

@@ -39,6 +39,11 @@
 #      any other field, is refused with a reason and changes nothing; the file keeps mode 0600 and
 #      the repository list; a config file from before the budget loads unchanged, and a budget
 #      hand-edited out of shape loads as not set. Setting it makes no gh call.
+#  12. Pause all is the same AGENTS_ENABLED write, with one fixed-shape marker (true or false) that is
+#      part of the previewed plan. The config file records a repository only after its own write
+#      succeeded, never one that was already off (unset counts as off), and drops it when the page
+#      turns the agents on or a read finds them on. A config file from before loads unchanged, and
+#      the file stays 0600. /api/session returns the record, so Resume turns on only those.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -215,6 +220,30 @@ for c in ("60 * * * *", "* * * *", "*/0 * * * *", "0 0 * * MON", "@@CRON_CODER@@
     except ValueError:
         got = "refused"
     check("next run: %r is refused" % c, got, "refused")
+
+import tempfile
+cdir = tempfile.mkdtemp()
+cpath = os.path.join(cdir, "dashboard.json")
+with open(cpath, "w") as f:
+    json.dump({"discovered": ["a/b", "c/d"], "added": [], "excluded": [], "scanned_at": "2026-11-01T00:00:00Z"}, f)
+cfg = d.Config(cpath)
+check("pause record: a config file from before loads, with nothing paused", (cfg.repos(), cfg.data["paused"]), (["a/b", "c/d"], []))
+with open(cpath, "w") as f:
+    json.dump({"discovered": ["a/b"], "paused": ["a/b", "../x", 7, "a/b\n"]}, f)
+check("pause record: only repository names load", d.Config(cpath).data["paused"], ["a/b"])
+cfg.set_paused("a/b", True)
+cfg.set_paused("A/B", True)
+check("pause record: a repository is on it once", cfg.data["paused"], ["a/b"])
+check("pause record: the file stays 0600", oct(os.stat(cpath).st_mode & 0o777), "0o600")
+cfg.set_paused("A/b", False)
+check("pause record: taken off, whatever the case", json.load(open(cpath))["paused"], [])
+import time
+before = time.monotonic()
+cfg.set_paused("a/b", True)
+cfg.set_paused("a/b", False, read_since=before)
+check("pause record: a read that began before the pause does not take it off", cfg.data["paused"], ["a/b"])
+cfg.set_paused("a/b", False, read_since=time.monotonic())
+check("pause record: one that began after it does", cfg.data["paused"], [])
 
 for r in ("o/r", "my-org/repo.name", "o/r_1"):
     check("repo name ok: %r" % r, d.valid_repo(r), True)
@@ -755,7 +784,7 @@ xrules() {
   stub_gh_on "api -X POST repos/o/r/actions/workflows/*/dispatches --input -" ""
   stub_gh_on "api -X POST repos/o/r/actions/runs/*/cancel" ""
   stub_gh_on "api -X POST repos/o/r/issues/*/comments --input -" '{"id":777,"html_url":"https://github.com/o/r/pull/50#issuecomment-777"}'
-  stub_gh_on "api -X PATCH repos/o/r/actions/variables/* --input -" ""
+  stub_gh_on "api -X PATCH repos/o/r/actions/variables/* --input -" "" "${VARSET_RC:-0}" "${VARSET_ERR:-}"
   stub_gh_on "api -X POST repos/o/r/actions/variables --input -" ""
 }
 xrules
@@ -897,7 +926,55 @@ expect "any other variable: refused" "$(vcode '{"repo":"o/r","type":"set_variabl
 p="$(preview '{"repo":"o/r","type":"set_variable","name":"AGENT_AUTO_MERGE","value":"true"}')"
 VARS_OUT='{"variables":[{"name":"AGENTS_ENABLED","value":"true"},{"name":"AGENT_AUTO_MERGE","value":"false"},{"name":"AGENT_OWNER_LOGIN","value":"owner-login"}]}'; xrules
 expect "a variable someone set since the preview: refused" "$(pcode "$(jq -c --arg t "$(jq -r .confirm <<<"${p}")" '{repo: "o/r", type: "set_variable", name: "AGENT_AUTO_MERGE", value: "true", confirm: $t}' <<<'{}')")" 409
+# 12. Pause all
+VOFF='{"variables":[{"name":"AGENTS_ENABLED","value":"false"},{"name":"AGENT_OWNER_LOGIN","value":"owner-login"}]}'
+VUNSET='{"variables":[{"name":"AGENT_OWNER_LOGIN","value":"owner-login"}]}'
+PAUSE='{"repo":"o/r","type":"set_variable","name":"AGENTS_ENABLED","value":"false","pause_all":true}'
+paused() { get /api/session | jq -c .paused; }
+VARS_OUT="${VARS_OK}"; xrules
+expect "pause all: nothing paused yet" "$(paused)" "[]"
+for bad in '"yes"' '1' 'null' '{}'; do
+  expect "pause all: a marker that is not true or false: refused (${bad})" "$(vcode "$(jq -c ".pause_all = ${bad}" <<<"${PAUSE}")")" 400
+done
+expect "pause all: only for turning the agents off" "$(vcode '{"repo":"o/r","type":"set_variable","name":"AGENTS_ENABLED","value":"true","pause_all":true}')" 400
+expect "pause all: never for auto-merge" "$(vcode '{"repo":"o/r","type":"set_variable","name":"AGENT_AUTO_MERGE","value":"false","pause_all":true}')" 400
+expect "pause all: the preview is the switch's own" "$(preview "${PAUSE}" | jq -c '[.summary, .calls]')" \
+  '["Set AGENTS_ENABLED from true to false",["PATCH repos/o/r/actions/variables/AGENTS_ENABLED {\"name\": \"AGENTS_ENABLED\", \"value\": \"false\"}"]]'
+expect "pause all: the marker is part of what was previewed" "$(ccode '{"repo":"o/r","type":"set_variable","name":"AGENTS_ENABLED","value":"false"}' "${PAUSE}")" 409
+expect "pause all: and cannot be added at the confirm" "$(ccode "${PAUSE}" '{"repo":"o/r","type":"set_variable","name":"AGENTS_ENABLED","value":"false"}')" 409
+expect "and a refused one is not recorded" "$(paused)" "[]"
+VARSET_RC=1 VARSET_ERR="HTTP 403"; xrules
+expect "pause all: GitHub refuses the write" "$(ccode "${PAUSE}")" 502
+expect "and it is not recorded" "$(paused)" "[]"
+VARSET_RC=0 VARSET_ERR=""; xrules
+p="$(preview "${PAUSE}")"
+VARS_OUT="${VOFF}"; xrules
+expect "pause all: turned off since the preview: refused" "$(pcode "$(jq -c --arg t "$(jq -r .confirm <<<"${p}")" '. + {confirm: $t}' <<<"${PAUSE}")")" 409
+expect "and it is not recorded (it was off before)" "$(paused)" "[]"
+expect "pause all: a repository already off is not Pause all's" "$(vcode "${PAUSE}")" 409
+VARS_OUT="${VUNSET}"; xrules
+expect "pause all: AGENTS_ENABLED unset is off too" "$(vcode "${PAUSE}")" 409
+VARS_OUT="${VARS_OK}"; xrules
+expect "pause all: done" "$(confirm "${PAUSE}" | jq -r .done)" "set AGENTS_ENABLED to false"
+expect "pause all: recorded after its write" "$(paused)" '["o/r"]'
+expect "pause all: kept in the config file, still 0600" "$(jq -c .paused "${TMP}/cfg/dashboard.json") $(mode_of "${TMP}/cfg/dashboard.json")" '["o/r"] 600'
+VARS_OUT="${VOFF}"; xrules
+get /api/repo/o/r >/dev/null
+expect "pause all: a read that finds it off keeps it" "$(paused)" '["o/r"]'
+expect "resume: done" "$(confirm '{"repo":"o/r","type":"set_variable","name":"AGENTS_ENABLED","value":"true"}' | jq -r .done)" "set AGENTS_ENABLED to true"
+expect "resume: off the record" "$(paused)" "[]"
+VARS_OUT="${VARS_OK}"; xrules
+confirm "${PAUSE}" >/dev/null
+expect "pause all again: recorded" "$(paused)" '["o/r"]'
+VARS_OUT="${VOFF}"; xrules
+confirm '{"repo":"o/r","type":"set_variable","name":"AGENTS_ENABLED","value":"true","pause_all":false}' >/dev/null
+expect "the agents turned on from the page without the marker: off the record too" "$(paused)" "[]"
+VARS_OUT="${VARS_OK}"; xrules
+confirm "${PAUSE}" >/dev/null
+get /api/repo/o/r >/dev/null
+expect "turned on elsewhere: the next read that finds AGENTS_ENABLED true drops it" "$(paused)" "[]"
 VARS_OUT="" VARS_RC=1 VARS_ERR="HTTP 403"; xrules
+expect "pause all: variables unreadable: refused, so never counted" "$(vcode "${PAUSE}")" 409
 expect "variables unreadable: no switch" "$(vcode '{"repo":"o/r","type":"set_variable","name":"AGENTS_ENABLED","value":"false"}')" 409
 VARS_OUT="${VARS_OK}" VARS_RC=0 VARS_ERR=""
 PERM=TRIAGE; xrules
