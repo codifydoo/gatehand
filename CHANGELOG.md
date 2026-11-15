@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Dashboard: a failed read says why, as one cause from a fixed set (`sso`, `signed_out`,
+  `rate_limited` with the time the limit resets, `not_found`, `no_access`, `unknown`), in each
+  repository's new `unreadable` list, beside `error` in a failed request's answer, and for a scan
+  that could not see everything in `scan_unreadable` beside its notes. The page does
+  not show it yet. Installed repositories need no update: the dashboard runs from the package.
 - The dashboard is laid out as a sidebar and views instead of one long page: Needs you, Activity,
   Week, a Repositories list, and per repository four tabs (Pipeline, Agents, Runs and spend,
   Settings). The view is in the address, so a reload or a link keeps it, and the number waiting for
@@ -26,6 +31,21 @@
   Approve… and Request changes… confirm there too, with the server's preview.
 - A blocked issue's pane reruns the coder or holds it from the pane. The "to merge" and "to close"
   panes link to GitHub to merge or close (the page does neither), and to Settings for auto-merge.
+- A repository's tabs route instead of acting twice: an open request, a stopped role, a held PR,
+  a blocked issue, a PR to merge and an issue to close link to their item in Needs you. What has no
+  item (pausing a role, the switches, unqueue, hold, starting the coder, running the merge gate,
+  cancelling a run) confirms under its own button, as in a pane, with the same writes as before.
+  Agents shows each role's runs today, failures in a row and open PRs against its limits, when it
+  runs next, and each scheduled workflow's cron, last run and next run; Runs and spend links each
+  ledger row to its item and its run. The Pipeline says when the agents are off, and what to do
+  when nothing is queued. Installed repositories need no update.
+- Activity lists, across every repository, what is running now (with Cancel), what is not moving
+  and not waiting on you, one row per cause per repository with when it moves (agents off, a role
+  stopped, a daily or open-PR limit reached, a lock no run holds), and the agent runs that finished
+  today. A part that could not be read is named and counts as unknown, never as none. With nothing
+  running, it shows the next scheduled runs ("Next: merge gate 18:11 in 3 repositories, coder 18:17
+  in 2"); a repository with the agents off adds only the digest, and a workflow whose time is not
+  known in every repository is left out rather than guessed.
 - Dashboard: the repository payload carries each role's `maxAttemptsPerIssue`, `maxCiFixes`,
   `breakerThreshold` and `timeoutMinutes` (null when `policy.json` does not set one), and each
   scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
@@ -33,6 +53,13 @@
   the page does not show them yet (#21, #22).
 - In a narrow window the open item of Needs you expands in place under its row, as in a mail app,
   and the sidebar folds into one line with ☰.
+=======
+  branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only
+  (#21, #22); Activity shows the next scheduled runs, and a repository's Agents tab shows the limits
+  and schedules.
+- Project site: `site/` holds five static pages (home, how it works, security, the dashboard, get
+  started), published to GitHub Pages by `.github/workflows/pages.yml` on a push to `main`. Not
+  part of the package: nothing changes in installed repositories.
 - Nothing installed into repositories changes: no update is needed.
 
 ## 0.7.0 (2026-11-14)
