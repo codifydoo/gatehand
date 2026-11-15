@@ -44,6 +44,11 @@
 #      succeeded, never one that was already off (unset counts as off), and drops it when the page
 #      turns the agents on or a read finds them on. A config file from before loads unchanged, and
 #      the file stays 0600. /api/session returns the record, so Resume turns on only those.
+#  13. Whether a writer commented on an open blocked or failed request's issue since the request is
+#      the login and time of the newest such comment by an account with write access (the
+#      collaborator permission, as actor_trusted), or null: a non-writer's, the agent bot's and one
+#      from before the request do not count, a failed lookup is an error, never null. The comment's
+#      text is neither asked for nor sent, and a page load reads no request's comments.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -504,6 +509,46 @@ expect "finished runs, without the skipped ones" "$(jq -c '[.recent_runs[].id]' 
 expect "the issue bodies stay on the server" "$(jq '[.. | objects | select(has("body"))] | length' <<<"${r}")" 0
 expect "nothing waits as unknown" "$(jq '[.waiting[] | select(.kind == "unknown")] | length' <<<"${r}")" 0
 expect "inbox requests: the Bot's, not a user's named like it" "$(get /api/repo/o/r/inbox | jq -c '[.requests[] | [.id, .answered]]')" '[["REQ-20261113-ab12",false],["REQ-20261112-cd34",true]]'
+
+# 13. Whether a writer commented on the request's issue (#42, REQ-20261113-ab12, filed 2026-11-13T10:00:00Z)
+# since the request. Each comment node carries a body the server must never pass on.
+expect "a page load reads no request's issue comments" "$(stub_gh_calls | grep -c 'number=42')" 0
+WROTE='2026-11-13T10:00:00Z'
+node() { jq -nc --arg t "$1" --arg l "$2" --arg at "$3" '{author: {__typename: $t, login: $l}, createdAt: $at, body: "SECRET-COMMENT-TEXT"}'; }
+writer_rules() { # writer_rules <nodes json array> [the permission lookup's rc and stderr for maint]
+  stub_gh_reset_rules
+  rules
+  stub_gh_on "api graphql -f name=r -F number=42 -f owner=o -f query=query(\$owner*" \
+    "$(jq -nc --argjson n "$1" '{data: {repository: {issue: {comments: {pageInfo: {hasPreviousPage: false}, nodes: $n}}}}}')"
+  stub_gh_on "api repos/o/r/collaborators/maint/permission" '{"permission":"write"}' "${2:-0}" "${3:-}"
+  stub_gh_on "api repos/o/r/collaborators/reader/permission" '{"permission":"read"}'
+  stub_gh_on "api repos/o/r/collaborators/stranger/permission" "" 1 "gh: Not Found (HTTP 404)"
+}
+wc_of() { get "/api/repo/o/r/request/REQ-20261113-ab12?fresh=1"; }
+writer_rules "[$(node User maint 2026-11-13T09:00:00Z),$(node User maint 2026-11-14T07:00:00Z),$(node User reader 2026-11-14T08:00:00Z),$(node User stranger 2026-11-14T08:30:00Z),$(node Bot gatehand 2026-11-14T09:00:00Z)]"
+stub_gh_reset_calls
+w="$(wc_of)"
+expect "writer: the newest writer's comment after the request, past a non-writer's, a stranger's and the bot's" "$(jq -c .writer_comment <<<"${w}")" '{"login":"maint","at":"2026-11-14T07:00:00Z"}'
+expect "writer: the comment's text never leaves the server" "$(grep -c SECRET-COMMENT-TEXT <<<"${w}")" 0
+expect "writer: nor is it asked for" "$(stub_gh_calls | grep 'number=42' | grep -c 'body')" 0
+expect "writer: the bot is never looked up" "$(stub_gh_calls | grep -c 'collaborators/gatehand')" 0
+expect "writer: a page load reads it from the cache, not again" "$(stub_gh_reset_calls; get /api/repo/o/r/request/REQ-20261113-ab12 >/dev/null; stub_gh_calls | grep -c 'number=42')" 0
+writer_rules "[$(node User maint 2026-11-13T09:00:00Z),$(node User reader 2026-11-14T08:00:00Z),$(node User stranger 2026-11-14T08:30:00Z)]"
+expect "writer: a non-writer's comment, and a writer's from before the request, are none" "$(wc_of | jq -c .writer_comment)" null
+writer_rules "[$(node Bot gatehand 2026-11-14T09:00:00Z),$(node User gatehand 2026-11-14T09:30:00Z)]"
+expect "writer: the bot's own comment is none (a user named like it is looked up as anyone)" "$(wc_of | jq -c .writer_comment)" null
+writer_rules "[$(node User octo_acme 2026-11-14T07:00:00Z)]"
+stub_gh_on "api repos/o/r/collaborators/octo_acme/permission" '{"permission":"maintain"}'
+expect "writer: an Enterprise Managed User's login (with _) is looked up like anyone's" "$(wc_of | jq -c .writer_comment.login)" '"octo_acme"'
+writer_rules "[]"
+expect "writer: no comment at all is none" "$(wc_of | jq -c '[.id, .issue, .writer_comment]')" '["REQ-20261113-ab12",42,null]'
+writer_rules "[$(node User maint 2026-11-14T07:00:00Z)]" 1 "HTTP 502: Bad Gateway"
+expect "writer: a failed permission lookup fails the read, never reads as none" "$(code -H "X-Gatehand-Token: ${TOKEN}" "${B}/api/repo/o/r/request/REQ-20261113-ab12?fresh=1")" 502
+expect "writer: an answered request is not asked about" "$(code -H "X-Gatehand-Token: ${TOKEN}" "${B}/api/repo/o/r/request/REQ-20261112-cd34")" 404
+expect "writer: nor one that is not on the inbox" "$(code -H "X-Gatehand-Token: ${TOKEN}" "${B}/api/repo/o/r/request/REQ-20261113-0000")" 404
+stub_gh_reset_rules
+rules
+
 g="$(get /api/repo/o/r/gate)"
 expect "the gate: the newest run that ran" "$(jq -r .run.url <<<"${g}")" "https://github.com/o/r/actions/runs/5"
 expect "the gate: a PR's newest line wins; one the newest run skipped comes from the scheduled run" "$(jq -c '[.prs["50"].text, .prs["51"].text]' <<<"${g}")" '["wait: the review is running","merged"]'

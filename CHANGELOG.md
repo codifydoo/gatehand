@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A blocked or failed request's pane says under step 1 whether someone with write access has
+  commented on the issue since the request, and who and when (#24). The server reads it per request,
+  for the open pane only (when it opens and on each refresh), from the new
+  `/api/repo/<owner>/<name>/request/<REQ-id>`; the comment's text is never read, and the agent bot's
+  comments do not count. Installed repositories
+  need no update: the dashboard runs from the package.
 - Week shows the last seven days' cost as a floor against a weekly budget you set on the page (kept
   on this machine, #28), with its warning line; cost by day against the budget's pace, by repository
   and outcomes by role; PRs merged by the gate and coder runs that opened a PR. Runs with no cost
