@@ -2604,7 +2604,7 @@ async function sendPause() {
     state.session.paused = p.mode === "resume" ? rest : rest.concat([...done]);
   }
   renderPause();
-  if (!limited()) await Promise.all(asked.map((x) => loadRepo(x.repo, true))); // a failed read would replace the last one
+  await Promise.all(asked.map((x) => loadRepo(x.repo, true)));
 }
 
 function pauseChange(p, x) {
