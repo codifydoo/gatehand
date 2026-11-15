@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.2 (2026-11-15)
+
+- Dashboard: merged issues can be closed from the page. Needs you → To close (open issues labelled
+  `agent:done-pending-deploy`) was link-only; now an issue's pane has **Close it** (key `a`), and
+  each To close row has a checkbox, with Select all, Clear and **Close n…**, which closes the ticked
+  issues in one confirm (one preview per repository, like Pause all). It goes through the same
+  preview and one-time confirm token as the other actions, re-planned from a fresh read: it closes
+  only open issues that still carry `agent:done-pending-deploy`, as completed, never the inbox or a
+  PR, and nothing while the inbox cannot be told; it needs write access and takes at most 50 issues
+  per repository per confirm. If one ticked issue was closed or relabelled since the preview, that
+  repository's whole confirm is refused. Labels stay on the closed issue, as with GitHub's own Close
+  button. Installed repositories need no update: the dashboard runs from the package (an update
+  only refreshes one line in their `.github/agents/README.md`).
+
 ## 0.8.1 (2026-11-15)
 
 - Sweep: a stale coder lock is matched only to a ledger row for its own issue. "Re-run all jobs" on
