@@ -60,6 +60,13 @@ details.fold > summary { padding: 9px 10px; color: var(--muted); }
 details.fold > summary .new { float: right; }
 details.fold > .lrow { padding-left: 24px; }
 .lrow.on { background: var(--sel); box-shadow: inset 3px 0 0 var(--accent); }
+.lrow-pick { display: flex; align-items: flex-start; border-bottom: 1px solid var(--line); }
+.lrow-pick > input { flex: none; min-width: 0; width: auto; padding: 0; margin: 12px 0 0 10px; }
+.lrow-pick > a.lrow { flex: 1; min-width: 0; border-bottom: 0; }
+details.fold > .lrow-pick { padding-left: 14px; }
+.close-bar { padding: 6px 10px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+.close-bar .state { margin: 0; }
+.close-confirm { margin: 6px 10px; }
 .act h3 { font-size: 12px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
 .alist { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
 .alist > p { margin: 0; padding: 9px 10px; }

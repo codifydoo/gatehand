@@ -13,7 +13,7 @@ else: no packages, no build, no server of ours. It opens your browser on `127.0.
 
 This file is not installed into your repositories; the dashboard runs on your machine, and what it
 changes on GitHub is only what you could change by hand: a comment, a label, a workflow run, a
-repository variable.
+repository variable, closing a merged issue.
 
 ## The page
 
@@ -170,11 +170,18 @@ labels afresh and refuses, with the reason, when it is no longer `agent:blocked`
 `agent:needs-human`, or is `agent:in-progress` or `agent:pr-open`: a second click from a page not yet
 refreshed posts nothing.
 
-**To merge, to close.** The two folded groups open link-only panes, since the page merges nothing
-and closes nothing. "To merge" says the gate found nothing in the way and auto-merge is a dry run,
-shows the gate's line, and links to merge the PR on GitHub or to turn auto-merge on in Settings;
-Hold, Run review, Run merge gate and Request changes… stay available, quieter. "To close" says a
-merge is not a deploy and links to close the issue on GitHub once the fix is live.
+**To merge, to close.** "To merge" opens a link-only pane, since the page merges nothing: it says
+the gate found nothing in the way and auto-merge is a dry run, shows the gate's line, and links to
+merge the PR on GitHub or to turn auto-merge on in Settings; Hold, Run review, Run merge gate and
+Request changes… stay available, quieter. "To close" says a merge is not a deploy, so the agents
+never close an issue: you do, once the fix is live. Its pane offers "Close it", and each of its rows
+carries a checkbox: tick the issues whose fix is live and "Close n…" closes them together. Either
+way the server previews it (one preview per repository, in one confirm above the rows for ticked
+issues) and closes, as completed, only issues that are still open and still carry
+`agent:done-pending-deploy`; one closed or relabelled since the preview refuses that repository's
+confirm, and you ask again; so does a repository whose inbox issue cannot be told. At most 50 issues
+of one repository go in one confirm. A closed issue keeps its labels, as GitHub's own Close button
+leaves them.
 
 ### Health: what could not be read
 
@@ -204,7 +211,7 @@ and Retry n… (which read every repository first) are off until then.
 
 Keys on Needs you: `j` and `k` move to the next or previous item as listed; `o` goes into the open
 item (or opens one); `a` opens the item's primary action's confirm, and Enter (or Space) then
-confirms, so the primary action is two keys as it is two clicks (on a to-merge or to-close item, `a`
+confirms, so the primary action is two keys as it is two clicks (on a to-merge item, `a`
 opens the GitHub link instead; on a health item it runs Check again, a read); `r` opens Reject…; Esc
 closes a confirm; `?` lists them. Keys do nothing while you type in a field (except Esc) or with a
 modifier held, and there is no key that posts without its confirm.
@@ -310,7 +317,8 @@ with no page open; a page in a background tab counts as open.
 ## What you can do from it
 
 Every button asks you to confirm and says what will happen: in an item pane or on a repository's
-tabs, under the button; for Pause all, under the bar; on Activity, in a dialog. Then it does it with
+tabs, under the button; for Pause all, under the bar; for closing ticked issues, above the To close
+rows; on Activity, in a dialog. Then it does it with
 your own `gh` login, so the agents see exactly what they would see if you had done it on GitHub, and
 apply the same rules.
 
@@ -329,6 +337,7 @@ apply the same rules.
 | Approve…, Request changes… | an agent PR's pane, or on the Pipeline tab for one with no row in Needs you | posts a review comment the merge gate and the fixer read (see Verdicts); Request changes can also start the fixer on it | people with write access, never the agent bot |
 | Run review, Run merge gate | an agent PR's pane, or on the Pipeline tab for one with no row; Run merge gate for every agent PR on the Agents tab | dispatches `claude-code-review.yml` or `agent-merge.yml` on the default branch, for that PR (or every agent PR) | people with write access |
 | Cancel | Activity, and a repository's Agents tab | cancels a run of one of Gatehand's nine workflows | people with write access |
+| Close it, Close n… | a to-close issue's pane; Close n… above the To close rows, for the ticked ones | closes each as completed (`PATCH` its `state` to `closed`), only while it is open and carries `agent:done-pending-deploy` | people with write access |
 
 A button the agents would ignore from you is shown disabled with the reason. After an inbox command
 the page re-reads the inbox every ten seconds for two minutes until the agent's answer appears; the
@@ -354,9 +363,9 @@ command line it posts is built by the server in exactly the grammar `agent-inbox
 reason is cut to one line of 300 characters. `agent:allow-protected` is never offered: opening
 protected paths stays behind approving the agent's own `protected` request.
 
-### Runs, verdicts and switches: preview, then confirm
+### Runs, verdicts, closes and switches: preview, then confirm
 
-These change what the agents do next, so the server first shows exactly what it will do: each
+These change what the agents do next (or, for a close, what is left for anyone to do), so the server first shows exactly what it will do: each
 GitHub call with its body, the comment it would post, what to expect, and anything in the way (a
 coder run already running, or waiting: GitHub keeps one waiting run per concurrency group and
 cancels the older one for the newer). Confirming sends a one-time token, valid five minutes. The
@@ -461,7 +470,8 @@ tab it opened can talk to it.
   list. Issue bodies stay on the server; only what the page shows is sent to it.
 - It writes to GitHub only through the actions above: a comment on the inbox issue, one of five
   label changes, a dispatch of four workflows, a cancel of a Gatehand run, a verdict comment on an
-  agent PR, two variables set to `true` or `false`. Each is a fixed shape the server builds; no
+  agent PR, two variables set to `true` or `false`, closing an issue that carries
+  `agent:done-pending-deploy`. Each is a fixed shape the server builds; no
   request from the page is passed through. Reading writes nothing to GitHub. `tests/dashboard/dashboard.test.sh`
   pins each point above, runs every command the page can post through the real `parse_commands`, and
   every verdict through the real `review_verdict`.

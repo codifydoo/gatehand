@@ -11,8 +11,8 @@ scripts read them (agent-digest.sh, agent-state.sh, agent-lib.sh).
 Reading writes nothing. Its writes to GitHub are the page's buttons, each a fixed shape built here
 and done with your own login after you confirm: an inbox command posted on the inbox issue, one of a
 few agent label changes, and, after a preview of the exact calls, starting or cancelling an agent
-workflow run, a review verdict on an agent PR, or turning AGENTS_ENABLED or AGENT_AUTO_MERGE on or
-off (see "actions" below). Locally it writes only its list of repositories, in
+workflow run, a review verdict on an agent PR, turning AGENTS_ENABLED or AGENT_AUTO_MERGE on or
+off, or closing merged issues that carry agent:done-pending-deploy (see "actions" below). Locally it writes only its list of repositories, in
 ${XDG_CONFIG_HOME:-~/.config}/gatehand/dashboard.json.
 
 Security (docs/dashboard.md): it listens on 127.0.0.1 only; every /api/ request must carry the
@@ -1585,8 +1585,43 @@ def plan_variable(repo, d, viewer, body):
             "pause_all": pause_all}
 
 
+CLOSE_MAX = 50
+
+
+def plan_close(repo, d, viewer, body):
+    """Close merged issues once their fix is live: only open issues carrying agent:done-pending-deploy
+    in the read just made (the agents never close one; a person decides the fix is live). Each is a
+    plain close as completed, the same as GitHub's own Close button; its labels stay."""
+    nums = body.get("numbers")
+    if not isinstance(nums, list) or not 1 <= len(nums) <= CLOSE_MAX:
+        raise ApiError(400, "numbers must be a list of 1 to %d issue numbers" % CLOSE_MAX)
+    for n in nums:
+        pos_int(n, "each issue number")
+    if len(set(nums)) != len(nums):
+        raise ApiError(400, "an issue number is listed twice")
+    need_writer(repo, d, "Closing an issue")
+    if d.get("issues") is None:
+        raise ApiError(409, "cannot read %s's open issues, so cannot tell which still wait to be closed" % repo)
+    if d.get("inbox_state") == "unknown":
+        raise ApiError(409, "cannot tell which issue is the inbox in %s, so nothing is closed" % repo)
+    if d.get("inbox") and d["inbox"]["number"] in nums:
+        raise ApiError(409, "#%d is the agent inbox" % d["inbox"]["number"])
+    pending = {i["number"] for i in d["issues"].get("done_pending_deploy") or []}
+    gone = [n for n in nums if n not in pending]
+    if gone:
+        raise ApiError(409, "%s %s not an open issue with agent:done-pending-deploy any more (closed or relabelled since): refresh"
+                       % (", ".join("#%d" % n for n in gone), "is" if len(gone) == 1 else "are"))
+    nums = sorted(nums)
+    which = ", ".join("#%d" % n for n in nums)
+    return {"summary": "close %s as completed" % which,
+            "effect": "%s closed on GitHub, as by its own Close button; the agents do nothing more with %s"
+                      % ("it is" if len(nums) == 1 else "they are", "it" if len(nums) == 1 else "them"),
+            "warnings": [], "done": "closed %s" % which,
+            "calls": [call("PATCH", "repos/%s/issues/%d" % (repo, n), {"state": "closed", "state_reason": "completed"}) for n in nums]}
+
+
 PLANNERS = {"dispatch": plan_dispatch, "cancel_run": plan_cancel, "review_verdict": plan_verdict,
-            "set_variable": plan_variable}
+            "set_variable": plan_variable, "close_issues": plan_close}
 
 
 def run_calls(calls):

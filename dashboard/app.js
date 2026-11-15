@@ -333,7 +333,7 @@ function needRows(repo) {
   // To close: merged, closed by a person once the fix is live.
   for (const i of issues.done_pending_deploy || []) {
     add({ kind: "close", key: `${repo}|close|${i.number}`, at: i.updated_at || "", issue: i.number,
-      title: `#${i.number} merged`, text: i.title, hint: "Close it on GitHub once the fix is live", href: i.url });
+      title: `#${i.number} merged`, text: i.title, hint: "Close it once the fix is live", href: i.url });
   }
   return out;
 }
@@ -507,15 +507,25 @@ function needsView() {
   state.shownKeys = shownRows.map((r) => r.key); // for the keys: j/k move through the list as shown
   state.selKey = sel ? sel.key : "";
   if (sel) state.lastSelKey = sel.key;
-  const row = (r) => (narrow && sel === r && pane ? [needRow(r, isNew(r), true), paneBox(true)] : needRow(r, isNew(r), sel === r));
+  const one = (r, on) => (r.kind === "close" ? pickRow(r, needRow(r, isNew(r), on)) : needRow(r, isNew(r), on));
+  const row = (r) => (narrow && sel === r && pane ? [one(r, true), paneBox(true)] : one(r, sel === r));
+  const bar = (k) => (k === "close" && of(k).length ? closeBar(of(k)) : null);
+  if (!of("close").length && state.session && !c.needsLoading) { // nothing left to close: an outcome or a confirm for it is old news
+    state.closeOut = "";
+    if (state.closeBulk && !state.closeBulk.sending) state.closeBulk = null;
+  }
   let list;
   if (kind) {
-    list = of(kind).map(row);
+    list = [bar(kind), of(kind).map(row)];
   } else {
+    // A fold stays open while something in it is open, ticked or being closed.
+    // Opened by hand, a fold stays open across re-renders (ticking a row re-renders the list).
+    const keep = (k) => of(k).includes(sel) || !!state.folds[`group-${k}`]
+      || (k === "close" && (!!state.closeBulk || !!state.closeOut || of(k).some((r) => state.closeSel.has(r.key))));
     list = [rows.filter((r) => !FOLDED[r.kind]).map(row),
-      Object.keys(FOLDED).map((k) => (of(k).length ? h("details", { class: "fold", open: of(k).includes(sel) },
+      Object.keys(FOLDED).map((k) => (of(k).length ? h("details", { class: "fold", open: keep(k), ontoggle: (e) => { state.folds[`group-${k}`] = e.currentTarget.open; } },
         h("summary", {}, FOLDED[k](of(k).length), of(k).some(isNew) ? h("span", { class: "new" }, "NEW") : null),
-        of(k).map(row)) : null))];
+        bar(k), of(k).map(row)) : null))];
   }
   // What could not be read: named, never counted.
   // What could not be read: one health row per repository, at the end, never counted. A cause that
@@ -1384,7 +1394,7 @@ function issuePane(r) {
       h("div", {}, issue ? `labels: ${issue.labels.join(", ") || "none"} · ` : "", d.inbox ? link(d.inbox.url, `inbox #${d.inbox.number}`) : "no inbox"))];
 }
 
-// --- the link-only panes: to merge, to close. The page merges nothing and closes nothing. ----------------
+// --- the folded groups: to merge (link-only: the page merges nothing) and to close. ---------------------
 function mergePane(r) {
   const repo = r.repo;
   const d = state.repos[repo];
@@ -1421,11 +1431,132 @@ function closePane(r) {
     h("h2", {}, r.title, r.text ? h("span", { class: "muted" }, ` ${r.text}`) : null),
     track(4, "Merged · not closed"),
     kv("Why it's here", "Its PR merged and it carries agent:done-pending-deploy. A merge is not a deploy: the agents never close an issue; you do, once the fix is live."),
-    kv("What happens next", "Nothing. It stays in this group until it is closed."),
-    step(null, h("div", { class: "actions" }, h("a", { href: r.href, class: "cta" }, "Close on GitHub ↗")),
-      h("div", { class: "muted" }, "The page has no close action."), h("div", { class: "muted beside" }, runsBeside(rows, "Last 7 days", true))),
+    kv("What happens next", "Nothing. It stays in this group until it is closed. To close several at once, tick them in the list."),
+    step(null, paneActions(r, [closeAct(r, d, [n])], runsBeside(rows, "Last 7 days", true)),
+      h("div", { class: "muted" }, link(r.href, `Read #${n} on GitHub ↗`))),
     timeline(`#${n}`, (rows || []).map(runEvent)),
     h("details", fold("gh"), h("summary", {}, "GitHub detail"), h("div", {}, issue ? `labels: ${issue.labels.join(", ") || "none"}` : "not among the open issues just read"))];
+}
+
+// Closing merged issues once the fix is live: the person decides that, never the agents. One preview
+// per repository, then the close with its one-time token, as GitHub's own Close button would.
+function closeAct(r, d, numbers) {
+  const what = numbers.map((n) => `#${n}`).join(", ");
+  return previewAct2(r, { id: "close", text: "Close it", title: `Close ${what} as completed?`, off: writerBlock(d),
+    payload: () => ({ type: "close_issues", numbers }) });
+}
+
+// The To close rows carry a checkbox; what is ticked is closed together, one preview per repository,
+// in one confirm above those rows (the shape of Pause all's).
+state.closeSel = new Set(); // row keys; a key whose row has gone is simply not shown or sent
+state.closeBulk = null; // the open confirm: { rows: [{ repo, numbers, preview, result }], sending }
+state.closeOut = ""; // what the last one did, said above the rows until dismissed
+const pickId = (r) => `pick-${r.repo.replace(/[^A-Za-z0-9_-]/g, "_")}-${r.issue}`;
+const canClose = (r) => !writerBlock(state.repos[r.repo] || {});
+function pickRow(r, rowEl) {
+  const off = writerBlock(state.repos[r.repo] || {});
+  const box = h("input", { type: "checkbox", id: pickId(r), "aria-label": `Select #${r.issue} in ${r.repo}`, disabled: !!state.closeBulk || !!off, title: off || null,
+    onchange: (e) => { if (e.target.checked) state.closeSel.add(r.key); else state.closeSel.delete(r.key); state.focusId = pickId(r); renderView(); } });
+  box.checked = state.closeSel.has(r.key);
+  return h("div", { class: "lrow-pick" }, box, rowEl);
+}
+async function openCloseBulk(picked) {
+  if (state.closeBulk || limited()) return;
+  const by = new Map();
+  for (const r of picked) by.set(r.repo, [...(by.get(r.repo) || []), r.issue]);
+  const b = { rows: [...by].map(([repo, numbers]) => ({ repo, numbers: numbers.sort((x, y) => x - y), preview: { loading: true }, result: null })), sending: false };
+  state.closeBulk = b;
+  state.closeOut = "";
+  state.focusId = "close-cancel";
+  renderView();
+  await Promise.all(b.rows.map((x) => {
+    const asked = Date.now();
+    return api("/api/action/preview", { method: "POST", body: { repo: x.repo, viewer: state.session.viewer, type: "close_issues", numbers: x.numbers } })
+      .then((pv) => { x.preview = Object.assign(pv, { at: asked }); }, (e) => { x.preview = { error: e.message, status: e.status }; })
+      .then(() => { if (state.closeBulk === b) renderView(); });
+  }));
+}
+function closeBulkCancel() {
+  if (!state.closeBulk || state.closeBulk.sending) return;
+  state.closeBulk = null;
+  state.focusId = "close-open";
+  renderView();
+}
+async function sendCloseBulk() {
+  const b = state.closeBulk;
+  if (!b || b.sending) return;
+  if (previewOld(b)) { state.closeBulk = null; openCloseBulk(b.rows.flatMap((x) => x.numbers.map((n) => ({ repo: x.repo, issue: n })))); return; }
+  const go = b.rows.filter((x) => x.preview.confirm);
+  if (!go.length) return;
+  b.sending = true;
+  for (const x of go) { // one repository at a time, each with its own token
+    x.result = "sending";
+    renderView();
+    try {
+      await api("/api/action", { method: "POST", body: { repo: x.repo, viewer: state.session.viewer, type: "close_issues", numbers: x.numbers, confirm: x.preview.confirm } });
+      x.result = "done";
+      for (const n of x.numbers) state.closeSel.delete(`${x.repo}|close|${n}`);
+    } catch (e) {
+      // A 4xx is the server refusing before it acted; a 5xx, or no answer, may come after it did (a
+      // 502 says which issues were closed before one failed).
+      x.result = { error: e.status >= 400 && e.status < 500 ? `refused: ${e.message}` : `not known which were closed (${e.message}): look on GitHub` };
+    }
+  }
+  const closed = go.filter((x) => x.result === "done").flatMap((x) => x.numbers);
+  const failed = b.rows.filter((x) => x.result !== "done").map((x) => `${repoName(x.repo)} ${x.preview.error ? `refused: ${x.preview.error}` : (x.result && x.result.error) || "not sent"}`);
+  state.closeOut = [closed.length ? `Closed ${closed.length} ${closed.length === 1 ? "issue" : "issues"}.` : "", ...failed.map((f) => `${f}.`)].filter(Boolean).join(" ");
+  state.closeBulk = null;
+  state.focusId = "close-open";
+  renderView();
+  await Promise.all(b.rows.map((x) => loadRepo(x.repo, true)));
+}
+// Above the To close rows: what is ticked and the button, or the open confirm, or the last outcome.
+const CLOSE_MAX = 50; // the server's own cap on one repository's confirm
+function closeBar(rows) {
+  const picked = rows.filter((r) => state.closeSel.has(r.key));
+  const over = [...new Set(picked.map((r) => r.repo))].filter((repo) => picked.filter((r) => r.repo === repo).length > CLOSE_MAX);
+  const b = state.closeBulk;
+  if (b) {
+    const loading = b.rows.some((x) => x.preview.loading);
+    const go = b.rows.filter((x) => x.preview.confirm);
+    const n = go.reduce((a, x) => a + x.numbers.length, 0);
+    const old = previewOld(b);
+    const status = (x) => {
+      if (x.preview.loading) return h("span", { class: "muted" }, "asking the server…");
+      if (x.preview.error) return h("span", { class: "bad" }, `${x.preview.status >= 400 && x.preview.status < 500 ? "refused" : "could not be asked"}: ${x.preview.error} · skipped`);
+      if (x.result === "sending") return "closing…";
+      if (x.result === "done") return h("span", { class: "ok" }, "closed ✓");
+      if (x.result && x.result.error) return h("span", { class: "bad" }, x.result.error);
+      return "close as completed";
+    };
+    return h("div", { class: "confirm close-confirm", role: "group", "aria-label": "Confirm" },
+      h("strong", {}, loading ? "Close the ticked issues?" : `Close ${n} ${n === 1 ? "issue" : "issues"} as completed?`),
+      b.rows.map((x) => kv(repoName(x.repo), `${x.numbers.map((k) => `#${k}`).join(", ")} · `, status(x))),
+      kv("Acts as", loading ? state.session.viewer : `${state.session.viewer} · ${n} GitHub ${n === 1 ? "call" : "calls"}, one per issue`),
+      kv("Then", "They are closed on GitHub, as by its own Close button, labels and all. Do it only for fixes that are live: a merge is not a deploy."),
+      go.length ? h("details", { class: "gh" }, h("summary", {}, "GitHub calls"),
+        h("div", {}, go.map((x) => x.preview.calls.map((c) => h("div", {}, h("code", {}, c)))))) : null,
+      !loading && !go.length ? h("div", { class: "state off" }, "Nothing to close: no ticked issue can be closed now.") : null,
+      old && !b.sending ? h("div", { class: "state note" }, "These previews are about to expire: ask again before confirming.") : null,
+      h("div", { class: "actions" },
+        h("button", { type: "button", id: "close-go", disabled: b.sending || loading || (!go.length && !old), onclick: sendCloseBulk },
+          b.sending ? "Closing…" : (old ? "Ask again" : `Close ${n}`)),
+        h("button", { type: "button", id: "close-cancel", class: "quiet", disabled: b.sending, onclick: closeBulkCancel }, "Cancel"),
+        h("span", { class: "muted beside" }, "This preview is good for 5 minutes.")));
+  }
+  const able = rows.filter(canClose);
+  const all = able.length > 0 && able.every((r) => state.closeSel.has(r.key));
+  return h("div", { class: "close-bar" },
+    state.closeOut ? h("div", { class: "state note" }, state.closeOut, " ",
+      h("button", { type: "button", id: "close-dismiss", class: "quiet small", onclick: () => { state.closeOut = ""; state.focusId = "close-open"; renderView(); } }, "Dismiss")) : null,
+    h("div", { class: "actions" },
+      h("button", { type: "button", id: "close-all", class: "quiet small", disabled: !able.length,
+        onclick: () => { for (const r of able) { if (all) state.closeSel.delete(r.key); else state.closeSel.add(r.key); } state.focusId = "close-all"; renderView(); } },
+        all ? "Clear" : "Select all"),
+      h("button", { type: "button", id: "close-open", class: "small", disabled: !picked.length || !!over.length || limited(), onclick: () => openCloseBulk(picked) },
+        picked.length ? `Close ${picked.length}…` : "Close ticked…"),
+      h("span", { class: over.length ? "bad beside" : "muted beside" }, over.length ? `At most ${CLOSE_MAX} at once in one repository (${over.map(repoName).join(", ")})`
+        : (picked.length ? `${picked.length} ticked` : "Tick the ones whose fix is live"))));
 }
 
 // --- Activity: what runs now, what is not moving and why, what finished today -------------------------
@@ -2877,9 +3008,10 @@ document.addEventListener("keydown", (e) => {
   if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || state.route.view !== "needs") return;
   if (document.querySelector("dialog[open]")) return;
   const t = e.target;
-  const typing = t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+  const typing = t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) && !(t.closest && t.closest(".lrow-pick"));
   const pane = $("pane");
   if (e.isComposing || e.keyCode === 229) return; // an input method is composing: its keys are its own
+  if (e.key === "Escape" && state.closeBulk) { e.preventDefault(); closeBulkCancel(); return; }
   if (e.key === "Escape") {
     const cancel = pane && [...pane.querySelectorAll(".confirm button")].find((b) => b.textContent === "Cancel");
     if (cancel && !cancel.disabled) { e.preventDefault(); cancel.click(); }
