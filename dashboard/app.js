@@ -2480,13 +2480,237 @@ function renderView() {
   $("excluded").textContent = ex.length ? `Hidden: ${ex.join(", ")}` : "";
 }
 
-function renderAll() { renderSide(); renderView(); renderBanner(); }
+function renderAll() { renderSide(); renderView(); renderBanner(); renderPause(); }
 
 function notice(text) {
   const n = $("notice");
   n.hidden = !text;
   n.textContent = text || "";
 }
+
+// --- Pause all, in the global bar ---------------------------------------------------------------------
+// Pause all is the "Turn agents off" switch once per repository: a preview each, one confirm that lists
+// them all, then each confirmed on its own, so a refusal is that repository's alone. The server records
+// which repositories Pause all turned off (session.paused); Resume offers only those that are still off.
+// Both read every repository afresh first: what the page last saw can be minutes old.
+state.pause = null; // the open confirm: { mode: "pause" | "resume", reading, rows, sending, ghOpen }
+state.pauseOut = null; // what the last one could not do: { mode, failed: [[repo, why]] }
+const PREVIEW_MS = 270 * 1000; // the server keeps a preview 5 minutes; ask again a little before
+
+// AGENTS_ENABLED as last read: undefined when not read (loading, failed, variables hidden), else the
+// value, null when unset. Only exactly "true" is on, as the workflows read it.
+function agentsVar(repo) {
+  const d = state.repos[repo];
+  return !d || d.loading || d.failed || !d.vars ? undefined : d.vars.AGENTS_ENABLED;
+}
+const isOff = (repo) => agentsVar(repo) !== undefined && agentsVar(repo) !== "true";
+const isLoading = (repo) => !state.repos[repo] || !!state.repos[repo].loading;
+function recorded() {
+  const rec = new Set(((state.session && state.session.paused) || []).map((r) => r.toLowerCase()));
+  return state.session.repos.filter((r) => rec.has(r.toLowerCase()));
+}
+const pausedNow = () => recorded().filter(isOff);
+// The short name, unless another repository on the list has the same one.
+function repoName(repo) {
+  const n = short(repo);
+  return state.session.repos.filter((r) => short(r) === n).length > 1 ? repo : n;
+}
+const pauseBody = (mode, repo) => Object.assign({ repo, viewer: state.session.viewer, type: "set_variable", name: "AGENTS_ENABLED" },
+  mode === "resume" ? { value: "true" } : { value: "false", pause_all: true });
+// A failure the page has since read past (the repository is now as it was meant to be) is old news.
+const pauseWanted = (mode, repo) => (mode === "resume" ? agentsVar(repo) === "true" : isOff(repo));
+
+// While the API limit holds nothing can be read, so nothing can be planned: Pause all waits, as Refresh
+// does, rather than replace what the page last read with failures.
+const pauseOff = () => (limited() ? `Off until ${hhmm(state.limitUntil)}: the API limit` : "");
+
+async function openPause(mode) {
+  if (!state.session || (state.pause && state.pause.sending) || limited()) return;
+  const list = state.session.repos.slice(); // the list as it is now, for the reads, the rows and the count
+  const p = { mode, reading: true, list, left: list.length, rows: [], sending: false, ghOpen: false };
+  state.pause = p;
+  state.pauseFocus = "pause-cancel";
+  renderPause();
+  window.scrollTo(0, 0);
+  await Promise.all(list.map((r) => loadRepo(r, true).then(() => { p.left -= 1; if (state.pause === p) renderPause(); })));
+  if (state.pause !== p) return; // cancelled while reading
+  const back = new Set(mode === "resume" ? pausedNow() : []);
+  p.rows = list.map((repo) => {
+    const v = agentsVar(repo);
+    let skip = null;
+    if (v === undefined) skip = "cannot be read · skipped";
+    else if (mode === "pause" && v !== "true") skip = "already off · stays off";
+    else if (mode === "resume" && v === "true") skip = "on";
+    else if (mode === "resume" && !back.has(repo)) skip = "off, not by Pause all · stays off";
+    return { repo, skip, preview: skip ? null : { loading: true }, result: null };
+  });
+  p.reading = false;
+  renderPause();
+  for (const x of p.rows.filter((r) => !r.skip)) {
+    const asked = Date.now(); // the server's five minutes start after this, so this errs early
+    api("/api/action/preview", { method: "POST", body: pauseBody(mode, x.repo) })
+      .then((pv) => {
+        x.preview = Object.assign(pv, { at: asked });
+        setTimeout(() => { if (state.pause === p && !p.sending) renderPause(); }, Math.max(0, asked + PREVIEW_MS + 50 - Date.now())); // to say "Ask again"
+      }, (e) => { x.preview = { error: e.message, status: e.status }; })
+      .then(() => { if (state.pause === p) renderPause(); });
+  }
+}
+
+function closePause() {
+  if (!state.pause || state.pause.sending) return;
+  state.pause = null;
+  state.pauseFocus = "pause-all";
+  renderPause();
+}
+
+const previewOld = (p) => p.rows.some((x) => x.preview && x.preview.at && Date.now() - x.preview.at > PREVIEW_MS);
+
+async function sendPause() {
+  const p = state.pause;
+  if (!p || p.sending || p.reading) return;
+  if (previewOld(p)) { openPause(p.mode); return; }
+  const go = p.rows.filter((x) => x.preview && x.preview.confirm);
+  if (!go.length) return;
+  p.sending = true;
+  let expired = false;
+  for (const x of go) { // one at a time, each with its own token, so the confirm says how far it got
+    // A long list can outlast the previews: what is left is not sent, and Retry asks again.
+    if (expired || Date.now() - x.preview.at > PREVIEW_MS) {
+      expired = true;
+      x.result = { error: "not sent: its preview expired before its turn" };
+      continue;
+    }
+    x.result = "sending";
+    renderPause();
+    try {
+      await api("/api/action", { method: "POST", body: Object.assign(pauseBody(p.mode, x.repo), { confirm: x.preview.confirm }) });
+      x.result = "done";
+    } catch (e) {
+      // A 4xx is the server refusing before it acted; a 5xx, or no answer, may come after it did.
+      x.result = { error: e.status >= 400 && e.status < 500 ? `refused: ${e.message}` : `not known whether it changed (${e.message}): look on GitHub` };
+    }
+  }
+  const asked = p.rows.filter((x) => !x.skip);
+  state.pauseOut = { mode: p.mode, failed: asked.filter((x) => x.preview.error || (x.result && x.result.error))
+    .map((x) => [x.repo, x.preview.error ? (x.preview.status >= 400 && x.preview.status < 500 ? `refused: ${x.preview.error}` : `could not be asked: ${x.preview.error}`) : x.result.error]) };
+  state.pause = null;
+  state.pauseFocus = "pause-all";
+  renderPause();
+  try { applySession(await api("/api/session")); } catch (_) {
+    // Keep the bar right until the next refresh: the server recorded these on their own success.
+    const done = new Set(go.filter((x) => x.result === "done").map((x) => x.repo));
+    const rest = (state.session.paused || []).filter((r) => !done.has(r));
+    state.session.paused = p.mode === "resume" ? rest : rest.concat([...done]);
+  }
+  renderPause();
+  await Promise.all(asked.map((x) => loadRepo(x.repo, true)));
+}
+
+function pauseChange(p, x) {
+  if (x.skip) return h("span", { class: "muted" }, x.skip);
+  const pv = x.preview;
+  if (pv.loading) return h("span", { class: "muted" }, "Asking the server…");
+  if (pv.error) return h("span", { class: "bad" }, `${pv.status >= 400 && pv.status < 500 ? "refused" : "could not be asked"}: ${pv.error} · skipped`);
+  const change = p.mode === "resume" ? "Agents off → on" : "Agents on → off";
+  if (x.result === "sending") return `${change} …`;
+  if (x.result === "done") return [change, " ", h("span", { class: "ok" }, "✓")];
+  if (x.result && x.result.error) return [change, " ", h("span", { class: "bad" }, x.result.error)];
+  return change;
+}
+
+function pauseRunning(repo) {
+  const d = state.repos[repo];
+  if (!d || !d.active_runs) return "?";
+  if (!d.active_runs.length) return h("span", { class: "muted" }, "nothing");
+  return d.active_runs.map((r) => h("div", {}, link(r.url, r.name || `${r.agent || "run"} ${r.id}`), " · finishes"));
+}
+
+function pauseConfirm(p) {
+  const resume = p.mode === "resume";
+  const cancel = h("button", { type: "button", id: "pause-cancel", class: "quiet", disabled: p.sending, onclick: closePause }, "Cancel");
+  if (p.reading) {
+    return h("div", { class: "confirm pause-confirm", role: "group", "aria-label": "Confirm" },
+      h("strong", {}, resume ? "Resume" : "Pause all"),
+      h("div", { class: "muted" }, `Reading every repository afresh: ${p.left} of ${p.list.length} to go…`),
+      h("div", { class: "actions" }, cancel));
+  }
+  const asked = p.rows.filter((x) => !x.skip);
+  const go = asked.filter((x) => x.preview.confirm);
+  const loading = asked.some((x) => x.preview.loading);
+  const old = previewOld(p);
+  const n = loading ? asked.length : go.length;
+  const plural = (k) => `${k} ${k === 1 ? "repository" : "repositories"}`;
+  const effect = (go.find((x) => x.preview.effect) || { preview: {} }).preview.effect;
+  return h("div", { class: "confirm pause-confirm", role: "group", "aria-label": "Confirm" },
+    h("strong", {}, `Turn the agents ${resume ? "back on" : "off"} in ${plural(n)}?`),
+    h("div", { class: "scroll" }, h("table", { class: "grid pause-grid" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Repository"), h("th", {}, "Change"), resume ? null : h("th", {}, "Running now"))),
+      h("tbody", {}, p.rows.map((x) => h("tr", {}, h("td", { title: x.repo }, repoName(x.repo)), h("td", {}, pauseChange(p, x)),
+        resume ? null : h("td", {}, x.skip ? "" : pauseRunning(x.repo))))))),
+    kv("Acts as", `${state.session.viewer} · ${go.length} GitHub ${go.length === 1 ? "call" : "calls"}, one per repository`),
+    kv("Then", effect ? `${cap1(effect)}.` : (loading ? "…" : "–")),
+    kv("Expect", resume
+      ? "Only the repositories Pause all turned off are turned on. One that was off before, or was turned off in its own Settings, stays off."
+      : ["A run already going may still open a PR or push a fix. To stop one now, cancel it in ", routeLink("/activity", {}, "Activity"), "."]),
+    go.length ? h("details", { class: "gh", open: p.ghOpen, ontoggle: (e) => { p.ghOpen = e.currentTarget.open; } },
+      h("summary", { id: "pause-calls" }, "GitHub calls"),
+      h("div", {}, go.map((x) => x.preview.calls.map((c) => h("div", {}, h("code", {}, c)))))) : null,
+    !loading && !go.length ? h("div", { class: "state off" }, `Nothing to turn ${resume ? "on" : "off"}: no repository here can be changed now.`) : null,
+    old && !p.sending ? h("div", { class: "state note" }, "These previews are about to expire: ask again before confirming.") : null,
+    h("div", { class: "actions" },
+      old && !p.sending
+        ? h("button", { type: "button", id: "pause-go", disabled: limited(), title: pauseOff() || null, onclick: () => openPause(p.mode) }, "Ask again")
+        : h("button", { type: "button", id: "pause-go", disabled: p.sending || loading || !go.length, onclick: sendPause },
+          p.sending ? (resume ? "Turning on…" : "Turning off…") : `Turn ${resume ? "on" : "off"} in ${go.length}`),
+      cancel,
+      h("span", { class: "muted beside" }, "This preview is good for 5 minutes.")));
+}
+
+// On every screen while a repository is on Pause all's record and off or unread, or the last one left
+// something undone. Unread and still-loading repositories are named, never counted as on or off.
+function pauseBar() {
+  const s = state.session;
+  const back = pausedNow();
+  const rec = recorded();
+  const out = state.pauseOut;
+  const failed = out ? out.failed.filter(([repo]) => !pauseWanted(out.mode, repo)) : [];
+  if (!back.length && !failed.length && !rec.some((r) => agentsVar(r) === undefined)) return null;
+  const off = s.repos.filter(isOff);
+  const loading = s.repos.filter(isLoading);
+  const unread = s.repos.filter((r) => agentsVar(r) === undefined && !isLoading(r));
+  return h("div", { class: "pause-bar", role: "status" },
+    h("strong", {}, `Agents off in ${off.length}${loading.length || unread.length ? "+?" : ""} of ${s.repos.length}`),
+    loading.length ? h("span", {}, `${loading.length} still loading`) : null,
+    unread.length ? h("span", {}, `${unread.map(repoName).join(", ")} could not be read`) : null,
+    failed.map(([repo, why]) => h("span", {}, `${repoName(repo)} ${why}`)),
+    h("span", { class: "spacer" }),
+    failed.length ? h("button", { type: "button", id: "pause-retry", class: "quiet small", disabled: limited(), title: pauseOff() || null, onclick: () => openPause(out.mode) }, `Retry ${failed.length}…`) : null,
+    failed.length ? h("button", { type: "button", id: "pause-dismiss", class: "quiet small", onclick: () => { state.pauseOut = null; state.pauseFocus = "pause-all"; renderPause(); } }, "Dismiss") : null,
+    back.length ? h("button", { type: "button", id: "pause-resume", class: "small", disabled: limited(), title: pauseOff() || null, onclick: () => openPause("resume") }, `Resume ${back.length}…`) : null);
+}
+
+function renderPause() {
+  const el = $("pause");
+  $("pause-all").disabled = !state.session || !!state.pause || limited();
+  $("pause-all").title = pauseOff();
+  if (!state.session) { el.hidden = true; return; }
+  const a = document.activeElement;
+  const keep = state.pauseFocus || (a && a.id && el.contains(a) ? a.id : "");
+  const kid = state.pause ? pauseConfirm(state.pause) : pauseBar();
+  replace(el, kid);
+  el.hidden = !kid;
+  const f = keep && $(keep);
+  if (f && !f.disabled) f.focus({ preventScroll: true });
+  state.pauseFocus = "";
+}
+// Registered before the Needs you keys, so they see defaultPrevented: Escape closes this confirm only,
+// and their letters do nothing to the list behind it while it has the focus.
+document.addEventListener("keydown", (e) => {
+  if (!state.pause || document.querySelector("dialog[open]")) return;
+  if (e.key === "Escape") { e.preventDefault(); closePause(); return; }
+  if (!e.metaKey && !e.ctrlKey && !e.altKey && $("pause").contains(e.target) && /^[jkoar?]$/i.test(e.key)) e.preventDefault();
+});
 
 // --- loading -----------------------------------------------------------------------------------------
 function applySession(s) {
@@ -2638,6 +2862,7 @@ document.addEventListener("keydown", (e) => {
   }
 });
 $("refresh").addEventListener("click", () => refresh(true));
+$("pause-all").addEventListener("click", () => openPause("pause"));
 $("rescan").addEventListener("click", async () => {
   $("rescan").disabled = true;
   try { applySession(await api("/api/repos", { method: "POST", body: { op: "rescan" } })); await refresh(false); }

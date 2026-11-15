@@ -178,6 +178,14 @@ a.button-link { display: inline-block; font-size: 12px; padding: 1px 8px; border
 .banner[hidden] { display: none; }
 .banner { padding: 8px 20px; background: var(--warn-bg); border-bottom: 1px solid var(--warn); display: flex; flex-direction: column; gap: 4px; }
 .cmd { margin: 4px 0; }
+.pause { padding: 12px 20px 0; }
+.pause-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 8px 12px; border-radius: 8px;
+  background: var(--bad-bg); border: 1px solid var(--bad); overflow-wrap: anywhere; }
+.pause-bar button.quiet { background: var(--card); }
+.pause .confirm { margin-top: 0; background: var(--card); }
+.grid.pause-grid td { white-space: normal; overflow-wrap: anywhere; }
+.ok { color: var(--ok); }
+@media (max-width: 640px) { .pause { padding: 12px 16px 0; } }
 /* A repository's tabs: rows that route to their item, or act under their own button. */
 .spot { padding: 8px 0; border-bottom: 1px solid var(--line); min-width: 0; overflow-wrap: anywhere; }
 .spot:last-of-type { border-bottom: 0; }

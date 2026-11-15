@@ -11,12 +11,14 @@
 <body>
 <header class="bar">
   <h1><a href="#/needs">Gatehand</a></h1>
+  <button id="pause-all" type="button" class="quiet" disabled>Pause all…</button>
   <span class="spacer"></span>
   <span id="updated" class="muted"></span>
   <span id="rate" class="muted"></span>
   <button id="refresh" type="button">Refresh</button>
   <span id="viewer" class="muted"></span>
 </header>
+<section id="pause" class="pause" hidden></section>
 <div class="shell">
   <nav id="side" class="side" aria-label="Views"></nav>
   <main>

@@ -111,8 +111,9 @@ then access, then not found).
 "Check again" reads that repository only, past the cache, with its inbox and the merge gate's report,
 and says whether it is still unread (and why) or readable again. It writes nothing. Two causes hit
 every repository and are said once, under the bar, instead of in rows: `gh` signed out (with the
-command to copy and Check again), and the API limit, with when reads resume; Refresh, and the
-five-minute refresh, are off until then. On a health item, `a` runs Check again (a read).
+command to copy and Check again), and the API limit, with when reads resume; Refresh, the
+five-minute refresh, and Pause all, Resume n… and Retry n… (which read every repository first) are
+off until then. On a health item, `a` runs Check again (a read).
 
 ### Why a read failed
 
@@ -294,6 +295,7 @@ so the agents see exactly what they would see if you had done it on GitHub, and 
 | Hold, Release | issues and agent PRs in their panes; on the Pipeline tab, queued and held issues and agent PRs with no row in Needs you | adds or removes `agent:hold` | people with write access |
 | Hand back to the merge gate | the pane of an agent PR with `agent:blocked` or `agent:needs-human` | removes those labels, once you have fixed the PR yourself | people with write access |
 | Turn agents on/off, Turn auto-merge on/off | a repository's Settings tab | sets `AGENTS_ENABLED` or `AGENT_AUTO_MERGE` to `true` or `false` | people who may set Actions variables |
+| Pause all…, Resume n… | the global bar | sets `AGENTS_ENABLED` to `false` in every repository where it is `true`, or back to `true` in those Pause all turned off (below) | people who may set Actions variables, per repository |
 | Start the coder on the next one | the coder's schedule, on a repository's Agents tab | dispatches an auto-pick `agent-coder.yml` run on `policy.runnerRef` | people with write access |
 | Approve…, Request changes… | an agent PR's pane, or on the Pipeline tab for one with no row in Needs you | posts a review comment the merge gate and the fixer read (below); Request changes can also start the fixer on it | people with write access, never the agent bot |
 | Run review, Run merge gate | an agent PR's pane, or on the Pipeline tab for one with no row; Run merge gate for every agent PR on the Agents tab | dispatches `claude-code-review.yml` or `agent-merge.yml` on the default branch, for that PR (or every agent PR) | people with write access |
@@ -333,21 +335,26 @@ refuse, and you preview again.
 
 ### Pause all
 
-Pause all is the "Turn agents off" switch once per repository: one preview each, each planned again
-on its own when confirmed and refused on its own, so the result is per repository. It adds no kind of
-write to GitHub. (The page does not offer it yet.) The preview and the confirm carry
-one more field, `pause_all`, which is `true` or `false` and nothing else; it is part of the plan the
-token stands for, and it is accepted only for setting `AGENTS_ENABLED` to `false` in a repository
-where it is `true` now.
+"Pause all…" in the global bar is the "Turn agents off" switch once per repository. The page asks
+the server for one preview per repository where `AGENTS_ENABLED` is `true`, and shows them in one
+confirm that lists every repository: the change, or why it is skipped (already off, cannot be read,
+refused at the preview), and what is running there now. Confirming sends each repository's own
+one-time token, one at a time; each is planned again and refused on its own, so the result is per
+repository. It adds no kind of write to GitHub. The preview and the confirm carry one more field,
+`pause_all`, which is `true` or `false` and nothing else; it is part of the plan the token stands
+for, and it is accepted only for setting `AGENTS_ENABLED` to `false` where it is `true` now.
 
 What is new is a record on this machine: once a repository's own write succeeds, the server adds it
 to `paused` in the dashboard's config file (the one that holds the repository list, below), and
-`/api/session` returns that list. Resume is meant to offer only the repositories on the list that are still off, so a repository that was already off
-before Pause all (unset counts as off), or was turned off in its own Settings, stays off. A
-repository leaves the list when the page turns its agents on, Resume or the switch alike, and when a
-read that began after the pause finds `AGENTS_ENABLED` is `true` (someone turned it on elsewhere);
-that is the one local write a read can make, and it only ever takes a repository off. A repository whose variables
-cannot be read is refused, so it is never counted as paused.
+`/api/session` returns that list. While any repository on it is off, the bar says "Agents off in n of
+m" on every screen, names the repositories that could not be read or were refused, and offers
+"Resume n…": the same confirm in reverse, for only the repositories on the list that are still off.
+A repository that was already off before Pause all (unset counts as off), or was turned off in its
+own Settings, stays off. A repository leaves the list when the page turns its agents on, Resume or
+the switch alike, and when a read that began after the pause finds `AGENTS_ENABLED` is `true`
+(someone turned it on elsewhere); that is the one local write a read can make, and it only ever
+takes a repository off. A repository whose variables cannot be read is skipped and named, never
+counted as paused or as on.
 
 It refuses early what the workflow would skip or refuse: a coder or fixer run while `AGENTS_ENABLED`
 is not `true` or while the runner ref's copy of the workflow is not main's; the fixer on a PR its

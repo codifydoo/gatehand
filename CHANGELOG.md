@@ -73,8 +73,11 @@
   `"pause_all": true`; once that write succeeds, the repository is kept in a `paused` list in the
   dashboard's local config file, which `/api/session` returns, so Resume turns on only what Pause
   all turned off. The list is dropped per repository when the page turns its agents on, or a read
-  finds them on. No new write to GitHub; a config file from before loads unchanged. The page does
-  not offer Pause all yet (#29).
+  finds them on. No new write to GitHub; a config file from before loads unchanged (#29).
+- Dashboard: "Pause all…" in the global bar turns `AGENTS_ENABLED` off in every repository where it
+  is on, after one confirm that lists every repository with its preview; the bar then says "Agents
+  off in n of m" on every screen, names what was refused, and offers "Resume n…", which turns on
+  only what Pause all turned off.
 - Dashboard: a weekly budget in US dollars and a warning line (a share of it, 80% by default), kept
   in the dashboard's local config file, set through `POST /api/budget` and returned by
   `/api/session`. A setting on this machine only: nothing is written to GitHub, no agent reads it,
