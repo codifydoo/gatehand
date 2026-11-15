@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A blocked or failed request's pane says under step 1 whether someone with write access has
+  commented on the issue since the request, and who and when (#24). The server reads it per request,
+  for the open pane only (when it opens and on each refresh), from the new
+  `/api/repo/<owner>/<name>/request/<REQ-id>`; the comment's text is never read, and the agent bot's
+  comments do not count. Installed repositories
+  need no update: the dashboard runs from the package.
 - Dashboard: "Rerun coder" is refused, with the reason, when the issue is no longer blocked
   (neither `agent:blocked` nor `agent:needs-human`), is `agent:in-progress` or `agent:pr-open`, is
   closed or a PR, or has an open `untrusted` request; the server reads the issue's labels afresh

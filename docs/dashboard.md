@@ -107,7 +107,10 @@ happened.
 - what the agent wrote, from its request comment, shown as plain text;
 - where an answer must go first, as a link to GitHub: for `blocked`, a comment on the issue itself
   (the next run reads comments from people with write access, not the inbox); for `failed`, an edit
-  if the issue was unclear; for `untrusted`, re-applying `agent:ready` yourself;
+  if the issue was unclear; for `untrusted`, re-applying `agent:ready` yourself. Under it, for an
+  open `blocked` or `failed` request, whether someone with write access has commented on the issue
+  since the request, and who and when (never what they wrote); nothing until that is first read, or
+  when it cannot be told;
 - the primary action (named for the kind, as in the table under What you can do from it) and
   Reject…, with the requesting role's runs on the issue and their cost over the last seven days
   beside them (runs that never reached the agent left out; the cost a floor: a run with no cost
@@ -183,8 +186,8 @@ then access, then not found).
 and says whether it is still unread (and why) or readable again. It writes nothing. Two causes hit
 every repository and are said once, under the bar, instead of in rows: `gh` signed out (with the
 command to copy and Check again), and the API limit, with when reads resume; Refresh, the
-five-minute refresh, and Pause all, Resume n… and Retry n… (which read every repository first) are
-off until then.
+five-minute refresh, whether a writer has commented on a request's issue, and Pause all, Resume n…
+and Retry n… (which read every repository first) are off until then.
 
 ### Keys
 
@@ -495,6 +498,28 @@ The first three are tried in that order, then a GraphQL error's type, then `HTTP
 `null` when that limit is not exhausted (a secondary limit, whose end GitHub does not say), has
 reset since it was read, or cannot be read. A cause is never guessed: what matches nothing is
 `unknown`.
+
+### Whether a writer answered
+
+`/api/repo/<owner>/<name>/request/<REQ-id>` answers for one open `blocked` or `failed` request (any
+other id, kind, or an answered request is a 404). The page asks for the open pane only: each time a
+request's pane opens and on each refresh, never for every request on a page load, and not during the
+API limit. The answer is cached for a minute and each commenter's access for ten, both read again
+with `?fresh=1`, which the page sends whenever it has asked before.
+
+```json
+{"id": "REQ-20261113-ab12", "issue": 42, "writer_comment": {"login": "maintainer", "at": "2026-11-14T08:00:00Z"}}
+```
+
+`writer_comment` is the newest comment on the request's issue made after the request by an account
+with write access or more (`admin`, `maintain` or `write` from
+`GET /repos/<repo>/collaborators/<login>/permission`, as `agent-lib.sh` `actor_trusted` decides; never
+`author_association`), or `null` when there is none. The agent bot's own comments do not count, and
+an App's never do. Only the login and the time are sent: the server does not ask GitHub for the
+comment's text. Comments are read newest first back to the request, at most 300; when more than
+that came after the request and none of them is a writer's, `writer_comment` is left out (not
+known), and the page says nothing. A permission lookup that fails for any reason but a 404 fails
+the request, as any read does, rather than count someone as not a writer.
 
 ### Limits and schedules
 
