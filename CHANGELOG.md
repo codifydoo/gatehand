@@ -89,7 +89,13 @@
 - `docs/dashboard.md` describes the page as built, in the order you meet it: the bar and sidebar,
   Needs you with its panes, health and keys, Activity, Week, a repository's tabs, then the actions,
   the security model, and what the server sends. Repositories now lists every column it shows.
-- Nothing installed into repositories changes: no update is needed.
+- Review: `/verify-pr` now says how to write its two headings (plain `###` markdown, with the
+  verdict alone on the line under `### Verdict`). In one installation, 45 of 316 reviews in a month
+  wrote the Verdict heading as HTML, in bold or on one line with the verdict, and the merge gate
+  read 10 of them as unknown, which leaves an agent PR waiting for a person. Installed repositories
+  get the wording on their next update.
+- Nothing else installed into repositories changes: an update is needed only to get the review
+  wording above.
 
 ## 0.7.0 (2026-11-14)
 
