@@ -86,6 +86,9 @@
 - Project site: `site/` holds five static pages (home, how it works, security, the dashboard, get
   started), published to GitHub Pages by `.github/workflows/pages.yml` on a push to `main`. Not
   part of the package: nothing changes in installed repositories.
+- `docs/dashboard.md` describes the page as built, in the order you meet it: the bar and sidebar,
+  Needs you with its panes, health and keys, Activity, Week, a repository's tabs, then the actions,
+  the security model, and what the server sends. Repositories now lists every column it shows.
 - Nothing installed into repositories changes: no update is needed.
 
 ## 0.7.0 (2026-11-14)
