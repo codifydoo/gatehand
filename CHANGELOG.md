@@ -64,6 +64,11 @@
   found; a repository still being read shows a "reading…" line.
 - Keys on Needs you: j/k move, o goes into the item, a opens its primary action's confirm (Enter
   confirms), r opens Reject…, Esc closes the confirm, ? lists them.
+- What could not be read has a health row at the end of Needs you, never counted, whose pane says
+  why (the server's cause) and the one thing that helps: authorize gh for an organization's SSO,
+  find a repository that moved, ask for access; "Check again" re-reads that repository only. A
+  signed-out gh and the API limit are said once under the bar, and Refresh is off until the limit
+  resets.
 - Dashboard: Pause all's record. A `set_variable` that turns `AGENTS_ENABLED` off can carry
   `"pause_all": true`; once that write succeeds, the repository is kept in a `paused` list in the
   dashboard's local config file, which `/api/session` returns, so Resume turns on only what Pause
