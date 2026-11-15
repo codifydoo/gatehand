@@ -25,6 +25,7 @@ import argparse
 import hmac
 import http.server
 import json
+import math
 import os
 import re
 import secrets
@@ -85,10 +86,85 @@ GH_TIMEOUT = 60
 
 
 class GhError(Exception):
-    def __init__(self, args, rc, err):
+    def __init__(self, args, rc, err, types=()):
         self.not_found = "HTTP 404" in err
         self.forbidden = "HTTP 403" in err
+        self.rc, self.err = rc, err
+        self.cause = read_cause(rc, err, types)
+        self.resource = "graphql" if list(args[:2]) == ["api", "graphql"] else "core"  # which rate limit
         super().__init__("gh %s: %s" % (" ".join(args[:3]), (err.strip() or "exit %d" % rc)[:300]))
+
+
+# Why a read failed, for the page to offer the one thing that helps. Matched on what gh prints:
+# `gh api` writes "gh: <GitHub's message> (HTTP <status>)", or "gh: HTTP <status>" for a body with
+# no message, then "Authorize in your web browser: <url>" when GitHub answered with a SAML SSO
+# challenge (its X-GitHub-SSO header); a gh with no login prints "To get started with GitHub CLI,
+# please run:  gh auth login" and exits 4. A GraphQL error carries a type. Anything else is
+# "unknown": a cause is never guessed. docs/dashboard.md lists what each one means.
+CAUSES = ("sso", "signed_out", "rate_limited", "not_found", "no_access", "unknown")
+CAUSE_RULES = (  # first match wins: a SAML 403 is not "no access", a rate-limited 403 neither
+    ("signed_out", re.compile(r"\bHTTP 401\b|\bgh auth login\b")),
+    ("sso", re.compile(r"Authorize in your web browser:|\bSAML enforcement\b")),
+    ("rate_limited", re.compile(r"\bHTTP 429\b|\bAPI rate limit (?:already )?exceeded\b|\bsecondary rate limit\b"
+                                r"|\babuse detection mechanism\b", re.I)),  # the last: GitHub's older name for a secondary limit
+    ("not_found", re.compile(r"\bHTTP 404\b")),
+    ("no_access", re.compile(r"\bHTTP 403\b")),
+)
+CAUSE_TYPES = {"RATE_LIMITED": "rate_limited", "NOT_FOUND": "not_found", "FORBIDDEN": "no_access"}
+
+
+def read_cause(rc, err, types=()):
+    if rc == 4:  # gh's own exit code for "not logged in"
+        return "signed_out"
+    for cause, pattern in CAUSE_RULES[:3]:  # these beat a GraphQL type: a SAML refusal is typed FORBIDDEN
+        if pattern.search(err):
+            return cause
+    for t in types:
+        if t in CAUSE_TYPES:
+            return CAUSE_TYPES[t]
+    return next((c for c, p in CAUSE_RULES[3:] if p.search(err)), "unknown")
+
+
+RATE_TTL = 30
+_rate = {"at": None, "resources": None}
+_rate_lock = threading.Lock()
+
+
+def rate_reset(resource):
+    """When the exhausted rate limit (core or graphql) resets, from GET /rate_limit (which does not
+    count against it), read at most every RATE_TTL seconds. None when that limit is not exhausted (a
+    secondary limit, whose end GitHub does not say) or cannot be read: never a guessed time."""
+    with _rate_lock:
+        if _rate["at"] is None or time.monotonic() - _rate["at"] > RATE_TTL:
+            try:
+                got = gh_json(["api", "rate_limit"])
+                _rate["resources"] = got.get("resources") if isinstance(got, dict) else None
+            except GhError:
+                _rate["resources"] = None
+            _rate["at"] = time.monotonic()
+        res = _rate["resources"]
+        r = res.get(resource) if isinstance(res, dict) else None
+    if not isinstance(r, dict) or r.get("remaining") != 0 or not isinstance(r.get("reset"), int):
+        return None
+    if r["reset"] <= now_utc().timestamp():  # a reading from before that limit reset
+        return None
+    try:
+        return iso(datetime.fromtimestamp(r["reset"], timezone.utc))
+    except (OverflowError, OSError, ValueError):  # a time no clock can hold: unknown, not a crash
+        return None
+
+
+def cause_of(e):
+    """A failed read's cause as the page gets it: {"cause": one of CAUSES}, and for "rate_limited"
+    also "resets_at" (ISO time, or null when unknown)."""
+    return cause_entry(e.cause, e.resource)
+
+
+def cause_entry(cause, resource):
+    c = {"cause": cause}
+    if cause == "rate_limited":
+        c["resets_at"] = rate_reset(resource)
+    return c
 
 
 GH_SLOTS = threading.BoundedSemaphore(8)
@@ -127,9 +203,15 @@ def gh_or_404(args):
         raise
 
 
+def gql_types(data):
+    """The `type` of each error in a GraphQL response (NOT_FOUND, FORBIDDEN, RATE_LIMITED, ...)."""
+    errs = data.get("errors") if isinstance(data, dict) else None
+    return [str(x.get("type")) for x in errs if isinstance(x, dict) and x.get("type")] if isinstance(errs, list) else []
+
+
 def graphql(query, partial=False, **variables):
-    """The response's data. Any GraphQL error raises, unless partial: then (data, [messages]) for a
-    response that still carries data (one node a SAML-protected organisation hides, say)."""
+    """The response's data. Any GraphQL error raises, unless partial: then (data, [{message, type}])
+    for a response that still carries data (one node a SAML-protected organisation hides, say)."""
     # Variables first, then the query: the order the test stub's globs expect. -f only: -F would
     # read a value starting with @ as a file.
     # An int goes as -F (typed): digits cannot start with @.
@@ -146,11 +228,17 @@ def graphql(query, partial=False, **variables):
         except ValueError:
             data = None
         if not (partial and isinstance(data, dict) and data.get("data")):
+            types = gql_types(data)
+            if types:  # gh printed only the messages; the response's types say more
+                e.cause = read_cause(e.rc, e.err, types)
             raise
     errors = [str(x.get("message")) for x in data.get("errors") or [] if isinstance(x, dict)]
     if errors and not (partial and data.get("data")):
-        raise GhError(args, 0, "; ".join(errors))
-    return (data.get("data") or {}, errors) if partial else (data.get("data") or {})
+        raise GhError(args, 0, "; ".join(errors), gql_types(data))
+    if partial:
+        return data.get("data") or {}, [{"message": str(x.get("message")), "type": x.get("type")}
+                                        for x in data.get("errors") or [] if isinstance(x, dict)]
+    return data.get("data") or {}
 
 
 def rest_pages(path, max_pages):
@@ -488,7 +576,13 @@ def item_issue(i):
 
 def read_repo(repo):
     owner, name = repo.split("/", 1)
-    d = {"repo": repo, "url": "https://github.com/" + repo, "errors": [], "fetched_at": iso(now_utc())}
+    d = {"repo": repo, "url": "https://github.com/" + repo, "errors": [], "unreadable": [], "fetched_at": iso(now_utc())}
+
+    def fail(part, text, e=None):
+        """An entry under errors; for a failed gh read also one under unreadable, with its cause."""
+        d["errors"].append(text)
+        if isinstance(e, GhError):
+            d["unreadable"].append(dict(cause_of(e), part=part, error=text))
     now = now_utc()
     since = iso(now - timedelta(days=7))
     today = now.strftime("%Y-%m-%d")
@@ -497,11 +591,12 @@ def read_repo(repo):
     try:
         r = (graphql(REPO_Q1, owner=owner, name=name) or {}).get("repository")
     except GhError as e:
-        d["errors"].append("repository: %s" % e)
+        fail("repository", "repository: %s" % e, e)
         r = None
     if not r:
-        if not d["errors"]:
+        if not d["errors"]:  # GitHub answered, with no repository: what it says for both
             d["errors"].append("repository: not found, or your gh login cannot see it")
+            d["unreadable"].append({"cause": "not_found", "part": "repository", "error": d["errors"][-1]})
         # Nothing else can be read either: everything that could wait for you is unknown.
         d["waiting"] = [{"kind": "unknown", "text": "Could not read this repository, so nothing in it is listed.", "url": d["url"]}]
         return d
@@ -520,13 +615,13 @@ def read_repo(repo):
             raise ValueError("not an object")
         policy_ok = True
     except (GhError, ValueError) as e:
-        d["errors"].append("policy.json: %s; the defaults are assumed, and the inbox is not looked for" % e)
+        fail("policy.json", "policy.json: %s; the defaults are assumed, and the inbox is not looked for" % e, e)
         policy = {}
     try:
         lock = json.loads(blob_text(repo, r.get("lock"), default, LOCK_PATH) or "null")
         d["version"] = lock.get("version") if isinstance(lock, dict) else None
     except (GhError, ValueError) as e:
-        d["errors"].append("install.lock.json: %s" % e)
+        fail("install.lock.json", "install.lock.json: %s" % e, e)
         d["version"] = None
     if r.get("lock") is None:
         d["errors"].append("no %s on %s: Gatehand is not installed here" % (LOCK_PATH, default))
@@ -587,7 +682,7 @@ def read_repo(repo):
                      wfRunner="%s:.github/workflows/agent-coder.yml" % runner,
                      wfMain="%s:.github/workflows/agent-coder.yml" % default) or {}).get("repository") or {}
     except GhError as e:
-        d["errors"].append("ledger: %s" % e)
+        fail("ledger", "ledger: %s" % e, e)
         q = None
     d["runs"] = d["stats"] = d["breakers"] = d["runner_ref"] = None
     if q is not None:
@@ -600,7 +695,7 @@ def read_repo(repo):
             d["runs"] = rows
             d["stats"] = role_stats(rows, roles, today)
         except GhError as e:
-            d["errors"].append("ledger runs: %s" % e)
+            fail("ledger runs", "ledger runs: %s" % e, e)
         try:  # read apart from the runs, as the digest does: one unreadable file costs only its own part
             btext = blob_text(repo, q.get("breaker"), ledger, "state/breaker.json")
             b = json.loads(btext) if btext and btext.strip() else {}
@@ -608,7 +703,7 @@ def read_repo(repo):
                 raise ValueError("not an object")
             d["breakers"] = b
         except (GhError, ValueError) as e:
-            d["errors"].append("ledger breaker.json: %s" % e)
+            fail("ledger breaker.json", "ledger breaker.json: %s" % e, e)
         wr, wm = q.get("wfRunner"), q.get("wfMain")
         d["runner_ref"] = "missing" if wr is None else ("ok" if wm and wr.get("oid") == wm.get("oid") else "stale")
 
@@ -619,8 +714,8 @@ def read_repo(repo):
         d["vars"] = {k: have.get(k) for k in VARIABLES}
     except GhError as e:
         d["vars"] = None
-        d["errors"].append("variables: %s" % ("your login cannot read this repository's Actions variables"
-                                              if e.forbidden or e.not_found else e))
+        fail("variables", "variables: %s" % ("your login cannot read this repository's Actions variables"
+                                             if e.cause in ("no_access", "not_found") else e), e)
     owner_login = (d["vars"] or {}).get("AGENT_OWNER_LOGIN") or ""
     d["owner_login"] = owner_login if d["vars"] is not None else None
 
@@ -666,7 +761,7 @@ def read_repo(repo):
             "number": inbox["number"], "url": inbox.get("html_url"), "checklist": inbox_checklist(inbox.get("body")),
         }
     except GhError as e:
-        d["errors"].append("issues: %s" % e)
+        fail("issues", "issues: %s" % e, e)
         d["issues"] = d["prs"] = d["inbox"] = None
         d["inbox_state"] = "unknown"
 
@@ -686,7 +781,7 @@ def read_repo(repo):
         d["active_runs"] = sorted({x["id"]: x for x in active}.values(), key=lambda x: x["created_at"] or "", reverse=True)
         d["recent_runs"] = [x for x in mine("completed", 50) if x["conclusion"] != "skipped"][:15]
     except GhError as e:
-        d["errors"].append("runs: %s" % e)
+        fail("runs", "runs: %s" % e, e)
         d["active_runs"] = d["recent_runs"] = None
 
     d["waiting"] = waiting_items(d)
@@ -1266,16 +1361,25 @@ def plan_variable(repo, d, viewer, body):
         raise ApiError(400, "name must be %s" % " or ".join(sorted(SWITCHES)))
     if value not in ("true", "false"):
         raise ApiError(400, "value must be \"true\" or \"false\"")
+    # Pause all is this same write; the marker only decides whether the dashboard remembers it.
+    pause_all = body.get("pause_all", False)
+    if not isinstance(pause_all, bool):
+        raise ApiError(400, "pause_all must be true or false")
+    if pause_all and (name, value) != ("AGENTS_ENABLED", "false"):
+        raise ApiError(400, "pause_all is only for setting AGENTS_ENABLED to false")
     need_writer(repo, d, "Changing %s" % name)
     if d.get("vars") is None:
         raise ApiError(409, "cannot read %s's variables, so cannot tell what %s is now" % (repo, name))
     cur = d["vars"].get(name)
     if cur == value:
         raise ApiError(409, "%s is already %s" % (name, cur))
+    if pause_all and cur != "true":  # already off (unset or anything but true): not Pause all's to resume
+        raise ApiError(409, "the agents are already off (AGENTS_ENABLED is %s)" % ("unset" if cur is None else cur))
     c = (call("POST", "repos/%s/actions/variables" % repo, {"name": name, "value": value}) if cur is None
          else call("PATCH", "repos/%s/actions/variables/%s" % (repo, name), {"name": name, "value": value}))
     return {"summary": "Set %s from %s to %s" % (name, "unset" if cur is None else cur, value),
-            "effect": SWITCHES[name][value], "warnings": [], "calls": [c], "done": "set %s to %s" % (name, value)}
+            "effect": SWITCHES[name][value], "warnings": [], "calls": [c], "done": "set %s to %s" % (name, value),
+            "pause_all": pause_all}
 
 
 PLANNERS = {"dispatch": plan_dispatch, "cancel_run": plan_cancel, "review_verdict": plan_verdict,
@@ -1319,14 +1423,19 @@ nodes{nameWithOwner isArchived lock:object(expression:"HEAD:.github/agents/insta
 
 
 def discover():
-    """Every repository your login can see that has Gatehand's lock file on its default branch, and
-    notes on what the scan could not see (an organisation that hides its repositories from this token,
-    a scan cut short)."""
-    found, notes, cursor = [], [], None
+    """Every repository your login can see that has Gatehand's lock file on its default branch, notes
+    on what the scan could not see (an organisation that hides its repositories from this token, a scan
+    cut short), and for each note that is a failed read, its cause: {"cause", "error": the note}."""
+    found, notes, unreadable, cursor = [], [], [], None
     for page_no in range(MAX_DISCOVERY_PAGES):
         kw = {"cursor": cursor} if cursor else {}
         data, errors = graphql(DISCOVER_Q, partial=True, **kw)
-        notes += [e for e in errors[:3] if e not in notes]
+        for e in errors[:3]:
+            msg = e["message"][:300]  # as Config loads a note: the note and its entry stay equal
+            if msg not in notes:
+                notes.append(msg)
+                cause = read_cause(0, e["message"], [str(e["type"])] if e["type"] else [])
+                unreadable.append(dict(cause_entry(cause, "graphql"), error=msg))
         page = (data.get("viewer") or {}).get("repositories") or {}
         found += [n["nameWithOwner"] for n in page.get("nodes") or []
                   if n and n.get("lock") and not n.get("isArchived") and valid_repo(n.get("nameWithOwner", ""))]
@@ -1336,7 +1445,7 @@ def discover():
         cursor = info.get("endCursor")
         if page_no == MAX_DISCOVERY_PAGES - 1:
             notes.append("stopped after %d repositories; add the others by hand" % (MAX_DISCOVERY_PAGES * 100))
-    return sorted(set(found), key=str.lower), notes
+    return sorted(set(found), key=str.lower), notes, unreadable
 
 
 def valid_repo(s):
@@ -1352,24 +1461,73 @@ def config_path():
     return os.path.join(base, "gatehand", "dashboard.json")
 
 
+def scan_entry(x):
+    """A kept scan cause in cause_entry's shape, whatever the file held."""
+    c = {"cause": x["cause"], "error": x["error"][:300]}
+    if x["cause"] == "rate_limited":
+        r = x.get("resets_at")
+        try:  # only a real UTC time in iso()'s form: a hand-edited file never yields a guessed time
+            c["resets_at"] = iso(datetime.strptime(r, "%Y-%m-%dT%H:%M:%SZ")) if r.isascii() else None
+        except (TypeError, ValueError, AttributeError):
+            c["resets_at"] = None
+    return c
+
+
+BUDGET_WARN_DEFAULT = 0.8
+
+
+def budget_number(v, name, top=None):
+    """A budget field: None (not set), or a finite number of zero or more (at most `top`). A bool is
+    not a number here, and json.loads lets NaN and Infinity through."""
+    if v is None:
+        return None
+    try:  # an int too big for a float (json.loads takes 4,000 digits) is not a budget either
+        ok = not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v) and v >= 0 and (top is None or v <= top)
+    except OverflowError:
+        ok = False
+    if not ok:
+        raise ValueError("%s must be a number from 0%s, or null" % (name, " to %g" % top if top is not None else " up"))
+    return v
+
+
 class Config:
-    """discovered (the last scan), added (by hand), excluded (removed by hand; a rescan keeps them out)."""
+    """discovered (the last scan), added (by hand), excluded (removed by hand; a rescan keeps them out),
+    paused (the repositories whose agents Pause all turned off, so Resume turns on only those),
+    and the viewer's weekly budget (budget_usd, US dollars) and its warning line (budget_warn, a share
+    of it): settings on this machine only, which warn and stop nothing, and which no agent reads."""
 
     def __init__(self, path):
         self.path = path
         self.lock = threading.Lock()
-        self.data = {"discovered": [], "added": [], "excluded": [], "scanned_at": None}
+        self.data = {"discovered": [], "added": [], "excluded": [], "paused": [], "scanned_at": None,
+                     "budget_usd": None, "budget_warn": None}
+        self.paused_at = {}  # in memory: when each repository was last added to "paused" (time.monotonic)
         try:
             with open(path) as f:
                 got = json.load(f)
-            for k in ("discovered", "added", "excluded"):
+            for k in ("discovered", "added", "excluded", "paused"):
                 if isinstance(got.get(k), list):
                     self.data[k] = [r for r in got[k] if valid_repo(r)]
             self.data["scanned_at"] = got.get("scanned_at") if isinstance(got.get("scanned_at"), str) else None
             notes = got.get("scan_notes")
             self.data["scan_notes"] = [str(n)[:300] for n in notes] if isinstance(notes, list) else []
+            causes = got.get("scan_unreadable")
+            self.data["scan_unreadable"] = [scan_entry(x) for x in causes if isinstance(x, dict)
+                                            and x.get("cause") in CAUSES and isinstance(x.get("error"), str)
+                                            ] if isinstance(causes, list) else []
+            for k, top in (("budget_usd", None), ("budget_warn", 1)):
+                try:  # a value hand-edited out of shape is not set, and the rest of the file still loads
+                    self.data[k] = budget_number(got.get(k), k, top)
+                except ValueError:
+                    pass
         except (OSError, ValueError, AttributeError):
             pass
+
+    def budget(self):
+        with self.lock:
+            warn = self.data["budget_warn"]
+            return {"weekly_usd": self.data["budget_usd"],
+                    "warn_at": BUDGET_WARN_DEFAULT if warn is None else warn}
 
     def repos(self):
         with self.lock:
@@ -1384,9 +1542,26 @@ class Config:
     def has(self, repo):
         return repo.lower() in {r.lower() for r in self.repos()}
 
+    def set_paused(self, repo, on, read_since=None):
+        """Add repo to the Pause all record, or take it off. read_since (time.monotonic) is when the read
+        that says the agents are on began: one that began before the repository was added says nothing
+        about the pause. Writes the file only on a change."""
+        key = repo.lower()
+        def apply(c):
+            if not on and read_since is not None and read_since <= self.paused_at.get(key, float("-inf")):
+                return False
+            if (key in {r.lower() for r in c["paused"]}) == on:
+                return False
+            if on:
+                self.paused_at[key] = time.monotonic()
+            c["paused"] = [r for r in c["paused"] if r.lower() != key] + ([repo] if on else [])
+        self.update(apply)
+
     def update(self, fn):
+        """fn changes the data under the lock; returning False means no change, and nothing is written."""
         with self.lock:
-            fn(self.data)
+            if fn(self.data) is False:
+                return
             os.makedirs(os.path.dirname(self.path), mode=0o700, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=os.path.dirname(self.path), prefix=".dashboard.")
             try:
@@ -1413,15 +1588,20 @@ class Cache:
         self.key_locks = {}
 
     def get(self, key, fn, fresh=False, ttl=CACHE_TTL):
+        return self.get_stamped(key, fn, fresh, ttl)[0]
+
+    def get_stamped(self, key, fn, fresh=False, ttl=CACHE_TTL):
+        """The value, and when the read that made it began (time.monotonic)."""
         with self.lock:
             kl = self.key_locks.setdefault(key, threading.Lock())
         with kl:
             hit = self.vals.get(key)
             if hit and not fresh and hit[0] > time.monotonic():
-                return hit[1]
+                return hit[1], hit[2]
+            began = time.monotonic()
             val = fn()
-            self.vals[key] = (time.monotonic() + ttl, val)
-            return val
+            self.vals[key] = (time.monotonic() + ttl, val, began)
+            return val, began
 
     def drop(self, prefix):
         with self.lock:
@@ -1512,8 +1692,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             fn()
         except ApiError as e:
             self.send(e.status, {"error": str(e)})
-        except GhError as e:
-            self.send(502, {"error": str(e)})
+        except GhError as e:  # a failed read: the page's d.failed, the inbox's and the gate's error
+            self.send(502, dict(cause_of(e), error=str(e)))
         except Exception as e:  # never a traceback to the page
             sys.stderr.write("dashboard: %s: %r\n" % (self.path.split("?")[0], e))
             self.send(500, {"error": "internal error, see the dashboard's terminal"})
@@ -1559,22 +1739,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(200, {"ok": True})
         if path == "/api/session":
             cfg = self.server.config
-            scan_error = None
+            scan_error = scan_cause = None
             if cfg.data["scanned_at"] is None:
                 try:
                     self.rescan()
                 except GhError as e:  # the page still loads, with the list it has and why
-                    scan_error = str(e)
+                    scan_error, scan_cause = str(e), cause_of(e)
             user = cache.get("user", lambda: gh_json(["api", "user"]) or {}, ttl=3600)
             rate = cache.get("rate", lambda: ((gh_json(["api", "rate_limit"]) or {}).get("resources") or {}), fresh=fresh)
             return self.send(200, dict(self.repo_list(), viewer=user.get("login"), scan_error=scan_error,
-                                       rate={k: rate.get(k) for k in ("core", "graphql")}, now=iso(now_utc())))
+                                       scan_cause=scan_cause, budget=cfg.budget(), rate={k: rate.get(k) for k in ("core", "graphql")},
+                                       now=iso(now_utc())))
         m = re.fullmatch(r"/api/repo/([^/]+)/([^/]+)(/inbox|/gate)?", path)
         if not m:
             raise ApiError(404, "not found")
         repo = self.repo_from(m.group(1), m.group(2))
         if m.group(3) is None:
-            return self.send(200, cache.get("repo:" + repo, lambda: read_repo(repo), fresh))
+            d, began = cache.get_stamped("repo:" + repo, lambda: read_repo(repo), fresh)
+            self.note_switch(repo, d, began)
+            return self.send(200, d)
         if m.group(3) == "/gate":
             return self.send(200, cache.get("gate:" + repo, lambda: read_gate(repo), fresh))
         d = cache.get("repo:" + repo, lambda: read_repo(repo))
@@ -1595,10 +1778,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         cache = self.server.cache
         # The login gh will post as now (gh auth switch mid-session).
         viewer = (cache.get("user", lambda: gh_json(["api", "user"]) or {}, fresh=True, ttl=3600) or {}).get("login") or ""
-        d = cache.get("repo:" + repo, lambda: read_repo(repo), fresh=True)
+        d, began = cache.get_stamped("repo:" + repo, lambda: read_repo(repo), fresh=True)
+        self.note_switch(repo, d, began)
         if body.get("viewer") != viewer:  # the page's confirm named the login it will act as
             raise ApiError(409, "gh is now signed in as %s, not %s as this page says: reload the page" % (viewer, body.get("viewer")))
         return repo, viewer, d
+
+    def note_switch(self, repo, d, began):
+        """Someone turned the agents on elsewhere: Pause all no longer holds this repository off. Only a
+        read that began after the pause counts (one cached from before it, or in flight, does not)."""
+        if (d.get("vars") or {}).get("AGENTS_ENABLED") == "true":
+            self.server.config.set_paused(repo, False, read_since=began)
 
     def plan(self, repo, viewer, d, body):
         p = PLANNERS[body["type"]](repo, d, viewer, body)
@@ -1640,6 +1830,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     raise ApiError(409, "this has changed since the preview (a new head, a run, a variable): preview it again")
                 run_calls(p["calls"])
                 out = {"done": p["done"]}
+                if kind == "set_variable" and p["calls"][0]["body"]["name"] == "AGENTS_ENABLED":
+                    # Only after this repository's own write succeeded; any turn-on ends the pause.
+                    self.server.config.set_paused(repo, p["pause_all"])
             else:
                 raise ApiError(400, "type must be inbox_command, label or %s" % ", ".join(sorted(PLANNERS)))
         finally:  # a write that failed half way changed something too
@@ -1650,11 +1843,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def repo_list(self):
         c = self.server.config
+        on = {r.lower() for r in c.repos()}
         return {"repos": c.repos(), "excluded": list(c.data["excluded"]), "scanned_at": c.data["scanned_at"],
-                "scan_notes": list(c.data.get("scan_notes") or [])}
+                "scan_notes": list(c.data.get("scan_notes") or []),
+                "scan_unreadable": list(c.data.get("scan_unreadable") or []),
+                "paused": [r for r in c.data["paused"] if r.lower() in on]}
 
     def rescan(self):
-        found, notes = discover()
+        found, notes, unreadable = discover()
         def apply(c):
             if notes:  # a scan that could not see everything keeps what earlier scans found
                 found_l = {r.lower() for r in found}
@@ -1665,8 +1861,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 c["discovered"] = found
             c["scan_notes"] = notes
+            c["scan_unreadable"] = unreadable  # resets_at is a time, so it still reads right later
             c["scanned_at"] = iso(now_utc())
         self.server.config.update(apply)
+
+    def set_budget(self, body):
+        """The weekly budget, a setting in the local config file only: nothing goes to GitHub. The body
+        is exactly {"weekly_usd": number >= 0 or null to clear, "warn_at"?: share 0..1, or null for the
+        default}; a missing warn_at keeps the line as it is."""
+        extra = sorted(set(body) - {"weekly_usd", "warn_at"})
+        if extra or "weekly_usd" not in body:
+            raise ApiError(400, "the budget is {weekly_usd, warn_at}: %s" % (
+                "unknown field %s" % ", ".join(extra) if extra else "weekly_usd is missing (null clears it)"))
+        try:
+            usd = budget_number(body["weekly_usd"], "weekly_usd")
+            warn = budget_number(body.get("warn_at"), "warn_at", 1)
+        except ValueError as e:
+            raise ApiError(400, str(e))
+
+        got = {}
+
+        def apply(c):  # under the config's lock: the answer is this request's own write
+            c["budget_usd"] = usd
+            if "warn_at" in body:
+                c["budget_warn"] = warn
+            got.update(weekly_usd=usd, warn_at=BUDGET_WARN_DEFAULT if c["budget_warn"] is None else c["budget_warn"])
+        self.server.config.update(apply)
+        self.send(200, {"budget": got})
 
     def post(self):
         path, _ = self.route()
@@ -1680,6 +1901,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.action(body)
         if path == "/api/action/preview":
             return self.preview(body)
+        if path == "/api/budget":
+            return self.set_budget(body)
         if path != "/api/repos":
             raise ApiError(404, "not found")
         op, repo = body.get("op"), body.get("repo")
@@ -1720,7 +1943,7 @@ def main(argv=None):
     ap.add_argument("--print-url", action="store_true", help="print the URL with its session secret")
     ap.add_argument("--idle-minutes", type=int, default=120, help="stop after this long with no page open (0: never)")
     ap.add_argument("--ready-file", help="write {port, token} here (mode 0600) once listening; for scripts and tests")
-    ap.add_argument("--config", help="the repository list (default: %s)" % config_path())
+    ap.add_argument("--config", help="the repository list, the Pause all record and the weekly budget (default: %s)" % config_path())
     a = ap.parse_args(argv)
 
     token = secrets.token_urlsafe(32)
