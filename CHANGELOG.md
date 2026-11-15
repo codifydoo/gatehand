@@ -53,6 +53,8 @@
   the page does not show them yet (#21, #22).
 - In a narrow window the open item of Needs you expands in place under its row, as in a mail app,
   and the sidebar folds into one line with ☰.
+- Keys on Needs you: j/k move, o goes into the item, a opens its primary action's confirm (Enter
+  confirms), r opens Reject…, Esc closes the confirm, ? lists them.
 =======
   branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only
   (#21, #22); Activity shows the next scheduled runs, and a repository's Agents tab shows the limits

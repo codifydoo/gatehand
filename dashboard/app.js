@@ -493,6 +493,9 @@ function needsView() {
   // sits beside the list.
   const narrow = NARROW.matches;
   const paneBox = (inPlace) => h("section", { class: `pane card${inPlace ? " in-place" : ""}`, id: "pane", "aria-label": "Item" }, pane);
+  state.shownKeys = shownRows.map((r) => r.key); // for the keys: j/k move through the list as shown
+  state.selKey = sel ? sel.key : "";
+  if (sel) state.lastSelKey = sel.key;
   const row = (r) => (narrow && sel === r && pane ? [needRow(r, isNew(r), true), paneBox(true)] : needRow(r, isNew(r), sel === r));
   let list;
   if (kind) {
@@ -516,7 +519,8 @@ function needsView() {
       h("div", { class: "needs-list" }, any ? list
         : empty(c.needsLoading && !rows.length ? "Loading…"
           : (kind ? "None of these." : (c.unread.length ? "Nothing that could be read needs you." : "Nothing needs you."))),
-      kind ? null : unread),
+      kind ? null : unread,
+      any ? h("p", { class: "keys muted" }, state.keysHelp ? KEYS_HELP : "j/k move · o open · a primary · r reject · ? keys") : null),
       aside && !narrow ? paneBox(false) : null)];
 }
 // The width below which the list and the pane do not fit side by side (app.css has the same number).
@@ -2069,6 +2073,8 @@ function onRoute() {
   // row, that row is brought to the top.
   if (state.route.view === "needs" && was === "needs") {
     const on = document.querySelector(".needs-list .lrow.on");
+    if (on && state.keyMoved && !NARROW.matches) on.scrollIntoView({ block: "nearest" });
+    state.keyMoved = false;
     if (on && named && NARROW.matches) window.scrollTo(0, on.getBoundingClientRect().top + window.scrollY - document.querySelector(".bar").offsetHeight - 8);
   } else window.scrollTo(0, 0);
 }
@@ -2099,6 +2105,63 @@ async function refresh(fresh) {
 }
 
 window.addEventListener("hashchange", onRoute);
+
+// --- keys, on Needs you: j/k move through the list, o goes into the open item, a opens its primary
+// action's confirm (Enter then confirms: two keys, as two clicks), r opens Reject…, Esc closes a
+// confirm, ? shows them all. Never while you type in a field, and never with a modifier.
+const KEYS_HELP = "j / k next or previous item · o go into the open item (or open it) · a the item's primary action, then Enter to confirm · r Reject… · Esc close the confirm · ? hide this";
+document.addEventListener("keydown", (e) => {
+  if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || state.route.view !== "needs") return;
+  if (document.querySelector("dialog[open]")) return;
+  const t = e.target;
+  const typing = t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+  const pane = $("pane");
+  if (e.isComposing || e.keyCode === 229) return; // an input method is composing: its keys are its own
+  if (e.key === "Escape") {
+    const cancel = pane && [...pane.querySelectorAll(".confirm button")].find((b) => b.textContent === "Cancel");
+    if (cancel && !cancel.disabled) { e.preventDefault(); cancel.click(); }
+    return;
+  }
+  if (typing) return;
+  const keys = state.shownKeys || [];
+  // With the item closed (narrow window) or gone, j/k go on from the one last open.
+  const at = keys.indexOf(state.selKey || state.lastSelKey);
+  const move = (i) => {
+    if (i < 0 || i >= keys.length) return;
+    state.keyMoved = true;
+    go(needsRoute(state.route.kind, keys[i]));
+  };
+  // Caps Lock still means the letter; Shift is only for "?".
+  if (e.shiftKey && e.key !== "?") return;
+  switch (e.key.length === 1 && !e.shiftKey ? e.key.toLowerCase() : e.key) {
+    case "j": e.preventDefault(); move(at < 0 ? 0 : at + 1); break;
+    case "k": e.preventDefault(); move(at < 0 ? 0 : at - 1); break;
+    case "o": {
+      e.preventDefault();
+      if (!pane || !state.selKey) { move(Math.max(at, 0)); break; }
+      const f = pane.querySelector("button:not(:disabled), a[href]");
+      pane.scrollIntoView({ block: "nearest" });
+      if (f) f.focus({ preventScroll: true });
+      break;
+    }
+    case "a": {
+      // Only the first control of the pane's first row of actions, and only if it is the primary
+      // (a filled button, or a link-only pane's GitHub link) and enabled: never a confirm's own post
+      // button, so a write always takes Enter on the confirm.
+      const first = pane && pane.querySelector(".step .actions");
+      const b = first && first.firstElementChild;
+      if (b && !b.classList.contains("quiet") && !b.disabled && (b.tagName === "BUTTON" || b.matches("a.cta[href]"))) { e.preventDefault(); b.click(); }
+      break;
+    }
+    case "r": {
+      const b = pane && [...pane.querySelectorAll(".step .actions > button")].find((x) => x.textContent === "Reject…" && !x.disabled);
+      if (b) { e.preventDefault(); b.click(); }
+      break;
+    }
+    case "?": e.preventDefault(); state.keysHelp = !state.keysHelp; renderView(); break;
+    default:
+  }
+});
 $("refresh").addEventListener("click", () => refresh(true));
 $("rescan").addEventListener("click", async () => {
   $("rescan").disabled = true;
