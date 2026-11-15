@@ -20,8 +20,11 @@
 #      only for a viewer with write access. agent:allow-protected is never one of them. Hand back's
 #      confirm (agent:blocked or agent:needs-human off a PR) says whether the PR's head commit is
 #      newer than the last time a stuck label still on it was put on, from a preview that reads only:
-#      an unmoved head is a warning, never a refusal (CI may have been fixed another way), and a
-#      history that cannot be read is "cannot tell", never "moved".
+#      an unmoved head is a warning, never a refusal (what stopped it may have been fixed another
+#      way), and a history that cannot be read is "cannot tell", never "moved". A rerun
+#      names no request, so the issue's labels are read afresh: one that is not open, not
+#      agent:blocked or agent:needs-human, agent:in-progress, agent:pr-open, or has an open
+#      untrusted request is refused with the reason (two stale pages must not post two reruns).
 #   8. Runs, verdicts and switches go through a preview and a one-time confirm, and are done only if
 #      the plan made afresh is the one previewed (a moved head, a new waiting run, a changed variable
 #      refuse). Dispatches carry only inputs the rendered workflows declare, in the shapes the
@@ -652,7 +655,8 @@ done
 # 7. writes, as the viewer
 stub_gh_reset_calls
 INBOX_ISSUE='{"number":7,"state":"open","body":"<!-- agent-inbox -->\nanswer here","user":{"login":"owner-login"}}'
-item() { jq -nc --argjson n "$1" --arg s "${2:-open}" --argjson pr "${3:-false}" '{number: $n, state: $s} + (if $pr then {pull_request: {}} else {} end)'; }
+item() { jq -nc --argjson n "$1" --arg s "${2:-open}" --argjson pr "${3:-false}" --arg l "${4:-}" \
+  '{number: $n, state: $s, labels: [$l | splits(",") | select(. != "") | {name: .}]} + (if $pr then {pull_request: {}} else {} end)'; }
 wrules() {
   rules
   stub_gh_on "api repos/o/r/issues/7" "${INBOX_ISSUE}"
@@ -660,6 +664,15 @@ wrules() {
   stub_gh_on "api repos/o/r/issues/43" "$(item 43)"
   stub_gh_on "api repos/o/r/issues/44" "$(item 44 closed)"
   stub_gh_on "api repos/o/r/issues/50" "${ITEM50:-$(item 50 open true)}"
+  # For /rerun: blocked, needs a person, taken by the coder, already has a PR (each as the agents leave
+  # it, without agent:blocked, so the order of the reasons is pinned), not blocked, untrusted, closed.
+  stub_gh_on "api repos/o/r/issues/60" "$(item 60 open false agent:blocked)"
+  stub_gh_on "api repos/o/r/issues/61" "$(item 61 open false agent:needs-human)"
+  stub_gh_on "api repos/o/r/issues/62" "$(item 62 open false agent:in-progress)"
+  stub_gh_on "api repos/o/r/issues/63" "$(item 63 open false agent:pr-open)"
+  stub_gh_on "api repos/o/r/issues/64" "$(item 64 open false agent:ready)"
+  stub_gh_on "api repos/o/r/issues/65" "$(item 65 open false agent:blocked)"
+  stub_gh_on "api repos/o/r/issues/66" "$(item 66 closed false agent:blocked)"
   stub_gh_on "api repos/o/r/issues/7/comments --input -" '{"html_url":"https://github.com/o/r/issues/7#issuecomment-1"}'
   stub_gh_on "api repos/o/r/issues/* --input -" '[]'
 }
@@ -685,8 +698,10 @@ expect "reject: one command, its reason on one line" "$(wc -l <<<"${got}" | tr -
 expect "reject: parsed as a reject of that request" "$(cut -d' ' -f1-2 <<<"${got}")" "reject REQ-20261113-ab12"
 prefix="/reject REQ-20261113-ab12 "
 expect "reject: the reason is cut to 300 characters" "$(stub_gh_last_body "api repos/o/r/issues/7/comments --input -" | jq -r '.body | length')" "$((${#prefix} + 300))"
-post '{"repo":"o/r","type":"inbox_command","command":"rerun","issue":42}' >/dev/null
-expect "rerun: parsed" "$(parsed)" "rerun coder 42"
+post '{"repo":"o/r","type":"inbox_command","command":"rerun","issue":60}' >/dev/null
+expect "rerun of an agent:blocked issue: parsed" "$(parsed)" "rerun coder 60"
+post '{"repo":"o/r","type":"inbox_command","command":"rerun","issue":61}' >/dev/null
+expect "rerun of an agent:needs-human issue (the page lists it as blocked): parsed" "$(parsed)" "rerun coder 61"
 post '{"repo":"o/r","type":"inbox_command","command":"pause","role":"fixer"}' >/dev/null
 expect "pause: parsed" "$(parsed)" "pause fixer"
 post '{"repo":"o/r","type":"inbox_command","command":"resume","role":"coder"}' >/dev/null
@@ -700,6 +715,23 @@ expect "an id the agent never filed (a user named like the bot did): refused" "$
 expect "a request already answered: refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"approve","req":"REQ-20261112-cd34"}')" 409
 expect "rerun of true (a bool is not a number): refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"rerun","issue":true}')" 400
 expect "rerun of a non-number: refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"rerun","issue":"42"}')" 400
+# A rerun names no request: the issue's labels, read afresh, stop a second one from a stale page.
+rerun_refused() { post "{\"repo\":\"o/r\",\"type\":\"inbox_command\",\"command\":\"rerun\",\"issue\":$1}" | jq -r .error; }
+expect "rerun of an issue the coder is on: refused, with the reason" "$(rerun_refused 62)" "#62 is agent:in-progress: the coder is already on it"
+expect "rerun of an issue that already has a PR: refused, with the reason" "$(rerun_refused 63)" "#63 is agent:pr-open: the coder already opened a PR for it"
+expect "rerun of an issue no longer blocked: refused, with the reason" "$(rerun_refused 64)" "#64 is no longer blocked (a rerun or a person got there first): refresh the page"
+expect "rerun of a closed issue: refused" "$(rerun_refused 66)" "#66 is not open"
+expect "rerun of a PR: refused" "$(rerun_refused 50)" "#50 is a PR; the coder reruns issues"
+INBOX_EXTRA='[{"author":{"__typename":"Bot","login":"gatehand"},"body":"<!-- agent-req:REQ-20261114-aaaa role=coder issue=65 kind=untrusted -->\n### x","createdAt":"2026-11-14T11:59:00Z"}]'; wrules
+expect "rerun of an issue with an open untrusted request: refused, with the reason" "$(rerun_refused 65 | cut -c1-58)" "#65 has an open untrusted request (REQ-20261114-aaaa): re-"
+INBOX_EXTRA='[{"author":{"__typename":"Bot","login":"gatehand"},"body":"<!-- agent-req:REQ-20261114-aaaa role=coder issue=65 kind=untrusted -->\n### x","createdAt":"2026-11-14T11:58:00Z"},
+  {"author":{"__typename":"Bot","login":"gatehand"},"body":"- acknowledged\n<!-- agent-answer:REQ-20261114-aaaa -->","createdAt":"2026-11-14T11:59:00Z"}]'; wrules
+expect "no rerun refusal posted anything" "$(n_posts)" "${before}"
+before_ok="$(n_posts)"
+post '{"repo":"o/r","type":"inbox_command","command":"rerun","issue":65}' >/dev/null
+expect "once that request is acknowledged, the rerun is posted" "$(n_posts) $(parsed)" "$((before_ok + 1)) rerun coder 65"
+before="$(n_posts)"
+INBOX_EXTRA='[]'; wrules
 expect "an unknown command: refused" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"merge"}')" 400
 VARS_OUT='{"variables":[{"name":"AGENT_OWNER_LOGIN","value":"Owner-Login"}]}'; wrules
 expect "the owner login must match to the letter, as agent-inbox.sh compares it" "$(pcode '{"repo":"o/r","type":"inbox_command","command":"pause","role":"coder"}')" 403
