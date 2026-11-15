@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Dashboard: "Rerun coder" is refused, with the reason, when the issue is no longer blocked
+  (neither `agent:blocked` nor `agent:needs-human`), is `agent:in-progress` or `agent:pr-open`, is
+  closed or a PR, or has an open `untrusted` request; the server reads the issue's labels afresh
+  before posting, so two clicks from stale pages no longer post two reruns (#27). Installed
+  repositories need no update: the dashboard runs from the package.
 - Week shows the last seven days' cost as a floor against a weekly budget you set on the page (kept
   on this machine, #28), with its warning line; cost by day against the budget's pace, by repository
   and outcomes by role; PRs merged by the gate and coder runs that opened a PR. Runs with no cost
