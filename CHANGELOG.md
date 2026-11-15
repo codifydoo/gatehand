@@ -118,8 +118,9 @@
   read 10 of them as unknown, which leaves an agent PR waiting for a person. Installed repositories
   get the wording on their next update.
 - Prompts: the coder and fixer commands no longer say "Plan with TodoWrite" or cap `summary.md` at
-  30 lines (it is "a short comment" now), and a comment in `claude-code-review.yml` names the policy
-  key `review.model` correctly. Installed repositories get them on their next update.
+  30 lines (it is "a short comment" now); `/verify-pr`'s opening stance reads "Check what the PR
+  claims against the code, and do NOT assume correctness."; and a comment in
+  `claude-code-review.yml` names the policy key `review.model` correctly. Installed repositories get them on their next update.
 - Nothing else installed into repositories changes: an update (`bash bin/render.sh <repo>`, or the
   update skill) is needed only to get the review and prompt wording above.
 
