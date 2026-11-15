@@ -190,3 +190,30 @@ a.open-item { font-weight: 500; white-space: nowrap; }
   .grid.stack td { display: inline-block; border: 0; padding: 1px 14px 1px 0; white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
   table.stack td[data-label]::before { content: attr(data-label) " "; color: var(--muted); font-size: 12px; }
 }
+/* Week */
+.week-total { display: flex; flex-direction: column; gap: 6px; max-width: 640px; }
+.week-fig { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.week-fig .muted { font-size: 14px; font-weight: 400; }
+.week-fig.warn { color: var(--warn); } .week-fig.bad { color: var(--bad); }
+.meter { position: relative; height: 10px; border-radius: 5px; background: var(--off-bg); margin-top: 4px; }
+.meter .fill { height: 100%; border-radius: 5px; background: var(--accent); }
+.meter .fill.warn { background: var(--warn); } .meter .fill.bad { background: var(--bad); }
+.meter .mark { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--fg); }
+.meter .warn-mark { background: var(--warn); }
+.meter-scale { display: flex; justify-content: space-between; font-size: 12px; font-variant-numeric: tabular-nums; }
+.small { font-size: 12px; }
+.grid th.n { text-align: right; }
+.grid td.wrap { white-space: normal; }
+.budget-form { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--accent); border-radius: 8px; padding: 10px 12px; }
+.budget-form label { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; }
+.budget-form input { min-width: 0; max-width: 200px; }
+.budget-form p { margin: 0; }
+.days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; max-width: 640px; font-size: 12px; text-align: center; font-variant-numeric: tabular-nums; }
+.day .col { position: relative; height: 90px; display: flex; align-items: flex-end; border-bottom: 1px solid var(--line); }
+.day .col .fill { width: 100%; min-height: 1px; border-radius: 3px 3px 0 0; background: var(--accent); opacity: .45; }
+.day.over .col .fill { opacity: 1; }
+.day.over .day-cost { font-weight: 700; }
+.day .pace { position: absolute; left: -3px; right: -3px; border-top: 1px dashed var(--fg); }
+table.week-roles td:nth-child(3) { white-space: normal; min-width: 180px; }
+table.week-roles td:nth-child(5) { white-space: nowrap; }
+@media (max-width: 640px) { .days { gap: 3px; font-size: 11px; } }
