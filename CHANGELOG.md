@@ -51,6 +51,8 @@
   scheduled workflow's cron lines and next run in UTC, read from the workflow files on the default
   branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only;
   the page does not show them yet (#21, #22).
+- In a narrow window the open item of Needs you expands in place under its row, as in a mail app,
+  and the sidebar folds into one line with ☰.
 =======
   branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only
   (#21, #22); Activity shows the next scheduled runs, and a repository's Agents tab shows the limits
