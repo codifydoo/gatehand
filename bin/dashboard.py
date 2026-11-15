@@ -1943,7 +1943,7 @@ def main(argv=None):
     ap.add_argument("--print-url", action="store_true", help="print the URL with its session secret")
     ap.add_argument("--idle-minutes", type=int, default=120, help="stop after this long with no page open (0: never)")
     ap.add_argument("--ready-file", help="write {port, token} here (mode 0600) once listening; for scripts and tests")
-    ap.add_argument("--config", help="the repository list and the weekly budget (default: %s)" % config_path())
+    ap.add_argument("--config", help="the repository list, the Pause all record and the weekly budget (default: %s)" % config_path())
     a = ap.parse_args(argv)
 
     token = secrets.token_urlsafe(32)

@@ -371,7 +371,7 @@ non-archived ones whose default branch has `.github/agents/install.lock.json`. "
 under Repositories, scans again. Add one by hand by `owner/name` there; "Hide" (there, or on a
 repository's Settings tab) keeps one out of later scans too. The list
 lives in `${XDG_CONFIG_HOME:-~/.config}/gatehand/dashboard.json` (mode 0600; `--config` to move it),
-with the Pause all record. Neither is ever sent to GitHub.
+with the Pause all record and the weekly budget. None of it is ever sent to GitHub.
 A scan that cannot see everything (an organisation that requires SAML authorisation for your token,
 more than 3,000 repositories) keeps what it found and says what it missed.
 
@@ -421,8 +421,9 @@ tab it opened can talk to it.
   request from the page is passed through. Reading writes nothing to GitHub. `tests/dashboard/dashboard.test.sh`
   pins each point above, runs every command the page can post through the real `parse_commands`, and
   every verdict through the real `review_verdict`.
-- Besides GitHub and the files above, it writes only its own config file: the repository list and
-  the weekly budget, each a fixed shape the server validates, kept with mode 0600.
+- Besides GitHub and the files above, it writes only its own config file: the repository list, the
+  Pause all record and the weekly budget, each a fixed shape the server validates, kept with mode
+  0600.
 
 ## Options
 
@@ -432,5 +433,5 @@ tab it opened can talk to it.
 | `--no-open` | do not open a browser; print the address instead |
 | `--print-url` | print the address with its secret |
 | `--idle-minutes M` | stop after M minutes with no page open (default 120; 0 never) |
-| `--config FILE` | keep the repository list and the weekly budget here |
+| `--config FILE` | keep the repository list, the Pause all record and the weekly budget here |
 | `--ready-file FILE` | write `{port, token}` there (mode 0600) once listening, for scripts |
