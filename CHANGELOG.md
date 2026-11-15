@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 (2026-11-15)
 
 - Hand back to the merge gate says in its confirm whether the PR's head moved since it was blocked:
   whether the head commit is newer than the last time `agent:blocked` or `agent:needs-human` was put
@@ -33,8 +33,8 @@
 - Dashboard: a failed read says why, as one cause from a fixed set (`sso`, `signed_out`,
   `rate_limited` with the time the limit resets, `not_found`, `no_access`, `unknown`), in each
   repository's new `unreadable` list, beside `error` in a failed request's answer, and for a scan
-  that could not see everything in `scan_unreadable` beside its notes. The page does
-  not show it yet. Installed repositories need no update: the dashboard runs from the package.
+  that could not see everything in `scan_unreadable` beside its notes; Needs you shows it as health
+  rows. Installed repositories need no update: the dashboard runs from the package.
 - The dashboard is laid out as a sidebar and views instead of one long page: Needs you, Activity,
   Week, a Repositories list, and per repository four tabs (Pipeline, Agents, Runs and spend,
   Settings). The view is in the address, so a reload or a link keeps it, and the number waiting for
@@ -117,8 +117,12 @@
   wrote the Verdict heading as HTML, in bold or on one line with the verdict, and the merge gate
   read 10 of them as unknown, which leaves an agent PR waiting for a person. Installed repositories
   get the wording on their next update.
-- Nothing else installed into repositories changes: an update is needed only to get the review
-  wording above.
+- Prompts: the coder and fixer commands no longer say "Plan with TodoWrite" or cap `summary.md` at
+  30 lines (it is "a short comment" now); `/verify-pr`'s opening stance reads "Check what the PR
+  claims against the code, and do NOT assume correctness."; and a comment in
+  `claude-code-review.yml` names the policy key `review.model` correctly. Installed repositories get them on their next update.
+- Nothing else installed into repositories changes: an update (`bash bin/render.sh <repo>`, or the
+  update skill) is needed only to get the review and prompt wording above.
 
 ## 0.7.0 (2026-11-14)
 
