@@ -25,6 +25,7 @@ import argparse
 import hmac
 import http.server
 import json
+import math
 import os
 import re
 import secrets
@@ -1463,13 +1464,33 @@ def scan_entry(x):
     return c
 
 
+BUDGET_WARN_DEFAULT = 0.8
+
+
+def budget_number(v, name, top=None):
+    """A budget field: None (not set), or a finite number of zero or more (at most `top`). A bool is
+    not a number here, and json.loads lets NaN and Infinity through."""
+    if v is None:
+        return None
+    try:  # an int too big for a float (json.loads takes 4,000 digits) is not a budget either
+        ok = not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v) and v >= 0 and (top is None or v <= top)
+    except OverflowError:
+        ok = False
+    if not ok:
+        raise ValueError("%s must be a number from 0%s, or null" % (name, " to %g" % top if top is not None else " up"))
+    return v
+
+
 class Config:
-    """discovered (the last scan), added (by hand), excluded (removed by hand; a rescan keeps them out)."""
+    """discovered (the last scan), added (by hand), excluded (removed by hand; a rescan keeps them out),
+    and the viewer's weekly budget (budget_usd, US dollars) and its warning line (budget_warn, a share
+    of it): settings on this machine only, which warn and stop nothing, and which no agent reads."""
 
     def __init__(self, path):
         self.path = path
         self.lock = threading.Lock()
-        self.data = {"discovered": [], "added": [], "excluded": [], "scanned_at": None}
+        self.data = {"discovered": [], "added": [], "excluded": [], "scanned_at": None,
+                     "budget_usd": None, "budget_warn": None}
         try:
             with open(path) as f:
                 got = json.load(f)
@@ -1483,8 +1504,19 @@ class Config:
             self.data["scan_unreadable"] = [scan_entry(x) for x in causes if isinstance(x, dict)
                                             and x.get("cause") in CAUSES and isinstance(x.get("error"), str)
                                             ] if isinstance(causes, list) else []
+            for k, top in (("budget_usd", None), ("budget_warn", 1)):
+                try:  # a value hand-edited out of shape is not set, and the rest of the file still loads
+                    self.data[k] = budget_number(got.get(k), k, top)
+                except ValueError:
+                    pass
         except (OSError, ValueError, AttributeError):
             pass
+
+    def budget(self):
+        with self.lock:
+            warn = self.data["budget_warn"]
+            return {"weekly_usd": self.data["budget_usd"],
+                    "warn_at": BUDGET_WARN_DEFAULT if warn is None else warn}
 
     def repos(self):
         with self.lock:
@@ -1683,7 +1715,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             user = cache.get("user", lambda: gh_json(["api", "user"]) or {}, ttl=3600)
             rate = cache.get("rate", lambda: ((gh_json(["api", "rate_limit"]) or {}).get("resources") or {}), fresh=fresh)
             return self.send(200, dict(self.repo_list(), viewer=user.get("login"), scan_error=scan_error,
-                                       scan_cause=scan_cause, rate={k: rate.get(k) for k in ("core", "graphql")}, now=iso(now_utc())))
+                                       scan_cause=scan_cause, budget=cfg.budget(), rate={k: rate.get(k) for k in ("core", "graphql")},
+                                       now=iso(now_utc())))
         m = re.fullmatch(r"/api/repo/([^/]+)/([^/]+)(/inbox|/gate)?", path)
         if not m:
             raise ApiError(404, "not found")
@@ -1785,6 +1818,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
             c["scanned_at"] = iso(now_utc())
         self.server.config.update(apply)
 
+    def set_budget(self, body):
+        """The weekly budget, a setting in the local config file only: nothing goes to GitHub. The body
+        is exactly {"weekly_usd": number >= 0 or null to clear, "warn_at"?: share 0..1, or null for the
+        default}; a missing warn_at keeps the line as it is."""
+        extra = sorted(set(body) - {"weekly_usd", "warn_at"})
+        if extra or "weekly_usd" not in body:
+            raise ApiError(400, "the budget is {weekly_usd, warn_at}: %s" % (
+                "unknown field %s" % ", ".join(extra) if extra else "weekly_usd is missing (null clears it)"))
+        try:
+            usd = budget_number(body["weekly_usd"], "weekly_usd")
+            warn = budget_number(body.get("warn_at"), "warn_at", 1)
+        except ValueError as e:
+            raise ApiError(400, str(e))
+
+        got = {}
+
+        def apply(c):  # under the config's lock: the answer is this request's own write
+            c["budget_usd"] = usd
+            if "warn_at" in body:
+                c["budget_warn"] = warn
+            got.update(weekly_usd=usd, warn_at=BUDGET_WARN_DEFAULT if c["budget_warn"] is None else c["budget_warn"])
+        self.server.config.update(apply)
+        self.send(200, {"budget": got})
+
     def post(self):
         path, _ = self.route()
         if not path.startswith("/api/"):
@@ -1797,6 +1854,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.action(body)
         if path == "/api/action/preview":
             return self.preview(body)
+        if path == "/api/budget":
+            return self.set_budget(body)
         if path != "/api/repos":
             raise ApiError(404, "not found")
         op, repo = body.get("op"), body.get("repo")
@@ -1837,7 +1896,7 @@ def main(argv=None):
     ap.add_argument("--print-url", action="store_true", help="print the URL with its session secret")
     ap.add_argument("--idle-minutes", type=int, default=120, help="stop after this long with no page open (0: never)")
     ap.add_argument("--ready-file", help="write {port, token} here (mode 0600) once listening; for scripts and tests")
-    ap.add_argument("--config", help="the repository list (default: %s)" % config_path())
+    ap.add_argument("--config", help="the repository list and the weekly budget (default: %s)" % config_path())
     a = ap.parse_args(argv)
 
     token = secrets.token_urlsafe(32)

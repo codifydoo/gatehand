@@ -59,6 +59,11 @@
   branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only
   (#21, #22); Activity shows the next scheduled runs, and a repository's Agents tab shows the limits
   and schedules.
+- Dashboard: a weekly budget in US dollars and a warning line (a share of it, 80% by default), kept
+  in the dashboard's local config file, set through `POST /api/budget` and returned by
+  `/api/session`. A setting on this machine only: nothing is written to GitHub, no agent reads it,
+  and it stops nothing. A config file from before loads unchanged. The page does not show or set it
+  yet (#28).
 - Project site: `site/` holds five static pages (home, how it works, security, the dashboard, get
   started), published to GitHub Pages by `.github/workflows/pages.yml` on a push to `main`. Not
   part of the package: nothing changes in installed repositories.
