@@ -97,7 +97,8 @@ posted and why (the server's own reason, such as the request being answered alre
 for the Agent inbox workflow, with the line posted and a link to it, until its answer arrives. If
 the dashboard fails after it may have posted, or does not answer, the pane says it is not known
 whether anything was posted. When the answer is in, the row leaves Needs you and the pane says what
-happened.
+happened; a request answered elsewhere while its pane was open says how and when ("approved at
+17:29").
 
 **A request.** Its pane is the place to answer it:
 
@@ -107,7 +108,10 @@ happened.
 - what the agent wrote, from its request comment, shown as plain text;
 - where an answer must go first, as a link to GitHub: for `blocked`, a comment on the issue itself
   (the next run reads comments from people with write access, not the inbox); for `failed`, an edit
-  if the issue was unclear; for `untrusted`, re-applying `agent:ready` yourself;
+  if the issue was unclear; for `untrusted`, re-applying `agent:ready` yourself. Under it, for an
+  open `blocked` or `failed` request, whether someone with write access has commented on the issue
+  since the request, and who and when (never what they wrote); nothing until that is first read, or
+  when it cannot be told;
 - the primary action (named for the kind, as in the table under What you can do from it) and
   Reject…, with the requesting role's runs on the issue and their cost over the last seven days
   beside them (runs that never reached the agent left out; the cost a floor: a run with no cost
@@ -153,7 +157,9 @@ it, and a note changed after its preview is previewed again before anything is s
 and their cost over the last seven days are beside the buttons; Claude review runs are not in the
 ledger.
 
-**A blocked issue with no open request.** The pane says so (it was answered, or never filed), that
+**A blocked issue with no open request.** The pane says so: how its newest request was answered,
+when, and a reject's reason ("its last one, REQ-…, was rejected by you on Nov 11: not now"), or that it was
+answered or never filed when no answered request about it is among the inbox comments read. It says
 the coder picks only `agent:ready` issues, and offers "Rerun coder" (`/rerun coder #N`) with the
 issue's coder runs and cost beside it, and Hold or Release. Rerun is disabled, with the reason,
 while the issue has an open `untrusted` request, or carries `agent:hold` (a run named for a held
@@ -191,8 +197,8 @@ then access, then not found).
 and says whether it is still unread (and why) or readable again. It writes nothing. Two causes hit
 every repository and are said once, under the bar, instead of in rows: `gh` signed out (with the
 command to copy and Check again), and the API limit, with when reads resume; Refresh, the
-five-minute refresh, and Pause all, Resume n… and Retry n… (which read every repository first) are
-off until then.
+five-minute refresh, whether a writer has commented on a request's issue, and Pause all, Resume n…
+and Retry n… (which read every repository first) are off until then.
 
 ### Keys
 
@@ -504,6 +510,28 @@ The first three are tried in that order, then a GraphQL error's type, then `HTTP
 reset since it was read, or cannot be read. A cause is never guessed: what matches nothing is
 `unknown`.
 
+### Whether a writer answered
+
+`/api/repo/<owner>/<name>/request/<REQ-id>` answers for one open `blocked` or `failed` request (any
+other id, kind, or an answered request is a 404). The page asks for the open pane only: each time a
+request's pane opens and on each refresh, never for every request on a page load, and not during the
+API limit. The answer is cached for a minute and each commenter's access for ten, both read again
+with `?fresh=1`, which the page sends whenever it has asked before.
+
+```json
+{"id": "REQ-20261113-ab12", "issue": 42, "writer_comment": {"login": "maintainer", "at": "2026-11-14T08:00:00Z"}}
+```
+
+`writer_comment` is the newest comment on the request's issue made after the request by an account
+with write access or more (`admin`, `maintain` or `write` from
+`GET /repos/<repo>/collaborators/<login>/permission`, as `agent-lib.sh` `actor_trusted` decides; never
+`author_association`), or `null` when there is none. The agent bot's own comments do not count, and
+an App's never do. Only the login and the time are sent: the server does not ask GitHub for the
+comment's text. Comments are read newest first back to the request, at most 300; when more than
+that came after the request and none of them is a writer's, `writer_comment` is left out (not
+known), and the page says nothing. A permission lookup that fails for any reason but a 404 fails
+the request, as any read does, rather than count someone as not a writer.
+
 ### Limits and schedules
 
 `/api/repo/<owner>/<name>` also carries the figures the page shows beside an action that spends
@@ -519,6 +547,27 @@ it can already have passed: that is "due now"); GitHub often starts a scheduled 
 late, and skips it while the workflow is disabled. It is `null`, and listed under the errors, for a cron the
 server cannot read (only `*`, numbers, `-`, `,` and `/`, the operators GitHub documents) or one
 that matches no day in nine years.
+
+### How a request was answered
+
+`/api/repo/<owner>/<name>/inbox` lists the requests the agent bot filed, each with `answered`. An
+answered one also carries:
+
+| Field | What | Read from |
+|---|---|---|
+| `answer` | `approved`, `rejected`, `seen` (a request about a PR: nothing changed) or `acknowledged` (an `untrusted` request: nothing changed), as the inbox workflow recorded it; `null` if neither source says | the bot's reply line for the request (`` - `REQ-…` approved…``); for a request kind a repository's own hook handles, which writes its own line, the verb of the owner's command |
+| `answered_at` | when, in UTC | the bot's first comment carrying the request's answer marker |
+| `reason` | a reject's reason, one line of at most 300 characters, as text; `null` without one | the owner's command that reply applied: the rest of its `/reject REQ-… ` line |
+
+The command a reply applied is the owner's first one naming the request after the bot's last earlier
+reply about it (a failed apply asks for it again; a second command sent while a run was going is
+"already answered"), else the last one before the reply. Only `AGENT_OWNER_LOGIN`'s comments are
+read for it, to the letter: the inbox workflow applies no one else's, so a `/reject` pasted by
+anyone else changes nothing. A command edited since it was posted is not read (the workflow applied
+the text as first posted, and anyone with write access can edit a comment), so neither verb nor
+reason comes from it. A request that is not
+answered has all three `null`. The reason is text the owner typed: the page sets it as text, never
+as HTML, and nothing is queued from it.
 
 ### The weekly budget
 

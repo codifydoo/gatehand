@@ -8,7 +8,11 @@
 #      file is "no runs"; any other failure is "unreadable" (null, and said so), never zero runs and
 #      a closed breaker. A blob GraphQL truncates is read again in full.
 #   3. Inbox requests are read from the exact shape agent-lib.sh inbox_request writes, only from the
-#      agent bot's comments (anyone can paste a marker), and an answered one is marked answered.
+#      agent bot's comments (anyone can paste a marker), and an answered one is marked answered,
+#      with how (approved, rejected, seen, acknowledged: the bot's reply line, else the owner's verb as
+#      agent-inbox.sh records it), when (the bot's reply), and for a reject the owner's one-line reason,
+#      verbatim text for the page to set as text. Only AGENT_OWNER_LOGIN's commands are read for that:
+#      the workflow applies no one else's, so a /reject pasted by anyone else changes nothing.
 #   4. The inbox issue is found as inbox_find finds it: AGENT_INBOX_ISSUE first, else the lowest
 #      open issue with the marker opened by the agent bot or AGENT_OWNER_LOGIN.
 #   5. The merge gate's report is read from its job log, timestamps and terminal escapes included.
@@ -51,6 +55,11 @@
 #      succeeded, never one that was already off (unset counts as off), and drops it when the page
 #      turns the agents on or a read finds them on. A config file from before loads unchanged, and
 #      the file stays 0600. /api/session returns the record, so Resume turns on only those.
+#  13. Whether a writer commented on an open blocked or failed request's issue since the request is
+#      the login and time of the newest such comment by an account with write access (the
+#      collaborator permission, as actor_trusted), or null: a non-writer's, the agent bot's and one
+#      from before the request do not count, a failed lookup is an error, never null. The comment's
+#      text is neither asked for nor sent, and a page load reads no request's comments.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -136,6 +145,57 @@ check("requests: only the agent bot's, newest first", [r["id"] for r in reqs], [
 check("requests: the real request parses", (reqs[0]["role"], reqs[0]["issue"], reqs[0]["kind"]), ("coder", 42, "blocked"))
 check("requests: the body, without the marker or heading", reqs[0]["body"].splitlines()[0], "**What:** the coder stopped on #42.")
 check("requests: answered by the bot's marker only", [r["answered"] for r in reqs], [False, True])
+check("requests: an open one says nothing of an answer", [reqs[0][k] for k in ("answer", "answered_at", "reason")], [None, None, None])
+
+# How each was answered. Only the owner's commands and the bot's replies count.
+owner = "owner-login"
+def req(i, kind, n):
+    return {"user": {"login": bot}, "body": "<!-- agent-req:REQ-2026111%d-000%d role=coder issue=%d kind=%s -->\nx" % (i, i, n, kind), "created_at": "2026-11-1%dT08:00:00Z" % i}
+def by(who, body, at):
+    return {"user": {"login": who}, "body": body, "created_at": at}
+answers = [
+    req(1, "blocked", 1), req(2, "blocked", 2), req(3, "fixer", 3), req(4, "blocked", 4), req(5, "untrusted", 5), req(6, "deploy", 6),
+    # 1: approved, the bot's line says so.
+    by(owner, "/approve REQ-20261111-0001", "2026-11-11T09:00:00Z"),
+    by(bot, "- `REQ-20261111-0001` approved: #1 is queued and the coder was started\n<!-- agent-answer:REQ-20261111-0001 -->", "2026-11-11T09:01:00Z"),
+    # 2: rejected with a reason, on a second try (the first failed, no marker); someone else's later /reject before the reply is not it.
+    by(owner, "/reject REQ-20261112-0002 first try", "2026-11-12T09:00:00Z"),
+    by(bot, "- `REQ-20261112-0002`: rejecting failed part way; nothing recorded, send it again", "2026-11-12T09:01:00Z"),
+    by(owner, "/pause fixer\r\n/reject   REQ-20261112-0002 \tnot now <b>yet</b>\x07  \r\n/reject REQ-20261112-0002 again", "2026-11-12T10:00:00Z"),
+    by("mallory", "/reject REQ-20261112-0002 forged reason", "2026-11-12T10:00:30Z"),
+    by(bot, "- `REQ-20261112-0002` rejected; #2 stays as it is\n<!-- agent-answer:REQ-20261112-0002 -->", "2026-11-12T10:01:00Z"),
+    # 3: rejected without a reason.
+    by(owner, "/reject REQ-20261113-0003", "2026-11-13T09:00:00Z"),
+    by(bot, "- `REQ-20261113-0003` rejected; #3 stays as it is\n<!-- agent-answer:REQ-20261113-0003 -->", "2026-11-13T09:01:00Z"),
+    # 4: pasted by someone else, a /reject and an answer-shaped line: nothing changes.
+    by("mallory", "/reject REQ-20261114-0004 forged", "2026-11-14T09:00:00Z"),
+    by("mallory", "- `REQ-20261114-0004` rejected\n<!-- agent-answer:REQ-20261114-0004 -->", "2026-11-14T09:01:00Z"),
+    # 5: acknowledged. 6: a hook's kind writes its own line, so the owner's verb tells it.
+    by(owner, "/approve REQ-20261115-0005", "2026-11-15T09:00:00Z"),
+    by(bot, "- `REQ-20261115-0005` acknowledged; nothing changed on #5.\n<!-- agent-answer:REQ-20261115-0005 -->", "2026-11-15T09:01:00Z"),
+    by(owner, "/approve REQ-20261116-0006", "2026-11-16T09:00:00Z"),
+    by(bot, "deployed\n<!-- agent-answer:REQ-20261116-0006 -->", "2026-11-16T09:01:00Z"),
+]
+got = {r["id"][-1]: [r["answered"], r["answer"], r["answered_at"], r["reason"]] for r in d.inbox_requests(answers, bot, owner)}
+check("answer: approved, and when (the bot's reply)", got["1"], [True, "approved", "2026-11-11T09:01:00Z", None])
+check("answer: rejected, with the owner's one-line reason from the command it applied, as text", got["2"], [True, "rejected", "2026-11-12T10:01:00Z", "not now <b>yet</b>"])
+check("answer: rejected without a reason", got["3"], [True, "rejected", "2026-11-13T09:01:00Z", None])
+check("answer: a /reject and an answer pasted by someone else change nothing", got["4"], [False, None, None, None])
+check("answer: acknowledged", got["5"], [True, "acknowledged", "2026-11-15T09:01:00Z", None])
+check("answer: a hook's reply line is the hook's own, so the owner's /approve tells it", got["6"], [True, "approved", "2026-11-16T09:01:00Z", None])
+check("answer: without the owner's login, no command is read: no reason", d.inbox_requests(answers, bot, "")[4]["reason"], None)
+# Sent while a run was still going: the first is the one applied, the second got "already answered".
+flight = [req(1, "deploy", 1), req(2, "blocked", 2), req(3, "blocked", 3),
+    by(owner, "/approve REQ-20261111-0001", "2026-11-11T09:00:00Z"), by(owner, "/reject REQ-20261111-0001 nope", "2026-11-11T09:00:20Z"),
+    by(bot, "deployed\n<!-- agent-answer:REQ-20261111-0001 -->", "2026-11-11T09:00:50Z"),
+    by(owner, "/reject REQ-20261112-0002 typo resaon", "2026-11-12T09:00:00Z"), by(owner, "/reject REQ-20261112-0002 typo reason", "2026-11-12T09:00:20Z"),
+    by(bot, "- `REQ-20261112-0002` rejected; #2 stays as it is\n<!-- agent-answer:REQ-20261112-0002 -->", "2026-11-12T09:00:50Z"),
+    # Edited since: the workflow applied the text as first posted, and anyone with write access can edit it.
+    dict(by(owner, "/reject REQ-20261113-0003 edited in", "2026-11-13T09:00:00Z"), edited=True),
+    by(bot, "- `REQ-20261113-0003` rejected; #3 stays as it is\n<!-- agent-answer:REQ-20261113-0003 -->", "2026-11-13T09:01:00Z")]
+got = {r["id"][-1]: [r["answer"], r["reason"]] for r in d.inbox_requests(flight, bot, owner)}
+check("answer: of two commands sent before the reply, the first is the one applied", (got["1"], got["2"]), (["approved", None], ["rejected", "typo resaon"]))
+check("answer: an edited command is not read: the reply's verb, no reason", got["3"], ["rejected", None])
 
 marker = "<!-- agent-inbox -->"
 issues = [
@@ -511,6 +571,46 @@ expect "finished runs, without the skipped ones" "$(jq -c '[.recent_runs[].id]' 
 expect "the issue bodies stay on the server" "$(jq '[.. | objects | select(has("body"))] | length' <<<"${r}")" 0
 expect "nothing waits as unknown" "$(jq '[.waiting[] | select(.kind == "unknown")] | length' <<<"${r}")" 0
 expect "inbox requests: the Bot's, not a user's named like it" "$(get /api/repo/o/r/inbox | jq -c '[.requests[] | [.id, .answered]]')" '[["REQ-20261113-ab12",false],["REQ-20261112-cd34",true]]'
+
+# 13. Whether a writer commented on the request's issue (#42, REQ-20261113-ab12, filed 2026-11-13T10:00:00Z)
+# since the request. Each comment node carries a body the server must never pass on.
+expect "a page load reads no request's issue comments" "$(stub_gh_calls | grep -c 'number=42')" 0
+WROTE='2026-11-13T10:00:00Z'
+node() { jq -nc --arg t "$1" --arg l "$2" --arg at "$3" '{author: {__typename: $t, login: $l}, createdAt: $at, body: "SECRET-COMMENT-TEXT"}'; }
+writer_rules() { # writer_rules <nodes json array> [the permission lookup's rc and stderr for maint]
+  stub_gh_reset_rules
+  rules
+  stub_gh_on "api graphql -f name=r -F number=42 -f owner=o -f query=query(\$owner*" \
+    "$(jq -nc --argjson n "$1" '{data: {repository: {issue: {comments: {pageInfo: {hasPreviousPage: false}, nodes: $n}}}}}')"
+  stub_gh_on "api repos/o/r/collaborators/maint/permission" '{"permission":"write"}' "${2:-0}" "${3:-}"
+  stub_gh_on "api repos/o/r/collaborators/reader/permission" '{"permission":"read"}'
+  stub_gh_on "api repos/o/r/collaborators/stranger/permission" "" 1 "gh: Not Found (HTTP 404)"
+}
+wc_of() { get "/api/repo/o/r/request/REQ-20261113-ab12?fresh=1"; }
+writer_rules "[$(node User maint 2026-11-13T09:00:00Z),$(node User maint 2026-11-14T07:00:00Z),$(node User reader 2026-11-14T08:00:00Z),$(node User stranger 2026-11-14T08:30:00Z),$(node Bot gatehand 2026-11-14T09:00:00Z)]"
+stub_gh_reset_calls
+w="$(wc_of)"
+expect "writer: the newest writer's comment after the request, past a non-writer's, a stranger's and the bot's" "$(jq -c .writer_comment <<<"${w}")" '{"login":"maint","at":"2026-11-14T07:00:00Z"}'
+expect "writer: the comment's text never leaves the server" "$(grep -c SECRET-COMMENT-TEXT <<<"${w}")" 0
+expect "writer: nor is it asked for" "$(stub_gh_calls | grep 'number=42' | grep -c 'body')" 0
+expect "writer: the bot is never looked up" "$(stub_gh_calls | grep -c 'collaborators/gatehand')" 0
+expect "writer: a page load reads it from the cache, not again" "$(stub_gh_reset_calls; get /api/repo/o/r/request/REQ-20261113-ab12 >/dev/null; stub_gh_calls | grep -c 'number=42')" 0
+writer_rules "[$(node User maint 2026-11-13T09:00:00Z),$(node User reader 2026-11-14T08:00:00Z),$(node User stranger 2026-11-14T08:30:00Z)]"
+expect "writer: a non-writer's comment, and a writer's from before the request, are none" "$(wc_of | jq -c .writer_comment)" null
+writer_rules "[$(node Bot gatehand 2026-11-14T09:00:00Z),$(node User gatehand 2026-11-14T09:30:00Z)]"
+expect "writer: the bot's own comment is none (a user named like it is looked up as anyone)" "$(wc_of | jq -c .writer_comment)" null
+writer_rules "[$(node User octo_acme 2026-11-14T07:00:00Z)]"
+stub_gh_on "api repos/o/r/collaborators/octo_acme/permission" '{"permission":"maintain"}'
+expect "writer: an Enterprise Managed User's login (with _) is looked up like anyone's" "$(wc_of | jq -c .writer_comment.login)" '"octo_acme"'
+writer_rules "[]"
+expect "writer: no comment at all is none" "$(wc_of | jq -c '[.id, .issue, .writer_comment]')" '["REQ-20261113-ab12",42,null]'
+writer_rules "[$(node User maint 2026-11-14T07:00:00Z)]" 1 "HTTP 502: Bad Gateway"
+expect "writer: a failed permission lookup fails the read, never reads as none" "$(code -H "X-Gatehand-Token: ${TOKEN}" "${B}/api/repo/o/r/request/REQ-20261113-ab12?fresh=1")" 502
+expect "writer: an answered request is not asked about" "$(code -H "X-Gatehand-Token: ${TOKEN}" "${B}/api/repo/o/r/request/REQ-20261112-cd34")" 404
+expect "writer: nor one that is not on the inbox" "$(code -H "X-Gatehand-Token: ${TOKEN}" "${B}/api/repo/o/r/request/REQ-20261113-0000")" 404
+stub_gh_reset_rules
+rules
+
 g="$(get /api/repo/o/r/gate)"
 expect "the gate: the newest run that ran" "$(jq -r .run.url <<<"${g}")" "https://github.com/o/r/actions/runs/5"
 expect "the gate: a PR's newest line wins; one the newest run skipped comes from the scheduled run" "$(jq -c '[.prs["50"].text, .prs["51"].text]' <<<"${g}")" '["wait: the review is running","merged"]'
@@ -759,6 +859,10 @@ expect "a new request the bot files meanwhile is not a reply: still waiting" "$(
 INBOX_EXTRA='[{"author":{"__typename":"User","login":"owner-login"},"body":"/approve REQ-20261113-ab12","createdAt":"2026-11-14T11:58:00Z"},
   {"author":{"__typename":"Bot","login":"gatehand"},"body":"- applied\n<!-- agent-answer:REQ-20261113-ab12 -->","createdAt":"2026-11-14T11:59:00Z"}]'; wrules
 expect "the bot's reply ends the wait" "$(get '/api/repo/o/r/inbox?fresh=1' | jq -c '[.awaiting_reply, (.requests[] | select(.id == "REQ-20261113-ab12") | [.answered, .pending])]')" "[false,[true,false]]"
+INBOX_EXTRA='[{"author":{"__typename":"User","login":"owner-login"},"body":"/reject REQ-20261113-ab12 not now","createdAt":"2026-11-14T11:58:00Z"},
+  {"author":{"__typename":"User","login":"mallory"},"body":"/reject REQ-20261113-ab12 forged","createdAt":"2026-11-14T11:58:30Z"},
+  {"author":{"__typename":"Bot","login":"gatehand"},"body":"- `REQ-20261113-ab12` rejected; #42 stays as it is\n<!-- agent-answer:REQ-20261113-ab12 -->","createdAt":"2026-11-14T11:59:00Z"}]'; wrules
+expect "the inbox read says how, when and why the owner answered" "$(get '/api/repo/o/r/inbox?fresh=1' | jq -c '.requests[] | select(.id == "REQ-20261113-ab12") | [.answer, .answered_at, .reason]')" '["rejected","2026-11-14T11:59:00Z","not now"]'
 INBOX_EXTRA='[{"author":{"__typename":"User","login":"owner-login"},"body":"/approve REQ-20261113-ab12","createdAt":"2026-11-14T11:00:00Z"}]'; wrules
 expect "one that never got an answer stops blocking after ten minutes" "$(get '/api/repo/o/r/inbox?fresh=1' | jq -c .awaiting_reply)" "false"
 INBOX_EXTRA='[]'

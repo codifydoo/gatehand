@@ -446,14 +446,60 @@ def inbox_checklist(body):
     return out
 
 
-def inbox_requests(comments, bot):
+# How agent-inbox.sh apply_one records an answer, as mark_answered takes it: an approve is "seen" for a
+# request about a PR, "acknowledged" for an untrusted one, else "approved"; a reject is "rejected".
+ANSWER_HOWS = ("approved", "rejected", "seen", "acknowledged")
+SEEN_KINDS = {"fixer", "merger", "review"}
+
+
+def owner_command(body, req):
+    """The verb and reason of the first /approve or /reject of req in an inbox comment, in the grammar
+    agent-inbox.sh parse_commands accepts (one per line; a reason is the rest of a /reject line), or
+    None. The comment must start with a command, as agent-inbox.yml tests it."""
+    body = body or ""
+    if not body.startswith("/"):
+        return None
+    for line in body.split("\n"):
+        line = line[:-1] if line.endswith("\r") else line
+        if re.fullmatch(r"/approve[ \t\v\f]+%s[ \t\v\f]*" % re.escape(req), line):
+            return "approve", ""
+        m = re.fullmatch(r"/reject[ \t\v\f]+%s(?:[ \t\v\f]+(.*))?" % re.escape(req), line)
+        if m:
+            return "reject", one_line(m.group(1), 300)
+    return None
+
+
+def applied_command(cmds, mine, req, when):
+    """The owner's command a reply at `when` applied for req: the first one naming it after the bot's
+    last earlier reply about it (a failed apply says "send it again"; one sent while a run was still
+    going got "already answered"), else the last one before the reply. None when there is none, or
+    when it was edited since: the workflow applied the text as first posted, which is not what is
+    read now, and anyone with write access can edit a comment."""
+    when = when or ""
+    tag = "`%s`" % req
+    prev = max((b.get("created_at") or "" for b in mine
+                if (b.get("created_at") or "") < when and tag in (b.get("body") or "")), default="")
+    found = [(k, owner_command(k.get("body"), req)) for k in cmds if (k.get("created_at") or "") <= when]
+    found = [x for x in found if x[1]]
+    after = [x for x in found if (x[0].get("created_at") or "") > prev]
+    k, cmd = after[0] if after else (found[-1] if found else (None, None))
+    return None if k is None or k.get("edited") else cmd
+
+
+def inbox_requests(comments, bot, owner=""):
     """Requests the agent bot filed on the inbox, newest first, each marked answered or not
     (agent-inbox.sh find_request / answered). Only the bot's own comments count: anyone can paste a
-    marker."""
+    marker. An answered one also says how (`answer`, as agent-inbox.sh recorded it: approved,
+    rejected, seen or acknowledged) and when (`answered_at`, the bot's reply), and a rejected one the
+    reason from the owner's /reject (`reason`, text). Only the owner's commands are read for that:
+    the inbox workflow applies no one else's (applied_command)."""
     mine = [c for c in comments if (c.get("user") or {}).get("login") == bot]
-    answered = set()
-    for c in mine:
-        answered.update(ANSWER_RE.findall(c.get("body") or ""))
+    by_time = lambda c: c.get("created_at") or ""
+    answers = {}  # REQ -> the bot's reply that recorded it: the first one, as agent-inbox.sh answered()
+    for c in sorted(mine, key=by_time):
+        for req in ANSWER_RE.findall(c.get("body") or ""):
+            answers.setdefault(req, c)
+    cmds = sorted((c for c in comments if owner and (c.get("user") or {}).get("login") == owner), key=by_time)
     out, seen = [], set()
     for c in mine:
         body = (c.get("body") or "").replace("\r", "")
@@ -465,10 +511,23 @@ def inbox_requests(comments, bot):
         rest = body.split("\n", 1)[1] if "\n" in body else ""
         if rest.lstrip().startswith("### "):  # the `### REQ · role · #N` heading repeats the marker
             rest = rest.lstrip().split("\n", 1)[1] if "\n" in rest.lstrip() else ""
+        req, kind, reply = m.group(1), m.group(4), answers.get(m.group(1))
+        how = when = reason = None
+        if reply:
+            when = reply.get("created_at")
+            cmd = applied_command(cmds, mine, req, when)
+            said = re.search(r"(?m)^- `%s` (%s)\b" % (re.escape(req), "|".join(ANSWER_HOWS)), reply.get("body") or "")
+            if said:
+                how = said.group(1)
+            elif cmd:  # a repository hook's kind writes its own reply line
+                how = "rejected" if cmd[0] == "reject" else (
+                    "seen" if kind in SEEN_KINDS else "acknowledged" if kind == "untrusted" else "approved")
+            if how == "rejected" and cmd and cmd[0] == "reject":
+                reason = cmd[1] or None
         out.append({
-            "id": m.group(1), "role": m.group(2), "issue": int(m.group(3)), "kind": m.group(4),
-            "answered": m.group(1) in answered, "created_at": c.get("created_at"),
-            "url": c.get("html_url"), "body": rest.strip()[:6000],
+            "id": req, "role": m.group(2), "issue": int(m.group(3)), "kind": kind,
+            "answered": reply is not None, "answer": how, "answered_at": when, "reason": reason,
+            "created_at": c.get("created_at"), "url": c.get("html_url"), "body": rest.strip()[:6000],
         })
     out.sort(key=lambda r: r["created_at"] or "", reverse=True)
     return out
@@ -790,7 +849,7 @@ def read_repo(repo):
 
 INBOX_Q = """query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){
 issue(number:$number){comments(last:100,before:$cursor){pageInfo{hasPreviousPage startCursor}
-nodes{author{__typename login} body createdAt url}}}}}"""
+nodes{author{__typename login} body createdAt lastEditedAt url}}}}}"""
 MAX_INBOX_PAGES = 10
 
 
@@ -815,13 +874,13 @@ def read_inbox(repo, number, bot, owner_login=""):
             # only a Bot author gets the suffix, so the comparison below is the REST one.
             login = (a.get("login") or "") + ("[bot]" if a.get("__typename") == "Bot" else "")
             comments.append({"user": {"login": login}, "body": n.get("body"), "created_at": n.get("createdAt"),
-                             "html_url": n.get("url")})
+                             "html_url": n.get("url"), "edited": bool(n.get("lastEditedAt"))})
         info = c.get("pageInfo") or {}
         if not info.get("hasPreviousPage"):
             break
         cursor = info.get("startCursor")
         truncated = page == MAX_INBOX_PAGES - 1
-    requests = inbox_requests(comments, bot)
+    requests = inbox_requests(comments, bot, owner_login)
     # The bot's last REPLY: its request comments (the merge gate, the fixer, the coder file them at
     # any time) say nothing about whether the owner's command has been applied.
     last_bot = max((c["created_at"] or "" for c in comments if c["user"]["login"] == bot
@@ -833,6 +892,63 @@ def read_inbox(repo, number, bot, owner_login=""):
     for r in requests:
         r["pending"] = r["id"] in pending and not r["answered"]
     return {"requests": requests, "truncated": truncated, "awaiting_reply": bool(waiting)}
+
+
+# No body: a comment's text never reaches the dashboard, only who wrote it and when.
+ISSUE_COMMENTS_Q = """query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){
+issue(number:$number){comments(last:100,before:$cursor){pageInfo{hasPreviousPage startCursor}
+nodes{author{__typename login} createdAt}}}}}"""
+MAX_ISSUE_COMMENT_PAGES = 3
+ANSWERABLE = ("blocked", "failed")  # the kinds whose answer is a comment on the issue itself
+LOGIN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")  # a person's login, an EMU's `name_short` too
+
+
+def has_write(repo, login, cache, fresh=False):
+    """agent-lib.sh actor_trusted, without the bot: write access or more, never author_association
+    (COLLABORATOR and MEMBER include read-only and triage accounts). A 404 is no; any other failure
+    raises, so an outage never reads as "not a writer"."""
+    if not LOGIN_RE.fullmatch(login or ""):  # an App ("x[bot]") or a deleted account: never a collaborator
+        return False
+    got = cache.get("perm:%s:%s" % (repo, login.lower()), lambda: gh_or_404(
+        ["api", "repos/%s/collaborators/%s/permission" % (repo, login)]), fresh, ttl=600)
+    return (got or {}).get("permission") in ("admin", "maintain", "write")
+
+
+def read_writer_comment(repo, req, bot, cache, fresh=False):
+    """For an open blocked or failed request: who with write access last commented on its issue after
+    the request was filed, and when ({login, at}), or None. The newest comments first, back to the
+    request, at most MAX_ISSUE_COMMENT_PAGES pages; past that, and with no writer among them, the
+    answer is not known and writer_comment is left out. The agent bot's own comments do not count.
+    On Refresh (fresh) each commenter's access is looked up again, once per read."""
+    owner, name = repo.split("/", 1)
+    since = req.get("created_at") or ""
+    out = {"id": req["id"], "issue": req["issue"]}
+    if not since:
+        return out  # when the request was filed is not known: neither is what came after it
+    cursor, writer = None, {}
+    for _ in range(MAX_ISSUE_COMMENT_PAGES):
+        kw = {"cursor": cursor} if cursor else {}
+        c = ((((graphql(ISSUE_COMMENTS_Q, owner=owner, name=name, number=req["issue"], **kw) or {}).get("repository") or {})
+              .get("issue") or {}).get("comments") or {})
+        nodes = [n for n in c.get("nodes") or [] if n]
+        for n in sorted(nodes, key=lambda n: n.get("createdAt") or "", reverse=True):
+            at = n.get("createdAt") or ""
+            if at <= since:
+                out["writer_comment"] = None
+                return out
+            a = n.get("author") or {}
+            login = (a.get("login") or "") + ("[bot]" if a.get("__typename") == "Bot" else "")
+            if login and login != bot and login not in writer:
+                writer[login] = has_write(repo, login, cache, fresh)
+            if writer.get(login):
+                out["writer_comment"] = {"login": login, "at": at}
+                return out
+        info = c.get("pageInfo") or {}
+        if not info.get("hasPreviousPage"):
+            out["writer_comment"] = None
+            return out
+        cursor = info.get("startCursor")
+    return out  # more comments since the request than were read, none of them a writer's: unknown
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
@@ -1837,7 +1953,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(200, dict(self.repo_list(), viewer=user.get("login"), scan_error=scan_error,
                                        scan_cause=scan_cause, budget=cfg.budget(), rate={k: rate.get(k) for k in ("core", "graphql")},
                                        now=iso(now_utc())))
-        m = re.fullmatch(r"/api/repo/([^/]+)/([^/]+)(/inbox|/gate)?", path)
+        m = re.fullmatch(r"/api/repo/([^/]+)/([^/]+)(/inbox|/gate|/request/(REQ-[0-9]{8}-[0-9a-f]{4}))?", path)
         if not m:
             raise ApiError(404, "not found")
         repo = self.repo_from(m.group(1), m.group(2))
@@ -1852,8 +1968,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise ApiError(404, "no inbox issue in %s" % repo)
         bot = d["policy"]["botLogin"]
         owner = (d.get("vars") or {}).get("AGENT_OWNER_LOGIN") or ""
-        got = cache.get("inbox:" + repo, lambda: read_inbox(repo, d["inbox"]["number"], bot, owner), fresh)
-        return self.send(200, dict(got, inbox=d["inbox"]))
+        got = cache.get("inbox:" + repo, lambda: read_inbox(repo, d["inbox"]["number"], bot, owner), fresh and not m.group(4))
+        if not m.group(4):
+            return self.send(200, dict(got, inbox=d["inbox"]))
+        # One request, read when its pane opens or on Refresh: whether a writer has commented on its
+        # issue since. Only an open request the bot filed, of a kind answered on the issue.
+        req = next((r for r in got["requests"] if r["id"] == m.group(4)), None)
+        if not req or req["answered"] or req["kind"] not in ANSWERABLE:
+            raise ApiError(404, "%s is not an open blocked or failed request in %s" % (m.group(4), repo))
+        return self.send(200, cache.get("writer:%s:%s" % (repo, req["id"]),
+                                        lambda: read_writer_comment(repo, req, bot, cache, fresh), fresh))
 
     def fresh_state(self, body):
         """The repository, the login gh acts as now and the repository read afresh: every action is

@@ -792,7 +792,10 @@ function gonePane(key, c) {
   if (repo && c.unread.includes(repo)) {
     return [h("p", {}, `${repo} could not be read just now, so it is not known whether this still waits for you.`), msg ? paneState(msg) : null, top];
   }
-  return [h("p", {}, "This no longer waits for you."), msg ? paneState(msg) : null, top];
+  const id = key.slice(repo.length).startsWith("|req|") ? key.slice(repo.length + 5) : "";
+  const got = id && state.inbox[repo];
+  const q = got && got.requests ? got.requests.find((x) => x.id === id && x.answered) : null;
+  return [h("p", {}, q ? `This no longer waits for you: ${id} was ${answerLine(q)}.` : "This no longer waits for you."), msg ? paneState(msg) : null, top];
 }
 
 // What each kind of inbox request means, in the words of the request the agent filed
@@ -823,6 +826,31 @@ const REQ_PANE = {
   },
 };
 const REQUEUE = new Set(["blocked", "failed", "protected"]);
+
+// Whether someone with write access has commented on a blocked or failed request's issue since the
+// request: read for the open pane only, each time a pane opens and on every refresh (past the server's
+// cache once read before), never for every request on a page load, and not during the API limit. The
+// server sends a login and a time only, never the comment. Nothing is said before the first answer,
+// when the read failed, or when the server could not tell (writer_comment left out); while it is read
+// again, the last answer stays.
+state.writer = {}; // `${repo}|${id}` -> the server's answer, { asking }, { error }; stale: read it again
+const writerStale = () => { for (const x of Object.values(state.writer)) x.stale = true; };
+function writerLine(repo, q, n) {
+  const k = `${repo}|${q.id}`;
+  const was = state.writer[k];
+  if ((!was || (was.stale && !was.asking)) && !limited()) {
+    state.writer[k] = Object.assign({}, was, { stale: false, asking: true });
+    // A refresh while this is in flight marks it stale: kept, so the pane reads it again after.
+    const keep = (x) => { state.writer[k] = Object.assign(x, { stale: !!(state.writer[k] && state.writer[k].stale) }); };
+    api(`/api/repo/${repo}/request/${q.id}${was ? "?fresh=1" : ""}`)
+      .then(keep, () => keep({ error: true })).then(renderView);
+  }
+  const got = state.writer[k];
+  if (!got || got.error || !("writer_comment" in got)) return null;
+  const c = got.writer_comment;
+  return h("div", { class: "muted" }, c ? `${c.login}, who has write access, commented on #${n} ${ago(c.at)}, after the request.`
+    : `No one with write access has commented on #${n} since the request.`);
+}
 
 function requestActs(r, d, full) {
   const q = r.req;
@@ -874,7 +902,8 @@ function requestPane(r) {
     kv("What happens next", kindText && n ? kindText.next(n) : "Nothing until you answer."),
     h("div", { class: "said" }, h("div", { class: "muted" }, "What the agent wrote (plain text from GitHub)"),
       h("pre", { class: "body" }, full ? full.body : q.summary)),
-    kindText && kindText.step && n ? h("div", { class: "step" }, h("span", { class: "num" }, "1"), h("div", {}, kindText.step(n, issueUrl))) : null,
+    kindText && kindText.step && n ? h("div", { class: "step" }, h("span", { class: "num" }, "1"), h("div", {}, kindText.step(n, issueUrl),
+      (q.kind === "blocked" || q.kind === "failed") && full && !full.answered ? writerLine(repo, q, n) : null)) : null,
     h("div", { class: "step" }, kindText && kindText.step && n ? h("span", { class: "num" }, "2") : null,
       h("div", {}, paneActions(r, requestActs(r, d, full), beside))),
     events.length ? h("details", fold("timeline"), h("summary", {}, `Timeline${n ? ` #${n}` : ""} · ${events.length} ${events.length === 1 ? "event" : "events"} (last 7 days)`),
@@ -1310,6 +1339,9 @@ function issuePane(r) {
   // An `untrusted` request the checklist missed: /rerun re-labels as the bot, which vouches for
   // nothing, so the run would be refused again.
   const untrusted = got && got.requests && got.requests.some((x) => x.kind === "untrusted" && !x.answered && x.issue === n);
+  // Its newest request about the issue itself, answered: what was said, and when.
+  const last = got && got.requests ? got.requests.find((x) => x.issue === n && x.answered && !["breaker", "fixer", "merger", "review"].includes(x.kind)) : null;
+  const who = d.owner_login && state.session && state.session.viewer === d.owner_login ? "you" : (d.owner_login || "the owner");
   const s = d.stats && d.stats.coder;
   const expect = ["Its reply on the inbox within a minute or two."];
   if (s) expect.push(s.cap === null || s.cap === undefined ? `${s.today} coder runs today.` : `Today ${s.today} of ${s.cap} coder runs are used.`);
@@ -1337,7 +1369,8 @@ function issuePane(r) {
     h("h2", {}, r.title, r.text ? h("span", { class: "muted" }, ` ${r.text}`) : null),
     track(1, "Coder · blocked"),
     kv("Why it's stuck", [issue ? `It carries ${issue.labels.filter((l) => STUCK.includes(l)).join(" and ") || "a blocking label"}` : "It is blocked",
-      d.inbox ? ", and no inbox request about it is open: it was answered, or never filed."
+      d.inbox ? (last ? `, and no inbox request about it is open: its last one, ${last.id}, was ${answerLine(last, ` by ${who}`)}.`
+        : ", and no inbox request about it is open: it was answered, or never filed.")
         : (d.inbox_state === "none" ? ". There is no inbox issue, so no request about it is open."
           : ". Which issue is the inbox could not be told, so it is not known whether a request about it is open.")]),
     // Held first: the coder never picks a held issue, even one that also carries agent:ready.
@@ -2071,6 +2104,16 @@ function clock(iso) {
   const day = new Date(t);
   return day.toDateString() === new Date().toDateString() ? hhmm(t) : `${day.toLocaleDateString([], { month: "short", day: "numeric" })} ${hhmm(t)}`;
 }
+// How an inbox request was answered, as the server read it from the inbox: "approved at 17:29",
+// "rejected on Nov 11: not now"; `after` goes after the verb. The reason is the owner's own text, so it
+// only ever goes in as text.
+function answerLine(q, after = "") {
+  const t = Date.parse(q.answered_at || "");
+  const day = new Date(t);
+  const when = !isFinite(t) ? "" : (day.toDateString() === new Date().toDateString()
+    ? ` at ${hhmm(t)}` : ` on ${day.toLocaleDateString([], { month: "short", day: "numeric" })}`);
+  return `${q.answer || "answered"}${after}${when}${q.reason ? `: ${q.reason}` : ""}`;
+}
 // A workflow's next scheduled run, as the server read it from the workflow file; "" when it has no
 // schedule, the file could not be read, or its cron could not be followed. Never a guess.
 function nextRun(d, key) {
@@ -2152,7 +2195,8 @@ function requestList(repo, d) {
     if (!answered && !row) here += 1;
     return h("div", { class: "req" }, h("details", {},
       h("summary", {}, h("code", {}, q.id), " ", pill(q.kind), " ", `${q.role} · `,
-        q.issue ? link(`${d.url}/issues/${q.issue}`, `#${q.issue}`) : "no issue", h("span", { class: "muted" }, ` · ${ago(q.created_at)}`)),
+        q.issue ? link(`${d.url}/issues/${q.issue}`, `#${q.issue}`) : "no issue", h("span", { class: "muted" }, ` · ${ago(q.created_at)}`),
+        answered ? h("span", { class: "muted" }, ` · ${answerLine(q)}`) : null),
       h("pre", { class: "body" }, q.body),
       h("p", {}, link(q.url, "The request on GitHub"))),
     answered ? null : (row ? openItem(row) : spotActs(r, requestActs(r, d, q))));
@@ -2769,7 +2813,10 @@ function onRoute() {
   state.sideOpen = false; // a link in the folded sidebar was followed: fold it again
   state.route = parseRoute();
   // Another item opened: a confirm left open on the last one closes; what was posted from it stays.
-  if (state.route.open !== wasOpen) state.pane = { key: "", confirm: "", text: "", fixer: true, preview: null };
+  if (state.route.open !== wasOpen) {
+    state.pane = { key: "", confirm: "", text: "", fixer: true, preview: null };
+    writerStale(); // a request pane opened again reads whether a writer has commented since, afresh
+  }
   const named = state.route.open; // the item the address named, before the render pins the top one
   if (state.route.view === "needs" && was !== "needs") lookAgain();
   const repo = routeRepo();
@@ -2794,6 +2841,8 @@ async function refresh(fresh) {
   }
   $("refresh").disabled = true;
   state.refreshing = (state.refreshing || 0) + 1;
+  writerStale(); // the open request pane reads it again
+
   try {
     applySession(await api(`/api/session${fresh ? "?fresh=1" : ""}`));
     state.sessionCause = null;
