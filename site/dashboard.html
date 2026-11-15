@@ -108,12 +108,13 @@ python3 bin/dashboard.py   # from a checkout of the package</code></pre>
           <tr><td>Hand back to the merge gate</td><td>Clears the blocked labels on a PR you fixed yourself</td><td>people with write access</td></tr>
           <tr><td>Start the coder, Run review, Run merge gate, Cancel</td><td>Dispatch or cancel a run of Gatehand's workflows</td><td>people with write access</td></tr>
           <tr><td>Approve, Request changes on a PR</td><td>Posts a review comment the merge gate and the fixer read</td><td>people with write access</td></tr>
+          <tr><td>Close it, Close ticked</td><td>Closes merged issues (<code>agent:done-pending-deploy</code>) once you know the fix is live, one or several at once</td><td>people with write access</td></tr>
           <tr><td>Turn agents or auto-merge on or off</td><td>Sets <code>AGENTS_ENABLED</code> or <code>AGENT_AUTO_MERGE</code></td><td>people who may set Actions variables</td></tr>
         </tbody>
       </table>
     </div>
-    <p>A button the agents would ignore from you is shown disabled, with the reason. Runs, verdicts
-      and the two switches are previewed first: the server shows each GitHub call it will make, and
+    <p>A button the agents would ignore from you is shown disabled, with the reason. Runs, verdicts,
+      closes and the two switches are previewed first: the server shows each GitHub call it will make, and
       makes it only if nothing changed in between.</p>
     <div class="callout">
       <p>The page never adds <code>agent:ready</code>. That label vouches for the issue's text as it

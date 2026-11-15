@@ -62,6 +62,12 @@
 #      collaborator permission, as actor_trusted), or null: a non-writer's, the agent bot's and one
 #      from before the request do not count, a failed lookup is an error, never null. The comment's
 #      text is neither asked for nor sent, and a page load reads no request's comments.
+#  14. Closing merged issues goes through the preview and one-time confirm, and closes only open
+#      issues that carry agent:done-pending-deploy in the read the plan is made from (never the inbox,
+#      even labelled, nor anything while the inbox cannot be told; never a PR or any other issue: the
+#      agents never close one, the person decides the fix is live), each
+#      as completed with nothing else changed. One closed or relabelled since the preview refuses the
+#      whole confirm; open issues that cannot be read refuse it too.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -1167,16 +1173,53 @@ VARS_OUT="" VARS_RC=1 VARS_ERR="HTTP 403"; xrules
 expect "pause all: variables unreadable: refused, so never counted" "$(vcode "${PAUSE}")" 409
 expect "variables unreadable: no switch" "$(vcode '{"repo":"o/r","type":"set_variable","name":"AGENTS_ENABLED","value":"false"}')" 409
 VARS_OUT="${VARS_OK}" VARS_RC=0 VARS_ERR=""
+# 14. Closing merged issues: only open issues carrying agent:done-pending-deploy in the read just made,
+# each a plain close as completed; the whole plan is previewed, and one closed since refuses it.
+DPD() { jq -c --argjson n "$1" '. + [{number: $n, title: "Merged fix", body: "", user: {login: "owner-login"}, labels: [{name: "agent:done-pending-deploy"}]}]'; }
+ISSUES_OUT="$(DPD 70 <<<"${ISSUES_OK}" | DPD 71)"; xrules
+stub_gh_on "api -X PATCH repos/o/r/issues/* --input -" '{}' "${CLOSE_RC:-0}" "${CLOSE_ERR:-}"
+CL='{"repo":"o/r","type":"close_issues","numbers":[71,70]}'
+p="$(preview "${CL}")"
+expect "close: the preview names one call per issue, in order" "$(jq -c '[.summary, .calls]' <<<"${p}")" \
+  '["close #70, #71 as completed",["PATCH repos/o/r/issues/70 {\"state\": \"closed\", \"state_reason\": \"completed\"}","PATCH repos/o/r/issues/71 {\"state\": \"closed\", \"state_reason\": \"completed\"}"]]'
+expect "close: a preview writes nothing" "$(stub_gh_calls | grep -c 'PATCH repos/o/r/issues')" 0
+expect "close: confirmed, done" "$(post "$(jq -c --arg t "$(jq -r .confirm <<<"${p}")" '. + {confirm: $t}' <<<"${CL}")" | jq -r .done)" "closed #70, #71"
+expect "close: as completed, nothing else" "$(stub_gh_last_body "api -X PATCH repos/o/r/issues/71 --input -" | jq -c .)" '{"state":"closed","state_reason":"completed"}'
+for bad in '[]' '[0]' '[70,70]' '["70"]' '7' 'null' "$(jq -nc '[range(1;52)]')"; do
+  expect "close: numbers ${bad:0:20}: refused" "$(vcode "$(jq -c ".numbers = ${bad}" <<<"${CL}")")" 400
+done
+expect "close: an issue without agent:done-pending-deploy: refused" "$(vcode '{"repo":"o/r","type":"close_issues","numbers":[43]}')" 409
+# The inbox and a PR, each carrying the label, so only their own guards can refuse them.
+ISSUES_OUT="$(DPD 70 <<<"${ISSUES_OK}" | jq -c 'map(if .number == 7 or .number == 50 then .labels += [{name: "agent:done-pending-deploy"}] else . end)')"; xrules
+expect "close: the inbox, even labelled: refused" "$(preview '{"repo":"o/r","type":"close_issues","numbers":[7]}' | jq -r .error)" "#7 is the agent inbox"
+expect "close: a PR, even labelled: refused" "$(preview '{"repo":"o/r","type":"close_issues","numbers":[50]}' | jq -r .error)" \
+  "#50 is not an open issue with agent:done-pending-deploy any more (closed or relabelled since): refresh"
+VARS_OUT="" VARS_RC=1 VARS_ERR="HTTP 403"; xrules
+expect "close: which issue is the inbox cannot be told: refused" "$(preview '{"repo":"o/r","type":"close_issues","numbers":[70]}' | jq -r .error)" \
+  "cannot tell which issue is the inbox in o/r, so nothing is closed"
+VARS_OUT="${VARS_OK}" VARS_RC=0 VARS_ERR=""
+ISSUES_OUT="$(DPD 70 <<<"${ISSUES_OK}" | DPD 71)"; xrules
+stub_gh_on "api -X PATCH repos/o/r/issues/* --input -" '{}'
+p="$(preview "${CL}")"
+ISSUES_OUT="$(DPD 70 <<<"${ISSUES_OK}")"; xrules
+stub_gh_on "api -X PATCH repos/o/r/issues/* --input -" '{}'
+before="$(stub_gh_calls | grep -c 'PATCH repos/o/r/issues')"
+expect "close: one closed since the preview: refused" "$(pcode "$(jq -c --arg t "$(jq -r .confirm <<<"${p}")" '. + {confirm: $t}' <<<"${CL}")")" 409
+expect "and nothing was closed" "$(stub_gh_calls | grep -c 'PATCH repos/o/r/issues')" "${before}"
+ISSUES_OUT="" ISSUES_RC=1 ISSUES_ERR="HTTP 502: Bad Gateway"; xrules
+expect "close: open issues unreadable: refused" "$(vcode '{"repo":"o/r","type":"close_issues","numbers":[70]}')" 409
+ISSUES_OUT="$(DPD 70 <<<"${ISSUES_OK}")" ISSUES_RC=0 ISSUES_ERR=""
 PERM=TRIAGE; xrules
 for a in '{"repo":"o/r","type":"dispatch","workflow":"merge"}' '{"repo":"o/r","type":"cancel_run","run":1}' \
-  '{"repo":"o/r","type":"review_verdict","pr":50,"verdict":"approve"}' '{"repo":"o/r","type":"set_variable","name":"AGENTS_ENABLED","value":"false"}'; do
+  '{"repo":"o/r","type":"review_verdict","pr":50,"verdict":"approve"}' '{"repo":"o/r","type":"set_variable","name":"AGENTS_ENABLED","value":"false"}' \
+  '{"repo":"o/r","type":"close_issues","numbers":[70]}'; do
   expect "without write access: refused ($(jq -r .type <<<"${a}"))" "$(vcode "${a}")" 403
 done
 PERM=ADMIN; xrules
 expect "a preview for gh signed in as someone else: refused" "$(vcode '{"repo":"o/r","type":"dispatch","workflow":"merge","viewer":"someone-else"}')" 409
 
 calls="$(stub_gh_calls | tr '\n' ' ' | sed -E 's/ (api )/\n\1/g; s/ +$//')"
-writes="$(grep -vE "${reads}" <<<"${calls}" | grep -vE '^api -X POST repos/o/r/actions/workflows/(agent-coder|claude-code-review|agent-merge|agent-fixup)\.yml/dispatches --input -$|^api -X POST repos/o/r/actions/runs/1/cancel$|^api -X POST repos/o/r/issues/50/comments --input -$|^api -X (PATCH|POST) repos/o/r/actions/variables(/AGENTS_ENABLED)? --input -$|^api --method POST markdown --input -$' || true)"
+writes="$(grep -vE "${reads}" <<<"${calls}" | grep -vE '^api -X POST repos/o/r/actions/workflows/(agent-coder|claude-code-review|agent-merge|agent-fixup)\.yml/dispatches --input -$|^api -X POST repos/o/r/actions/runs/1/cancel$|^api -X POST repos/o/r/issues/50/comments --input -$|^api -X (PATCH|POST) repos/o/r/actions/variables(/AGENTS_ENABLED)? --input -$|^api -X PATCH repos/o/r/issues/7[01] --input -$|^api --method POST markdown --input -$' || true)"
 expect "no other write was made" "${writes}" ""
 
 printf '\n[dashboard] %d passed, %d failed\n' "${pass}" "${fail}"

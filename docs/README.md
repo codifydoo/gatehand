@@ -172,7 +172,7 @@ git fetch origin main && git push origin origin/main:agent-runner
   render that fails reads as no verdict, so the PR waits. It
   merges with a merge commit pinned to that head, never `--admin`. With `requiredChecks` empty it
   merges nothing. The issue then becomes
-  `agent:done-pending-deploy`: close it yourself once the fix is live.
+  `agent:done-pending-deploy`: close it yourself once the fix is live (on GitHub, or from the dashboard).
 
 ## The inbox
 
