@@ -17,7 +17,11 @@
 #      exactly the grammar agent-inbox.sh parses (checked by running the real parser), sent only
 #      when the viewer is AGENT_OWNER_LOGIN to the letter, the inbox is the one the workflow
 #      answers, and the request is the agent's and still open; and a fixed set of agent labels,
-#      only for a viewer with write access. agent:allow-protected is never one of them.
+#      only for a viewer with write access. agent:allow-protected is never one of them. Hand back's
+#      confirm (agent:blocked or agent:needs-human off a PR) says whether the PR's head commit is
+#      newer than the last time a stuck label still on it was put on, from a preview that reads only:
+#      an unmoved head is a warning, never a refusal (CI may have been fixed another way), and a
+#      history that cannot be read is "cannot tell", never "moved".
 #   8. Runs, verdicts and switches go through a preview and a one-time confirm, and are done only if
 #      the plan made afresh is the one previewed (a moved head, a new waiting run, a changed variable
 #      refuse). Dispatches carry only inputs the rendered workflows declare, in the shapes the
@@ -655,7 +659,7 @@ wrules() {
   stub_gh_on "api repos/o/r/issues/42" "$(item 42)"
   stub_gh_on "api repos/o/r/issues/43" "$(item 43)"
   stub_gh_on "api repos/o/r/issues/44" "$(item 44 closed)"
-  stub_gh_on "api repos/o/r/issues/50" "$(item 50 open true)"
+  stub_gh_on "api repos/o/r/issues/50" "${ITEM50:-$(item 50 open true)}"
   stub_gh_on "api repos/o/r/issues/7/comments --input -" '{"html_url":"https://github.com/o/r/issues/7#issuecomment-1"}'
   stub_gh_on "api repos/o/r/issues/* --input -" '[]'
 }
@@ -800,6 +804,47 @@ wf_inputs() { awk '/^  workflow_dispatch:/{w=1; next} w && /^    inputs:/{i=1; n
 # A script's own check of an input, taken from the rendered file: script_re <file> <var>.
 script_re() { grep -oE "\"\\\$\\{$2\\}\" =~ [^ ]+" "${REPO_ROOT}/$1" | head -1 | sed -E 's/^[^~]*~ //'; }
 matches() { local re; re="$(script_re "$1" "$2")"; [[ -n "${re}" && "$3" =~ ${re} ]] && echo yes || echo no; }
+
+# Hand back: its confirm says whether PR #50's head moved since a stuck label still on it was last put
+# on. A preview of a label change reads only, and hands out no token: the label change needs none.
+HB='{"repo":"o/r","type":"label","op":"remove","label":"agent:blocked","number":50}'
+LABELED() { jq -nc --arg l "$1" --arg at "$2" '{event: "labeled", label: {name: $l}, created_at: $at}'; }
+EVENTS50="$(jq -sc . <<<"$(LABELED agent:blocked 2026-11-14T08:00:00Z)
+  {\"event\":\"unlabeled\",\"label\":{\"name\":\"agent:blocked\"},\"created_at\":\"2026-11-14T08:30:00Z\"}
+  $(LABELED agent:blocked 2026-11-14T10:00:00Z) $(LABELED agent:hold 2026-11-14T11:30:00Z)")"
+hb_rules() { # hb_rules <head committed at> [events]: PR #50, blocked at 10:00 (an earlier block lifted at 08:30)
+  xrules
+  stub_gh_on "api repos/o/r/issues/50/events?per_page=100&page=1" "${2:-${EVENTS50}}" "${EVENTS_RC:-0}" "${EVENTS_ERR:-}"
+  stub_gh_on "api repos/o/r/git/commits/${SHA}" "$(jq -nc --arg sha "${SHA}" --arg at "$1" '{sha: $sha, committer: {date: $at}}')"
+}
+ITEM50="$(item 50 open true | jq -c '. + {labels: [{name: "agent:pr"}, {name: "agent:blocked"}]}')"
+stub_gh_reset_calls
+hb_rules 2026-11-14T09:00:00Z
+p="$(preview "${HB}")"
+expect "hand back, head unmoved: the confirm warns" "$(jq -c '.head.moved' <<<"${p}")" "false"
+expect "and says which commit, which label and when (a later agent:hold does not count)" "$(jq -r '.head.text' <<<"${p}")" \
+  "the head has not moved: 012345678 was committed 2026-11-14T09:00:00Z, before agent:blocked was put on 2026-11-14T10:00:00Z. Handed back as it is, it is blocked again, unless what stopped it was fixed another way"
+expect "a label preview hands out no confirm token" "$(jq -c '.confirm' <<<"${p}")" "null"
+expect "and writes nothing" "$(stub_gh_calls | grep -cE -- '-X |--input')" 0
+expect "an unmoved head is a warning, not a refusal: the label still comes off" "$(post "${HB}" | jq -r .done)" "removed agent:blocked from #50"
+hb_rules 2026-11-14T10:30:00Z
+expect "hand back, head moved since the block: said so" "$(preview "${HB}" | jq -c '[.head.moved, .head.text]')" \
+  '[true,"the head moved: 012345678 was committed 2026-11-14T10:30:00Z, after agent:blocked was put on 2026-11-14T10:00:00Z"]'
+ITEM50="$(item 50 open true | jq -c '. + {labels: [{name: "agent:pr"}, {name: "agent:blocked"}, {name: "agent:needs-human"}]}')"
+hb_rules 2026-11-14T10:30:00Z "[$(LABELED agent:blocked 2026-11-14T10:00:00Z), $(LABELED agent:needs-human 2026-11-14T11:00:00Z)]"
+expect "with both labels on, the later one counts, from either label's preview" \
+  "$(preview "$(jq -c '.label = "agent:needs-human"' <<<"${HB}")" | jq -c '[.head.moved, (.head.text | test("before agent:needs-human was put on 2026-11-14T11:00:00Z"))]')" "[false,true]"
+ITEM50="$(item 50 open true | jq -c '. + {labels: [{name: "agent:pr"}, {name: "agent:blocked"}]}')"
+hb_rules 2026-11-14T10:30:00Z "[$(LABELED agent:blocked 2026-11-14T10:00:00Z), $(LABELED agent:needs-human 2026-11-14T11:00:00Z)]"
+expect "a stuck label since taken off does not count" "$(preview "${HB}" | jq -c .head.moved)" "true"
+EVENTS_RC=1 EVENTS_ERR="gh: Server Error (HTTP 502)" hb_rules 2026-11-14T10:30:00Z
+expect "the label history unreadable: cannot tell, and says so" "$(preview "${HB}" | jq -c '[.head.moved, (.head.text | startswith("cannot tell whether PR #50'"'"'s head moved since it was blocked: "))]')" "[null,true]"
+expect "a hold's preview says nothing about the head" "$(preview '{"repo":"o/r","type":"label","op":"add","label":"agent:hold","number":50}' | jq -c '[.summary, .head]')" '["put agent:hold on #50",null]'
+expect "a label preview makes the same checks as the change (agent:blocked off an issue)" \
+  "$(vcode '{"repo":"o/r","type":"label","op":"remove","label":"agent:blocked","number":42}')" 400
+unset ITEM50
+xrules
+stub_gh_reset_calls
 
 C43='{"repo":"o/r","type":"dispatch","workflow":"coder"}'
 p="$(preview "${C43}")"

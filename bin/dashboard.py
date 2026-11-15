@@ -906,6 +906,7 @@ LABEL_ACTIONS = {
     ("remove", "agent:blocked"): {"pr"},        # a person fixed the PR: back to the merge gate
     ("remove", "agent:needs-human"): {"pr"},
 }
+STUCK_LABELS = ("agent:blocked", "agent:needs-human")  # what a hand-back takes off
 
 
 def one_line(s, n):
@@ -991,9 +992,8 @@ def _do_inbox_command(repo, d, viewer, body):
     return {"posted": line, "url": out.get("html_url"), "inbox": number}
 
 
-def do_label(repo, d, body):
-    """Add or take off one agent label as the viewer, who must have write access (a label by anyone
-    else is ignored by the agents)."""
+def label_target(repo, d, body):
+    """The checks a label change passes before it is made: (op, label, number, the issue or PR)."""
     if d.get("viewer_permission") not in WRITERS:
         raise ApiError(403, "labels count only from people with write access to %s; you have %s"
                        % (repo, str(d.get("viewer_permission") or "unknown").lower()))
@@ -1016,6 +1016,13 @@ def do_label(repo, d, body):
     if kind not in where:
         raise ApiError(400, "%s %s is for %s only, and #%d is %s" % (
             op, label, " or ".join("a PR" if w == "pr" else "an issue" for w in sorted(where)), n, "a PR" if kind == "pr" else "an issue"))
+    return op, label, n, item
+
+
+def do_label(repo, d, body):
+    """Add or take off one agent label as the viewer, who must have write access (a label by anyone
+    else is ignored by the agents)."""
+    op, label, n, _ = label_target(repo, d, body)
     if op == "add":
         gh_json(["api", "repos/%s/issues/%d/labels" % (repo, n), "--input", "-"], stdin=json.dumps({"labels": [label]}))
     else:
@@ -1025,6 +1032,62 @@ def do_label(repo, d, body):
             if not e.not_found:  # not there: already off
                 raise
     return {"done": "%s %s %s #%d" % ("added" if op == "add" else "removed", label, "on" if op == "add" else "from", n)}
+
+
+def preview_label(repo, d, body):
+    """What the page's confirm says before a label change, read and nothing written. For a hand-back
+    (a stuck label off a PR): whether the PR's head moved since it was blocked. No confirm token: the
+    label change itself is made as before, checked again on fresh state."""
+    op, label, n, item = label_target(repo, d, body)
+    head = None
+    if op == "remove" and label in STUCK_LABELS:  # LABEL_ACTIONS allows these on a PR only
+        head = head_since_stuck(repo, n, [l for l in STUCK_LABELS if l in pr_labels(item)])
+    return {"summary": "%s %s %s #%d" % ("put" if op == "add" else "take", label, "on" if op == "add" else "off", n),
+            "head": head}
+
+
+def gh_time(s):
+    """A GitHub timestamp (2026-11-14T10:00:00Z, or with an offset) in UTC; None if it is not one."""
+    try:
+        t = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t.astimezone(timezone.utc) if t.tzinfo else None
+
+
+def head_since_stuck(repo, n, stuck):
+    """Whether PR #n's head commit is newer than the last time one of the stuck labels still on it was
+    put on. Handing back a head nobody touched blocks it again (CI still red, the fixer out of tries,
+    the base still not merged in), unless that was fixed another way, so the answer is a warning, never a refusal. The commit's
+    committer date stands for when it was pushed: GitHub records no time for a plain push.
+    {"moved": true, false or null (cannot tell), "text": the line the confirm shows}."""
+    def unknown(why):
+        return {"moved": None, "text": "cannot tell whether PR #%d's head moved since it was blocked: %s" % (n, why)}
+    if not stuck:
+        return unknown("it carries neither %s" % " nor ".join(STUCK_LABELS))
+    try:
+        events, more = rest_pages("repos/%s/issues/%d/events" % (repo, n), 10)
+        sha = ((gh_json(["api", "repos/%s/pulls/%d" % (repo, n)]) or {}).get("head") or {}).get("sha") or ""
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            return unknown("its head could not be read")
+        commit = gh_json(["api", "repos/%s/git/commits/%s" % (repo, sha)]) or {}  # without the diff
+    except GhError as e:
+        return unknown(str(e))
+    if more:
+        return unknown("it has more than 1,000 events, so the newest label may not be among those read")
+    put = [(gh_time(e.get("created_at")), (e.get("label") or {}).get("name")) for e in events
+           if isinstance(e, dict) and e.get("event") == "labeled" and (e.get("label") or {}).get("name") in stuck]
+    if not put or any(t is None for t, _ in put):
+        return unknown("no readable record of when %s was put on" % " or ".join(stuck))
+    at, name = max(put)
+    committed = gh_time((commit.get("committer") or {}).get("date"))
+    if committed is None:
+        return unknown("the date of its head commit %s could not be read" % sha[:9])
+    if committed > at:
+        return {"moved": True, "text": "the head moved: %s was committed %s, after %s was put on %s"
+                % (sha[:9], iso(committed), name, iso(at))}
+    return {"moved": False, "text": "the head has not moved: %s was committed %s, before %s was put on %s. Handed back "
+            "as it is, it is blocked again, unless what stopped it was fixed another way" % (sha[:9], iso(committed), name, iso(at))}
 
 
 # --- actions with a preview: runs, verdicts, switches ------------------------------------------------
@@ -1796,8 +1859,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return p, json.dumps([repo, viewer, p], sort_keys=True)
 
     def preview(self, body):
+        if body.get("type") == "label":  # only what the confirm says: no token, a label change needs none
+            repo, viewer, d = self.fresh_state(body)
+            return self.send(200, preview_label(repo, d, body))
         if body.get("type") not in PLANNERS:
-            raise ApiError(400, "type must be %s" % ", ".join(sorted(PLANNERS)))
+            raise ApiError(400, "type must be label or %s" % ", ".join(sorted(PLANNERS)))
         repo, viewer, d = self.fresh_state(body)
         p, key = self.plan(repo, viewer, d, body)
         token = secrets.token_urlsafe(16)

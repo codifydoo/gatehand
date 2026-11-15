@@ -911,6 +911,7 @@ function track(at, label) {
 //     extra: (pane) => more controls (the verdict's "start the fixer"),
 //     preview: (pane) => payload, for runs and verdicts: the server's preview is the confirm,
 //     go: async (pane) => the message to show after; throws an error with the HTTP status if refused,
+//     ask: payload, for a hand-back: the server's read of whether the head moved, shown in the confirm,
 //     verb: "posted" or "done", postText: the confirm button's text }
 // A post in flight is kept per row (state.posting), so opening another item meanwhile neither
 // re-enables these buttons nor loses that item's own confirm.
@@ -937,6 +938,7 @@ function paneActions(r, acts, beside, opts) {
     state.focusId = a.field ? a.field.id : "confirm-post";
     renderView();
     if (a.preview && !a.field) fetchPreview(r, a);
+    if (a.ask) fetchAsk(r, a);
   };
   const buttons = h("div", { class: "actions" },
     acts.map((a, i) => h("button", { type: "button", class: i || quiet ? "quiet" : null, disabled: !!a.off || busy, title: a.off || null, onclick: open(a) }, a.text)),
@@ -981,6 +983,7 @@ function paneConfirm(r, a, busy) {
     }
   }
   const ready = !a.preview || (pv && !stale && pv.confirm);
+  const head = a.ask && p.ask && p.ask.head && typeof p.ask.head.text === "string" ? p.ask.head : null;
   const cancel = () => { state.pane = { key: r.key, confirm: "", text: "", fixer: true, preview: null }; renderView(); };
   return h("div", { class: "confirm", role: "group", "aria-label": "Confirm" },
     h("strong", {}, a.title),
@@ -988,6 +991,8 @@ function paneConfirm(r, a, busy) {
     field, a.extra ? a.extra(p) : null,
     code ? kv("Posts on", link(d.inbox.url, `inbox #${d.inbox.number}`), ": ", code) : null,
     (a.lines || []).map(([k, v]) => kv(k, v)),
+    head ? kv(head.moved === false ? "Note" : "Head", `${cap1(head.text)}.`)
+      : (a.ask && p.ask === undefined ? h("div", { class: "muted" }, "Reading whether the head moved since it was blocked…") : null),
     shown,
     h("div", { class: "actions" },
       ready
@@ -1008,6 +1013,16 @@ async function fetchPreview(r, a) {
   try { pv = Object.assign(await api("/api/action/preview", { method: "POST", body: Object.assign({ repo: r.repo, viewer: state.session.viewer }, payload) }), { forKey }); }
   catch (e) { pv = { error: e.message, forKey }; }
   if (state.pane.key === r.key && state.pane.confirm === a.id) { state.pane.preview = pv; renderView(); }
+}
+
+// What the server reads before a label change: for a hand-back, whether the PR's head moved since it
+// was blocked. Only shown, never needed: the button works without it, and a failed read shows nothing.
+async function fetchAsk(r, a) {
+  const pane = state.pane; // a new object each time a confirm opens: an answer for an older one is dropped
+  let got = null;
+  try { got = await api("/api/action/preview", { method: "POST", body: Object.assign({ repo: r.repo, viewer: state.session.viewer }, a.ask) }); }
+  catch (e) { got = null; }
+  if (state.pane === pane) { pane.ask = got; renderView(); }
 }
 
 async function runAct(r, a) {
@@ -1061,7 +1076,7 @@ function rejectAct(r, q, off, effect) {
 // Labels, one GitHub call each, as a person with write access.
 function labelAct(r, o) {
   const n = o.number;
-  return { id: o.id, text: o.text, title: o.title, off: o.off, postText: o.postText, lines: o.lines,
+  return { id: o.id, text: o.text, title: o.title, off: o.off, postText: o.postText, lines: o.lines, ask: o.ask,
     go: async () => {
       const done = [];
       for (const [op, label] of o.labels) {
@@ -1243,7 +1258,7 @@ function prPane(r) {
   const acts = [];
   if (stuck.length) {
     acts.push(labelAct(r, { id: "handback", number: n, text: "Hand back to the merge gate", title: `Hand PR #${n} back to the merge gate?`, off: labelBlock(d),
-      labels: stuck.map((l) => ["remove", l]), postText: stuck.length > 1 ? "Take the labels off" : "Take the label off",
+      labels: stuck.map((l) => ["remove", l]), ask: { type: "label", op: "remove", label: stuck[0], number: n }, postText: stuck.length > 1 ? "Take the labels off" : "Take the label off",
       lines: [["Changes", `takes ${stuck.join(" and ")} off PR #${n} · ${stuck.length} GitHub ${stuck.length === 1 ? "call" : "calls"}`],
         ["Expect", `Do this once you have fixed the PR yourself. The merge gate and the fixer pick it up again; the gate looks at it on its next run, or sooner with Run merge gate.${reqs.length ? " The request stays open until you mark it as seen." : ""}`]],
       doneText: `Done: PR #${n} is back with the merge gate.` }));

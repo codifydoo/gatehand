@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Hand back to the merge gate says in its confirm whether the PR's head moved since it was blocked:
+  whether the head commit is newer than the last time `agent:blocked` or `agent:needs-human` was put
+  on (#25). An unmoved head is a warning, not a refusal. The server answers it from a preview of the
+  label change (`type: "label"` on `/api/action/preview`), which only reads and hands out no confirm
+  token; the label change itself is unchanged. Installed repositories need no update: the dashboard
+  runs from the package.
 - Week shows the last seven days' cost as a floor against a weekly budget you set on the page (kept
   on this machine, #28), with its warning line; cost by day against the budget's pace, by repository
   and outcomes by role; PRs merged by the gate and coder runs that opened a PR. Runs with no cost
