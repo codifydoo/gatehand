@@ -26,7 +26,7 @@ number of things waiting for you is also in the tab's title.
 |---|---|---|
 | Needs you | one row per thing you act on, newest first: open inbox requests, stopped roles, agent PRs held for a person, blocked issues with no open request; folded below them, agent PRs that passed the merge gate while auto-merge is a dry run ("to merge"), and merged issues to close once live ("to close") | the inbox issue's "Open requests" list and, when it lists any, the request comments themselves (only they say what kind a request is, and whether it was answered; when they cannot be read, or a line's comment is older than the newest 1,000, the kind is told from the line's text); `state/breaker.json` on the ledger branch; labels; and, for a repository in dry run with agent PRs, the merge gate's report |
 | Activity | in every repository: running now, each with Cancel; not moving and not waiting on you, one row per cause per repository with when it moves; finished today | the running and queued Actions runs of Gatehand's nine workflows; `AGENTS_ENABLED`; `state/breaker.json`, the ledger and `policy.json`'s `runsPerDay` and `maxOpenPrs`; labels |
-| Week | each repository's runs over seven days per role: outcomes, runs today against `runsPerDay`, turns, time, cost | the ledger |
+| Week | the last seven days (today partial): the cost, as a floor, against your weekly budget with a warning line; cost by day against the budget's daily pace; runs, cost and runs with no cost by repository; runs, outcomes, turns, time and cost by role; PRs the merge gate merged and coder runs that opened a PR | the ledger, the budget in the config file |
 | Repositories | version, `AGENTS_ENABLED`, `AGENT_AUTO_MERGE`, runs today against each role's `runsPerDay`, seven-day cost, breakers, health | `install.lock.json`, the repository's Actions variables, the ledger, the runner ref's copy of `agent-coder.yml` against the default branch's |
 | A repository, Pipeline | its inbox requests in full, agent PRs with the merge gate's last word on each, the queue by priority (with when the coder runs next and its runs today), in progress, blocked, candidates, on hold, merged to close | the inbox issue's newest 1,000 comments (the agent bot's only), the job logs of the newest three `Agent merge` runs that ran (a PR's newest line wins, so a run dispatched for one PR does not hide the others), labels |
 | A repository, Agents | each role: stopped or paused and since when, running or idle, runs today against `runsPerDay`, failures in a row against `breakerThreshold`, open agent PRs against `maxOpenPrs`, and when it runs next; each scheduled workflow with its cron (UTC), its last finished run and its next run; runs running now; each role's limits | the ledger, `state/breaker.json`, Actions runs, `policy.json`, the workflow files' `schedule:` (below) |
@@ -72,6 +72,15 @@ A row marked NEW was not there the last time you looked at Needs you. That is re
 browser for this address, so a dashboard started on another port (the default picks a free one)
 marks everything NEW once; `--port` keeps it.
 
+With nothing in it, Needs you says what is true and the one useful next step where the item would
+be: "Nothing needs you", with the runs going and issues queued and a link to Activity; "Nothing that
+could be read needs you" while a repository is unread, naming each and linking to the first (never
+an all clear); or, with no repositories, that none were found (or that finding them failed, and how
+many are hidden), the scan's notes, and where to find or add one. The sidebar then shows no badge for Needs you, and with no repositories it greys Needs you,
+Activity and Week. A repository still being read has a "reading…" line under the rows until it
+answers; rows that arrive are placed by time (the folded groups stay last), so a newer one can appear
+above those already shown.
+
 In the sidebar, the tab's title and the chips, a count that leaves out a part it could not read, or a
 repository still loading, shows as "n+" (at least n), or "?" when nothing else is known. What could
 not be read is listed under the rows, not counted.
@@ -82,6 +91,28 @@ and is not a run for the daily cap. A part it cannot read is shown as `?` and li
 repository, never as zero, "off" or "nothing waits": Needs you says what it could not read,
 as the digest does. Without the repository's variables (a login with less than write access) or its
 `policy.json`, it does not guess which issue is the inbox.
+
+### Health: what could not be read
+
+A repository that could not be read, wholly or in part, has a health row at the end of Needs you. It
+is never counted, and it is never the item opened on arrival. Its pane gives the cause (below) and
+what `gh` said, as text, and the one thing that helps, which is always outside the page:
+
+- **SSO not authorized:** run `gh auth refresh -h github.com` (a Copy button puts that fixed text on
+  the clipboard) and follow the browser prompt, or use the organization's sign-in page on GitHub;
+- **not found:** find the new name or get access back on GitHub;
+- **too little access:** ask for access; without the variables, which issue is the inbox cannot be told;
+- **anything else:** usually passes.
+
+A repository that cannot be read at all can also be hidden from its pane (the existing local setting).
+Where parts fail for different reasons, the pane leads with the cause whose fix is most specific (SSO,
+then access, then not found).
+
+"Check again" reads that repository only, past the cache, with its inbox and the merge gate's report,
+and says whether it is still unread (and why) or readable again. It writes nothing. Two causes hit
+every repository and are said once, under the bar, instead of in rows: `gh` signed out (with the
+command to copy and Check again), and the API limit, with when reads resume; Refresh, and the
+five-minute refresh, are off until then. On a health item, `a` runs Check again (a read).
 
 ### Why a read failed
 
@@ -391,7 +422,18 @@ The server keeps a weekly budget in US dollars, and a warning line as a share of
 set another). It is a personal setting on the machine the dashboard runs on, kept in the same config
 file as the repository list (`budget_usd`, `budget_warn`): nothing is written to GitHub,
 `policy.json` does not hold it, and no agent reads it. It is for warning only and stops nothing; to
-stop the agents, turn them off. The page does not show or set it yet.
+stop the agents, turn them off. Week sets, changes and clears it ("Set a budget…", then "Edit
+budget…"), and shows the seven-day cost against it: a bar with the warning line, the share spent,
+and, over the budget, the repository that spent most. Over the warning line the sidebar's Week
+figure turns amber. With no budget it shows the cost and no bar. With no runs it says so, with the
+budget and the last run it knows of; a ledger that could not be read is named, and the total is "?".
+
+That cost is a floor, never a total: a ledger row with no `cost_usd` adds nothing and is counted and
+listed beside it, Claude review runs are not in the ledger, and a repository that cannot be read is
+named and adds nothing, never $0. The merge gate's rows are merges, not model runs, and count only
+in "PRs merged by the gate"; a PR merged by hand leaves no row. Week counts seven calendar days on
+your computer's clock, today the last; the cost columns on Repositories and Runs and spend count
+the server's last 168 hours, so they can differ from it by part of a day.
 
 `POST /api/budget` takes exactly `{"weekly_usd": <number of 0 or more, or null to clear>,
 "warn_at": <share from 0 to 1, or null for the default>}` (`warn_at` may be left out to keep it);

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Week shows the last seven days' cost as a floor against a weekly budget you set on the page (kept
+  on this machine, #28), with its warning line; cost by day against the budget's pace, by repository
+  and outcomes by role; PRs merged by the gate and coder runs that opened a PR. Runs with no cost
+  recorded are counted and listed, and an unreadable repository is named, never $0. Over the
+  warning line the sidebar's Week figure turns amber; nothing is paused.
 - Dashboard: a failed read says why, as one cause from a fixed set (`sso`, `signed_out`,
   `rate_limited` with the time the limit resets, `not_found`, `no_access`, `unknown`), in each
   repository's new `unreadable` list, beside `error` in a failed request's answer, and for a scan
@@ -54,8 +59,16 @@
   and schedules.
 - In a narrow window the open item of Needs you expands in place under its row, as in a mail app,
   and the sidebar folds into one line with ☰.
+- Needs you with nothing in it says what is true and what to do next: nothing needs you (with what
+  is running and queued), nothing that could be read (naming what could not), or no repositories
+  found; a repository still being read shows a "reading…" line.
 - Keys on Needs you: j/k move, o goes into the item, a opens its primary action's confirm (Enter
   confirms), r opens Reject…, Esc closes the confirm, ? lists them.
+- What could not be read has a health row at the end of Needs you, never counted, whose pane says
+  why (the server's cause) and the one thing that helps: authorize gh for an organization's SSO,
+  find a repository that moved, ask for access; "Check again" re-reads that repository only. A
+  signed-out gh and the API limit are said once under the bar, and Refresh is off until the limit
+  resets.
 - Dashboard: Pause all's record. A `set_variable` that turns `AGENTS_ENABLED` off can carry
   `"pause_all": true`; once that write succeeds, the repository is kept in a `paused` list in the
   dashboard's local config file, which `/api/session` returns, so Resume turns on only what Pause
@@ -68,8 +81,8 @@
 - Dashboard: a weekly budget in US dollars and a warning line (a share of it, 80% by default), kept
   in the dashboard's local config file, set through `POST /api/budget` and returned by
   `/api/session`. A setting on this machine only: nothing is written to GitHub, no agent reads it,
-  and it stops nothing. A config file from before loads unchanged. The page does not show or set it
-  yet (#28).
+  and it stops nothing. A config file from before loads unchanged; Week shows and sets it
+  (#28).
 - Project site: `site/` holds five static pages (home, how it works, security, the dashboard, get
   started), published to GitHub Pages by `.github/workflows/pages.yml` on a push to `main`. Not
   part of the package: nothing changes in installed repositories.
