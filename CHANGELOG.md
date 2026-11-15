@@ -64,6 +64,21 @@
   find a repository that moved, ask for access; "Check again" re-reads that repository only. A
   signed-out gh and the API limit are said once under the bar, and Refresh is off until the limit
   resets.
+  branch (null with no schedule, `"unknown"` and an error when the file cannot be read). Reads only
+  (#21, #22); Activity shows the next scheduled runs, and a repository's Agents tab shows the limits
+  and schedules.
+=======
+- Needs you with nothing in it says what is true and what to do next: nothing needs you (with what
+  is running and queued), nothing that could be read (naming what could not), or no repositories
+  found; a repository still being read shows a "reading…" line.
+- Keys on Needs you: j/k move, o goes into the item, a opens its primary action's confirm (Enter
+  confirms), r opens Reject…, Esc closes the confirm, ? lists them.
+- Dashboard: Pause all's record. A `set_variable` that turns `AGENTS_ENABLED` off can carry
+  `"pause_all": true`; once that write succeeds, the repository is kept in a `paused` list in the
+  dashboard's local config file, which `/api/session` returns, so Resume turns on only what Pause
+  all turned off. The list is dropped per repository when the page turns its agents on, or a read
+  finds them on. No new write to GitHub; a config file from before loads unchanged. The page does
+  not offer Pause all yet (#29).
 - Dashboard: a weekly budget in US dollars and a warning line (a share of it, 80% by default), kept
   in the dashboard's local config file, set through `POST /api/budget` and returned by
   `/api/session`. A setting on this machine only: nothing is written to GitHub, no agent reads it,
