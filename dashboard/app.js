@@ -410,16 +410,20 @@ function renderSide() {
   const item = (route, on, text, badge, badgeKind, cls, title) => routeLink(route,
     { class: `${cls || "side-item"}${on ? " on" : ""}`, "aria-current": on ? "page" : null, title: title || null },
     h("span", { class: "side-label" }, text), badge ? h("span", { class: `badge ${badgeKind || ""}` }, badge) : null);
+  const none = !!state.session && !repos.length;
+  const pre = !state.session; // before the first load nothing is known: no counts, not zeros
   // On a narrow window the sidebar folds into one line naming where you are; ☰ opens it.
-  const here = { needs: ["Needs you", c.needsText], activity: ["Activity", c.runningText], week: ["Week", c.costText],
+  const blank = pre || none;
+  const here = { needs: ["Needs you", blank || c.needsText === "0" ? "" : c.needsText], activity: ["Activity", blank ? "" : c.runningText], week: ["Week", blank ? "" : c.costText],
     repos: ["Repositories", String(repos.length)], repo: [routeRepo() ? label(routeRepo()) : "Repository", ""] }[r.view] || ["", ""];
   $("side").classList.toggle("open", !!state.sideOpen);
   replace($("side"),
     h("button", { type: "button", class: "side-toggle quiet", "aria-expanded": state.sideOpen ? "true" : "false",
       onclick: (e) => { state.sideOpen = !state.sideOpen; $("side").classList.toggle("open", state.sideOpen); e.currentTarget.setAttribute("aria-expanded", String(state.sideOpen)); } }, "☰ ", h("strong", {}, here[0]), here[1] ? ` ${here[1]}` : ""),
-    item("/needs", r.view === "needs", "Needs you", c.needsText, c.needs ? "attn" : (c.needsUnknown ? "warn" : "")),
-    item("/activity", r.view === "activity", "Activity", c.runningText),
-    item("/week", r.view === "week", "Week", c.costText),
+    // No badge at zero; with no repositories at all, the three views are greyed, not hidden.
+    item("/needs", r.view === "needs", "Needs you", pre || c.needsText === "0" ? null : c.needsText, c.needs ? "attn" : (c.needsUnknown ? "warn" : ""), none ? "side-item dim" : null),
+    item("/activity", r.view === "activity", "Activity", blank ? null : c.runningText, null, none ? "side-item dim" : null),
+    item("/week", r.view === "week", "Week", blank ? null : c.costText, null, none ? "side-item dim" : null),
     item("/repos", r.view === "repos", `Repositories · ${repos.length}`, null, null, "side-head"),
     repos.map((repo) => {
       const [badge, kind] = repoBadge(repo);
@@ -465,10 +469,10 @@ function needsView() {
   const more = c.needsLoading || c.needsUnknown ? "+" : "";
   const chip = (k, label, count) => routeLink(needsRoute(k),
     { class: `chip${kind === k ? " on" : ""}`, "aria-current": kind === k ? "page" : null }, `${label} ${count}`);
-  const chips = h("div", { class: "chips" }, chip("", "All", c.needsText),
+  const chips = !state.session ? null : h("div", { class: "chips" }, chip("", "All", c.needsText),
     CHIPS.filter(([k]) => of(k).length || kind === k).map(([k, label]) => chip(k, label, `${of(k).length}${more}`)));
   const newCount = rows.filter(isNew).length;
-  const summary = [
+  const summary = !state.session ? [] : [
     `${c.needsText} in ${c.needsRepos} ${c.needsRepos === 1 ? "repository" : "repositories"}`,
     newCount ? ` · ${newCount} new` : "",
     c.needsLoading ? " · still loading" : "",
@@ -488,7 +492,10 @@ function needsView() {
     state.route.open = sel.key;
     history.replaceState(null, "", `${location.pathname}#${needsRoute(kind, sel.key)}`);
   }
-  const pane = sel ? itemPane(sel) : (want && !closed ? gonePane(want, c) : null);
+  let pane = sel ? itemPane(sel) : (want && !closed ? gonePane(want, c) : null);
+  // Nothing to open: where the item would be, what is true and the one useful next step.
+  const zero = !pane && !kind && !rows.length && state.session && !c.needsLoading;
+  if (zero) pane = zeroPane(c, repos);
   // A narrow window: the open item expands in place, under its row, as in a mail app; otherwise it
   // sits beside the list.
   const narrow = NARROW.matches;
@@ -512,17 +519,61 @@ function needsView() {
     x.notes.map((n) => h("div", {}, n)),
     routeLink(repoRoute(repo), {}, `Open ${repo}`)));
   const any = rows.length && (!kind || of(kind).length);
+  // Still being read: one line per repository, after the rows, until it answers.
+  const reading = per.filter(([, x]) => x.loading).map(([repo]) => {
+    const d = state.repos[repo];
+    return h("div", { class: "lrow reading" }, h("div", { class: "lmeta" },
+      `${short(repo)} · ${!d || d.loading ? "reading…" : `reading ${[needsInbox(d) && !state.inbox[repo] ? "its inbox" : "",
+        needsGate(d) && !state.gate[repo] ? "the merge gate's report" : ""].filter(Boolean).join(" and ") || "the rest"}…`}`));
+  });
   const aside = pane && !(narrow && sel); // beside the list, or (narrow, the item gone) above it
   return [viewHead("Needs you", ...summary), chips,
     h("div", { class: `needs-split${aside && !narrow ? "" : " no-pane"}` },
       narrow && aside ? paneBox(false) : null,
-      h("div", { class: "needs-list" }, any ? list
-        : empty(c.needsLoading && !rows.length ? "Loading…"
-          : (kind ? "None of these." : (c.unread.length ? "Nothing that could be read needs you." : "Nothing needs you."))),
+      h("div", { class: "needs-list" }, any ? list : null, reading,
+        any || reading.length || zero ? null : empty(!state.session ? (state.sessionFailed ? `Could not load: ${state.sessionFailed}` : "Loading…")
+          : (!repos.length ? "No repositories yet."
+            : (c.unread.length ? `None that could be read; could not read ${c.unread.map(short).join(", ")}.` : "None of these."))),
       kind ? null : unread,
       any ? h("p", { class: "keys muted" }, state.keysHelp ? KEYS_HELP : "j/k move · o open · a primary · r reject · ? keys") : null),
       aside && !narrow ? paneBox(false) : null)];
 }
+// Needs you has nothing in it. Each says what is true, then the one useful next step; never an "all
+// clear" while a repository is unread.
+function zeroPane(c, repos) {
+  if (!repos.length) {
+    const notes = state.session.scan_notes || [];
+    const hidden = (state.session.excluded || []).length;
+    return [h("h2", {}, state.session.scan_error ? "Finding repositories failed." : "No repositories with Gatehand found."),
+      state.session.scan_error ? h("p", {}, state.session.scan_error) : null,
+      hidden ? h("p", {}, `${hidden} ${hidden === 1 ? "repository is" : "repositories are"} hidden.`) : null,
+      notes.length ? h("ul", { class: "items" }, notes.map((n) => h("li", { class: "muted" }, n))) : null,
+      h("p", {}, routeLink("/repos", { class: "cta" }, "Find repositories again, or add one →")),
+      h("p", { class: "muted" }, "To install it in a repository, run /gatehand:install there in Claude Code.")];
+  }
+  if (c.unread.length) {
+    return [h("h2", {}, "Nothing that could be read needs you."),
+      h("p", {}, `${c.unread.map(short).join(", ")} could not be read, so this is not "nothing".`),
+      h("p", {}, routeLink(repoRoute(c.unread[0]), {}, `Open ${short(c.unread[0])} →`))];
+  }
+  // What the agents are doing meanwhile, from what was read.
+  // (Every repository was read here: an unread one returned above.)
+  let queued = 0;
+  const busy = new Set();
+  for (const repo of repos) {
+    const d = state.repos[repo];
+    queued += d.issues.ready.length;
+    if (d.issues.ready.length || (d.active_runs || []).length) busy.add(repo);
+  }
+  const more = c.runningUnknown ? "+" : "";
+  const running = c.running ? `${c.running}${more} ${c.running === 1 && !more ? "run is" : "runs are"} going` : "";
+  const q = queued ? `${queued} ${queued === 1 ? "issue is" : "issues are"} queued` : "";
+  return [h("h2", {}, "Nothing needs you."),
+    running || q ? h("p", {}, `${[running, q].filter(Boolean).join(" and ")} in ${busy.size}${more} ${busy.size === 1 && !more ? "repository" : "repositories"}.`) : null,
+    c.runningUnknown && !c.running ? h("p", {}, "Whether anything is running could not be read in every repository.") : null,
+    h("p", {}, routeLink("/activity", {}, "See Activity →"))];
+}
+
 // The width below which the list and the pane do not fit side by side (app.css has the same number).
 const NARROW = window.matchMedia("(max-width: 1000px)");
 NARROW.addEventListener("change", () => {
@@ -2099,6 +2150,7 @@ async function refresh(fresh) {
     $("updated").textContent = `updated ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
   } catch (e) {
     notice(e.message);
+    if (!state.session) { state.sessionFailed = e.message; renderAll(); } // not "Loading…" forever
   } finally {
     $("refresh").disabled = false;
   }

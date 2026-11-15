@@ -46,6 +46,8 @@ footer { font-size: 12px; margin-bottom: 8px; }
 a.lrow, div.lrow { display: flex; flex-direction: column; gap: 2px; padding: 9px 10px; border-bottom: 1px solid var(--line); color: var(--fg); }
 a.lrow:hover { background: var(--sel); text-decoration: none; }
 .lrow.unread { background: var(--warn-bg); }
+.lrow.reading { color: var(--muted); }
+.side a.dim { opacity: .5; }
 .lmeta { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
 .lmeta .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--attn); flex: none; }
 .lmeta .dot.old { background: none; border: 1px solid var(--muted); }
