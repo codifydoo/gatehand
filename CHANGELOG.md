@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Hand back to the merge gate says in its confirm whether the PR's head moved since it was blocked:
+  whether the head commit is newer than the last time `agent:blocked` or `agent:needs-human` was put
+  on (#25). An unmoved head is a warning, not a refusal. The server answers it from a preview of the
+  label change (`type: "label"` on `/api/action/preview`), which only reads and hands out no confirm
+  token; the label change itself is unchanged. Installed repositories need no update: the dashboard
+  runs from the package.
 - Dashboard: an answered inbox request says how (`answer`: approved, rejected, seen or acknowledged),
   when (`answered_at`) and, for a reject, the owner's one-line reason (`reason`), read only from
   `AGENT_OWNER_LOGIN`'s own `/reject`, never an edited one (#23). The blocked-issue pane shows it

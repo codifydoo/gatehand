@@ -141,7 +141,15 @@ update it, a review that never posted, or just the labels; a request's kind is u
 comment is read), the merge gate's last word on it, and what the agent wrote. A PR no longer among
 the open agent PRs is said to be so, not guessed at. Its first step is a link to the PR on GitHub,
 to fix it yourself; then "Hand back to the merge gate" takes `agent:blocked` and `agent:needs-human`
-off, one label at a time (if a later one is refused, the pane says which were done). Beside it:
+off, one label at a time (if a later one is refused, the pane says which were done). Its confirm
+says whether the PR's head moved since it was blocked: whether the head commit is newer than the
+last time a stuck label still on it was put on (the later of the two). "The head has not moved" is a
+warning, not a refusal: handed back as it is, it is blocked again, unless what stopped it (red CI,
+a base the merge gate could not merge in) was fixed another way. The commit's committer date stands
+for when it was pushed, since GitHub keeps no time for a plain push, so a commit made earlier and
+pushed after the block reads as unmoved. While the server reads, the confirm says so; when the label
+history or the commit cannot be read, it says it cannot tell; when the server's answer fails, it
+says nothing. The button works throughout. Beside it:
 Mark request as seen (`/approve REQ-…`), Hold or Release, Run review, Run merge gate, Approve… and
 Request changes…. The last four confirm with the server's preview in the pane: what it will do,
 notes, the exact GitHub calls and the comment; Request changes… takes its note first and previews
@@ -314,7 +322,7 @@ apply the same rules.
 | Unqueue | the queue, on the Pipeline tab | removes `agent:ready` from an issue | people with write access |
 | Read and queue on GitHub | candidates | opens the issue; you add `agent:ready` there | people with write access |
 | Hold, Release | issues and agent PRs in their panes; on the Pipeline tab, queued and held issues and agent PRs with no row in Needs you | adds or removes `agent:hold` | people with write access |
-| Hand back to the merge gate | the pane of an agent PR with `agent:blocked` or `agent:needs-human` | removes those labels, once you have fixed the PR yourself | people with write access |
+| Hand back to the merge gate | the pane of an agent PR with `agent:blocked` or `agent:needs-human` | removes those labels, once you have fixed the PR yourself; the confirm says whether the PR's head moved since it was blocked | people with write access |
 | Turn agents on/off, Turn auto-merge on/off | a repository's Settings tab | sets `AGENTS_ENABLED` or `AGENT_AUTO_MERGE` to `true` or `false` | people who may set Actions variables |
 | Pause all…, Resume n… | the bar | sets `AGENTS_ENABLED` to `false` in every repository where it is `true`, or back to `true` in those Pause all turned off (see Pause all) | people who may set Actions variables, per repository |
 | Start the coder on the next one | the coder's schedule, on a repository's Agents tab | dispatches an auto-pick `agent-coder.yml` run on `policy.runnerRef` | people with write access |
