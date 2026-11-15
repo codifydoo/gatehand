@@ -2520,8 +2520,12 @@ const pauseBody = (mode, repo) => Object.assign({ repo, viewer: state.session.vi
 // A failure the page has since read past (the repository is now as it was meant to be) is old news.
 const pauseWanted = (mode, repo) => (mode === "resume" ? agentsVar(repo) === "true" : isOff(repo));
 
+// While the API limit holds nothing can be read, so nothing can be planned: Pause all waits, as Refresh
+// does, rather than replace what the page last read with failures.
+const pauseOff = () => (limited() ? `Off until ${hhmm(state.limitUntil)}: the API limit` : "");
+
 async function openPause(mode) {
-  if (!state.session || (state.pause && state.pause.sending)) return;
+  if (!state.session || (state.pause && state.pause.sending) || limited()) return;
   const list = state.session.repos.slice(); // the list as it is now, for the reads, the rows and the count
   const p = { mode, reading: true, list, left: list.length, rows: [], sending: false, ghOpen: false };
   state.pause = p;
@@ -2681,14 +2685,15 @@ function pauseBar() {
     unread.length ? h("span", {}, `${unread.map(repoName).join(", ")} could not be read`) : null,
     failed.map(([repo, why]) => h("span", {}, `${repoName(repo)} ${why}`)),
     h("span", { class: "spacer" }),
-    failed.length ? h("button", { type: "button", id: "pause-retry", class: "quiet small", onclick: () => openPause(out.mode) }, `Retry ${failed.length}…`) : null,
+    failed.length ? h("button", { type: "button", id: "pause-retry", class: "quiet small", disabled: limited(), title: pauseOff() || null, onclick: () => openPause(out.mode) }, `Retry ${failed.length}…`) : null,
     failed.length ? h("button", { type: "button", id: "pause-dismiss", class: "quiet small", onclick: () => { state.pauseOut = null; state.pauseFocus = "pause-all"; renderPause(); } }, "Dismiss") : null,
-    back.length ? h("button", { type: "button", id: "pause-resume", class: "small", onclick: () => openPause("resume") }, `Resume ${back.length}…`) : null);
+    back.length ? h("button", { type: "button", id: "pause-resume", class: "small", disabled: limited(), title: pauseOff() || null, onclick: () => openPause("resume") }, `Resume ${back.length}…`) : null);
 }
 
 function renderPause() {
   const el = $("pause");
-  $("pause-all").disabled = !state.session || !!state.pause;
+  $("pause-all").disabled = !state.session || !!state.pause || limited();
+  $("pause-all").title = pauseOff();
   if (!state.session) { el.hidden = true; return; }
   const a = document.activeElement;
   const keep = state.pauseFocus || (a && a.id && el.contains(a) ? a.id : "");
