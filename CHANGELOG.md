@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Dashboard: an answered inbox request says how (`answer`: approved, rejected, seen or acknowledged),
+  when (`answered_at`) and, for a reject, the owner's one-line reason (`reason`), read only from
+  `AGENT_OWNER_LOGIN`'s own `/reject`, never an edited one (#23). The blocked-issue pane shows it
+  ("its last one, REQ-…, was rejected by you on Nov 11: not now"), as does a request's pane once someone answered first ("approved at
+  17:29") and the Pipeline tab's recently answered requests. Installed repositories need no update:
+  the dashboard runs from the package.
 - Week shows the last seven days' cost as a floor against a weekly budget you set on the page (kept
   on this machine, #28), with its warning line; cost by day against the budget's pace, by repository
   and outcomes by role; PRs merged by the gate and coder runs that opened a PR. Runs with no cost

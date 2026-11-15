@@ -792,7 +792,10 @@ function gonePane(key, c) {
   if (repo && c.unread.includes(repo)) {
     return [h("p", {}, `${repo} could not be read just now, so it is not known whether this still waits for you.`), msg ? paneState(msg) : null, top];
   }
-  return [h("p", {}, "This no longer waits for you."), msg ? paneState(msg) : null, top];
+  const id = key.slice(repo.length).startsWith("|req|") ? key.slice(repo.length + 5) : "";
+  const got = id && state.inbox[repo];
+  const q = got && got.requests ? got.requests.find((x) => x.id === id && x.answered) : null;
+  return [h("p", {}, q ? `This no longer waits for you: ${id} was ${answerLine(q)}.` : "This no longer waits for you."), msg ? paneState(msg) : null, top];
 }
 
 // What each kind of inbox request means, in the words of the request the agent filed
@@ -1295,6 +1298,9 @@ function issuePane(r) {
   // An `untrusted` request the checklist missed: /rerun re-labels as the bot, which vouches for
   // nothing, so the run would be refused again.
   const untrusted = got && got.requests && got.requests.some((x) => x.kind === "untrusted" && !x.answered && x.issue === n);
+  // Its newest request about the issue itself, answered: what was said, and when.
+  const last = got && got.requests ? got.requests.find((x) => x.issue === n && x.answered && !["breaker", "fixer", "merger", "review"].includes(x.kind)) : null;
+  const who = d.owner_login && state.session && state.session.viewer === d.owner_login ? "you" : (d.owner_login || "the owner");
   const s = d.stats && d.stats.coder;
   const expect = ["Its reply on the inbox within a minute or two."];
   if (s) expect.push(s.cap === null || s.cap === undefined ? `${s.today} coder runs today.` : `Today ${s.today} of ${s.cap} coder runs are used.`);
@@ -1322,7 +1328,8 @@ function issuePane(r) {
     h("h2", {}, r.title, r.text ? h("span", { class: "muted" }, ` ${r.text}`) : null),
     track(1, "Coder · blocked"),
     kv("Why it's stuck", [issue ? `It carries ${issue.labels.filter((l) => STUCK.includes(l)).join(" and ") || "a blocking label"}` : "It is blocked",
-      d.inbox ? ", and no inbox request about it is open: it was answered, or never filed."
+      d.inbox ? (last ? `, and no inbox request about it is open: its last one, ${last.id}, was ${answerLine(last, ` by ${who}`)}.`
+        : ", and no inbox request about it is open: it was answered, or never filed.")
         : (d.inbox_state === "none" ? ". There is no inbox issue, so no request about it is open."
           : ". Which issue is the inbox could not be told, so it is not known whether a request about it is open.")]),
     // Held first: the coder never picks a held issue, even one that also carries agent:ready.
@@ -2056,6 +2063,16 @@ function clock(iso) {
   const day = new Date(t);
   return day.toDateString() === new Date().toDateString() ? hhmm(t) : `${day.toLocaleDateString([], { month: "short", day: "numeric" })} ${hhmm(t)}`;
 }
+// How an inbox request was answered, as the server read it from the inbox: "approved at 17:29",
+// "rejected on Nov 11: not now"; `after` goes after the verb. The reason is the owner's own text, so it
+// only ever goes in as text.
+function answerLine(q, after = "") {
+  const t = Date.parse(q.answered_at || "");
+  const day = new Date(t);
+  const when = !isFinite(t) ? "" : (day.toDateString() === new Date().toDateString()
+    ? ` at ${hhmm(t)}` : ` on ${day.toLocaleDateString([], { month: "short", day: "numeric" })}`);
+  return `${q.answer || "answered"}${after}${when}${q.reason ? `: ${q.reason}` : ""}`;
+}
 // A workflow's next scheduled run, as the server read it from the workflow file; "" when it has no
 // schedule, the file could not be read, or its cron could not be followed. Never a guess.
 function nextRun(d, key) {
@@ -2137,7 +2154,8 @@ function requestList(repo, d) {
     if (!answered && !row) here += 1;
     return h("div", { class: "req" }, h("details", {},
       h("summary", {}, h("code", {}, q.id), " ", pill(q.kind), " ", `${q.role} · `,
-        q.issue ? link(`${d.url}/issues/${q.issue}`, `#${q.issue}`) : "no issue", h("span", { class: "muted" }, ` · ${ago(q.created_at)}`)),
+        q.issue ? link(`${d.url}/issues/${q.issue}`, `#${q.issue}`) : "no issue", h("span", { class: "muted" }, ` · ${ago(q.created_at)}`),
+        answered ? h("span", { class: "muted" }, ` · ${answerLine(q)}`) : null),
       h("pre", { class: "body" }, q.body),
       h("p", {}, link(q.url, "The request on GitHub"))),
     answered ? null : (row ? openItem(row) : spotActs(r, requestActs(r, d, q))));
