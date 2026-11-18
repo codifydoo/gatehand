@@ -8,7 +8,10 @@
 #   2. Auto-pick takes the highest priority, then the oldest, and skips held, locked, size: L,
 #      over-attempted and acceptance-less issues; only the BOT's lock comments count as attempts.
 #      It takes an issue only if a writer applied the latest agent:ready and no non-writer renamed
-#      or edited it since; only writers' comments are passed on. A named dispatch skips the rest.
+#      or edited it since; only writers' comments are passed on. Nor if the latest removal of
+#      agent:hold, or the latest reopen, was by anyone else (or the timeline or their access cannot
+#      be read): a writer's hold or close stands until a writer lifts it; agent:pr on an issue is no
+#      stop; stop_blockers refuses a kind it does not know. A named dispatch skips the rest.
 #   (1b) The gate refuses a run on the default branch, and one whose runner-ref workflow is stale.
 #   3. Finalize leaves exactly one state: a PR → agent:pr-open; a question or a protected path →
 #      agent:blocked + agent:needs-human with an inbox request; a failure with attempts left →
@@ -257,6 +260,49 @@ stub_gh_json 'api graphql *' "$(edits)"
 : >"${TMP}/out"
 GITHUB_OUTPUT="${TMP}/out" cmd_pick "" 2>/dev/null
 expect "pick: an issue queued by a read-only collaborator is passed over" "$(grep '^issue=' "${TMP}/out")" "issue=1"
+# A writer's agent:hold on an issue stands until a writer lifts it: busy reads only the current label,
+# so a triage account that removed it would get the issue picked, and the PR that follows carries no
+# lift of its own for the merge gate to see. Same two issues, both queued by the owner; #2 ranks first.
+# The stub serves a timeline of four as two pages, so the latest lift sits on the second.
+pick_hold() { # pick_hold <timeline-json-for-#2> [FAIL] -> issue=N
+  stub_gh_reset_rules
+  AGENT_TRUST_CACHE=()
+  stub_gh_on 'issue list *' "$(jq -s . <(issue 2 2026-11-01T00:00:00Z 'agent:ready,priority: high' "${DONE}") <(issue 1 2026-10-01T00:00:00Z 'agent:ready,priority: low' "${DONE}"))"
+  [[ "${2:-}" == FAIL ]] && stub_gh_on 'api --paginate repos/o/r/issues/2/timeline*reopened*' '' 1 'gh: HTTP 502'
+  stub_gh_json 'api --paginate repos/o/r/issues/2/timeline*' "$1"
+  stub_gh_json 'api --paginate repos/o/r/issues/1/timeline*' "$(by owner-login)"
+  stub_gh_on 'api repos/o/r/collaborators/lifter/permission*' '' 1 'gh: HTTP 502'
+  stub_gh_json 'api repos/o/r/collaborators/owner-login/permission*' '{"permission":"admin"}'
+  stub_gh_json 'api repos/o/r/collaborators/*/permission*' '{"permission":"read"}'
+  stub_gh_json 'api graphql *' "$(edits)"
+  : >"${TMP}/out"
+  GITHUB_OUTPUT="${TMP}/out" cmd_pick "" 2>"${TMP}/err"
+  grep '^issue=' "${TMP}/out"
+}
+hold_tl() { # hold_tl <earlier lifter> <latest lifter>: queued by the owner, held and lifted twice
+  jq -s . <(ev labeled agent:ready owner-login "${T0}") <(ev unlabeled agent:hold "$1" "${T1}") \
+    <(ev labeled agent:hold owner-login "${T1}") <(ev unlabeled agent:hold "$2" "${T2}")
+}
+expect "pick: an issue whose agent:hold a triage account lifted last is passed over" "$(pick_hold "$(hold_tl owner-login outsider)")" "issue=1"
+expect "pick: and the log names who lifted it" \
+  "$(grep -c 'skip #2: agent:hold was removed by outsider, who has no write access' "${TMP}/err")" 1
+expect "pick: a hold a writer lifted last (after a triage account's) is taken" "$(pick_hold "$(hold_tl outsider owner-login)")" "issue=2"
+expect "pick: an issue never held is taken" "$(pick_hold "$(by owner-login)")" "issue=2"
+expect "pick: a timeline the hold check cannot read skips the issue (fails closed)" "$(pick_hold "$(hold_tl outsider owner-login)" FAIL)" "issue=1"
+expect "pick: a lifter whose access cannot be read skips the issue" "$(pick_hold "$(hold_tl owner-login lifter)")" "issue=1"
+# A writer closed it (as not planned, labels left on) and a triage account reopened it.
+expect "pick: an issue a triage account reopened after a writer closed it is passed over" \
+  "$(pick_hold "$(jq -s . <(ev labeled agent:ready owner-login "${T0}") <(ev closed '' owner-login "${T1}") <(ev reopened '' outsider "${T2}"))")" "issue=1"
+expect "pick: and the log says who reopened it" "$(grep -c 'skip #2: it was reopened by outsider, who has no write access' "${TMP}/err")" 1
+expect "pick: one a writer reopened is taken" \
+  "$(pick_hold "$(jq -s . <(ev labeled agent:ready owner-login "${T0}") <(ev closed '' outsider "${T1}") <(ev reopened '' owner-login "${T2}"))")" "issue=2"
+# agent:pr on an issue means nothing to the pick: only the hold and the close are its stops.
+expect "pick: agent:pr added to the issue by a triage account does not stop the pick" \
+  "$(pick_hold "$(jq -s . <(ev labeled agent:ready owner-login "${T0}") <(ev labeled agent:pr outsider "${T1}"))")" "issue=2"
+# stop_blockers refuses a kind it does not know, rather than finding nothing to stop.
+stub_gh_reset_rules
+stub_gh_json 'api --paginate repos/o/r/issues/9/timeline*' '[]'
+expect "stop_blockers: an unknown kind is a blocker, never silence" "$(stop_blockers 9 unlabeled reopend)" "stop_blockers: unknown kind 'reopend'"
 # A merged PR that references the issue means it is already fixed on main (an issue was once
 # picked after a merged PR had fixed it). Same two issues, both labelled by the owner; #2 ranks first.
 XREF_BODY=$'## What\nx\n\nRefs #2'

@@ -82,7 +82,8 @@
         <h3>The merge gate <span class="pill ok">no model</span></h3>
         <p>Merges only when, on the PR's current head, everything holds: the agents are on and no
           breaker is tripped; the PR is the bot's, open, mergeable, and not held, blocked or being
-          fixed; every required check and <code>agent pr guard</code> passed; the newest review
+          fixed, and no one without write access lifted a hold, reopened it or re-added
+          <code>agent:pr</code>; every required check and <code>agent pr guard</code> passed; the newest review
           verdict is Approve and newer than the head; no changed file is protected; and the head
           contains the default branch's tip. It merges with a merge commit pinned to that head,
           never <code>--admin</code>. With auto-merge off, it only reports what it would do.</p>

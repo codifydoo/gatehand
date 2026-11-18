@@ -9,7 +9,9 @@
 #                                        spaces) answers; no match = exit 0 with no output
 #   stub_gh_json <glob> <raw-api-json>   like stub_gh_on, but the output is the RAW API response and
 #                                        the stub applies the call's own `--jq` program to it, the
-#                                        way gh does, so the scripts' jq filters are exercised too
+#                                        way gh does, so the scripts' jq filters are exercised too; on a
+#                                        `--paginate` call a top-level array of two or more items is
+#                                        two pages, the program run on each (gh runs --jq per page)
 #   STUB_AFTER=<glob> stub_gh_on|json …  the rule answers only once an EARLIER call matched <glob>
 #                                        (state that changes during a run, e.g. main after a merge)
 #   stub_gh_calls                        every call so far, one per line
@@ -46,7 +48,13 @@ while IFS=$'\x1f' read -r pat out rc err mode after; do
       seen=0; while IFS= read -r c; do [[ "${c}" == ${after} ]] && { seen=1; break; }; done < <(head -n "$((n - 1))" "${dir}/calls")
       [[ "${seen}" == 1 ]] || continue
     fi
-    if [[ "${mode}" == json && -n "${jqexpr}" ]]; then
+    if [[ "${mode}" == json && -n "${jqexpr}" && " $* " == *" --paginate "* ]] \
+      && jq -e 'type == "array" and length > 1' "${dir}/out/${out}" >/dev/null 2>&1; then
+      # gh runs --jq once per page: an array answer is served as two pages, so a filter that takes
+      # the first, last or count over the whole response is wrong here too.
+      jq -c '.[0:(length / 2 | floor)]' "${dir}/out/${out}" | jq -r "${jqexpr}"
+      jq -c '.[(length / 2 | floor):]' "${dir}/out/${out}" | jq -r "${jqexpr}"
+    elif [[ "${mode}" == json && -n "${jqexpr}" ]]; then
       jq -r "${jqexpr}" "${dir}/out/${out}"
     elif [[ -n "${out}" ]]; then
       cat "${dir}/out/${out}"

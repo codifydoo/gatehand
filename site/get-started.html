@@ -111,7 +111,13 @@
       <li><strong>Queue work:</strong> label an issue <code>agent:ready</code>, or file it with the
         "Agent task" template.</li>
       <li><strong>Start a run now:</strong> <code>gh workflow run agent-coder.yml --ref agent-runner</code></li>
-      <li><strong>Keep an issue away from the agents:</strong> <code>agent:hold</code>.</li>
+      <li><strong>Keep an issue or an agent PR away from the agents:</strong> <code>agent:hold</code>.
+        If someone without write access removes it, the coder's auto-pick skips the issue and the
+        merge gate does not merge the PR until a writer adds it back and removes it again (a
+        repo-wide rename or deletion of the label is not detected, and the fixer still works a PR
+        whose hold a non-writer lifted). Closing the issue or PR stops it too, and a reopen by anyone
+        without write access does not count. A writer's Request changes or converting the PR to a
+        draft also stop the merge, and only a writer lifts those.</li>
       <li><strong>Allow protected paths for one issue:</strong> a writer adds
         <code>agent:allow-protected</code> to the issue.</li>
       <li><strong>Turn on auto-merge:</strong> <code>gh variable set AGENT_AUTO_MERGE --body true</code></li>

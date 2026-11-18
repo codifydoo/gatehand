@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.8.3 (2026-11-18)
+
+- A writer's stop on an agent PR or a queued issue now stands until a writer or the agent bot lifts
+  it. An account with GitHub's triage role can remove labels and reopen, but has no write access.
+  The merge gate and the coder decided on current labels and state only, which left two holes:
+  - On a PR, such an account could remove a writer's `agent:hold`, reopen a PR a writer closed, or
+    re-add `agent:pr`. The gate then merged the PR with the App token.
+  - On an issue, it could take a writer's `agent:hold` off, or reopen an issue a writer closed (as
+    not planned, labels left on). The coder's auto-pick then took the issue, and the PR that followed
+    carried no lift of its own, so the gate merged that too.
+- What is covered now:
+  - Merge gate, on PRs: `agent:hold`, close and reopen, and `agent:pr`. It reads the PR's timeline
+    once per check. It waits when the latest removal of `agent:hold`, the latest reopen or the latest
+    addition of `agent:pr` was by anyone else (a deleted account included), and when the timeline or
+    that person's access cannot be read. The reason names who did it and how a writer lifts the stop.
+    The gate never updates such a PR or asks for a fresh review of it. The bot's own `agent:pr` at
+    creation passes, and a PR nobody stopped is unaffected.
+  - Coder auto-pick, on issues: `agent:hold`, and close and reopen. An issue whose latest
+    `agent:hold` removal or latest reopen was by anyone else is skipped, and so is one whose timeline
+    or whose lifter's access cannot be read. The run log says why. A dispatch that names the issue,
+    and an inbox `/rerun`, are a writer's or the owner's own choice and do not run the check.
+- Not covered:
+  - `question` and `size: L` are still read as current labels, so a triage account that removes one
+    gets the issue picked.
+  - A fast-tracked issue (triage's Claude Security fast track) whose `agent:ready` a triage account
+    re-adds after the sweep blocked it can still be picked.
+  - A label renamed or deleted repo-wide leaves no event on the timeline, so it is not detected.
+  - The fixer still works a PR whose `agent:hold` a non-writer lifted, though the gate will not merge
+    it.
+- A triage account can still stop work by adding and removing `agent:hold`, or by closing and
+  reopening. A writer then re-adds and removes the label, or closes and reopens. The runbook
+  (`.github/agents/README.md`) says how.
+- Installed repositories need an update (`bash bin/render.sh <repo>`) to get the fix. Until then, the
+  agents there still act on a stop that a non-writer lifted.
+- Tests: the stub `gh` serves a paginated array as two pages and runs `--jq` on each, as gh does.
+
 ## 0.8.2 (2026-11-15)
 
 - Dashboard: merged issues can be closed from the page. Needs you → To close (open issues labelled

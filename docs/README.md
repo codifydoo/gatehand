@@ -159,12 +159,18 @@ git fetch origin main && git push origin origin/main:agent-runner
   `Expected`), not `size: L`, `agent:hold` or `question`, fewer than `maxAttemptsPerIssue` attempts,
   and no merged PR that already names it.
 - **Start a run now:** `gh workflow run agent-coder.yml --ref agent-runner [-f issue=<n>]`.
-- **Keep an issue away from the agents:** `agent:hold`.
+- **Keep an issue or an agent PR away from the agents:** `agent:hold`. If someone without write access
+  removes it, the coder's auto-pick skips the issue and the merge gate does not merge the PR until a
+  writer adds it back and removes it again (a repo-wide rename or deletion of the label is not
+  detected, and the fixer still works a PR whose hold a non-writer lifted). Closing the issue or PR
+  stops it too, and a reopen by anyone without write access does not count. A writer's Request
+  changes or converting the PR to a draft also stop the merge, and only a writer lifts those.
 - **Allow protected paths for one issue:** a writer adds `agent:allow-protected` to the issue.
 - **Auto-merge:** `gh variable set AGENT_AUTO_MERGE --body true`. The gate merges an agent PR only
   when, on its current head: the agents are on and no breaker is tripped; it is the bot's, open, not
   a draft, mergeable, and carries none of `agent:hold`, `agent:blocked`, `agent:needs-human`,
-  `agent:fixing`, `agent:allow-protected`; every `requiredChecks` entry and `agent pr guard` passed;
+  `agent:fixing`, `agent:allow-protected`; the latest removal of `agent:hold`, reopen and addition of
+  `agent:pr` were each by the bot or a writer; every `requiredChecks` entry and `agent pr guard` passed;
   the newest review verdict (by `claude[bot]` or a writer) is Approve and newer than the head; no
   changed file is protected or in `humanPaths`; and the head contains the default branch's tip. The
   verdict is read twice, from the review's markdown and from GitHub's own render of it

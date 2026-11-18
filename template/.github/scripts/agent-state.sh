@@ -360,7 +360,7 @@ cmd_pick() {
     # names the issue still takes it.
     log_skips "${json}" "${max}"
     n=""
-    local cand merged
+    local cand merged stop
     while IFS= read -r cand; do
       [[ -n "${cand}" ]] || continue
       if ! merged="$(merged_prs_referencing "${cand}")"; then
@@ -371,8 +371,19 @@ cmd_pick() {
         agent_log "skip #${cand}: merged PR #$(paste -sd' ' - <<<"${merged}" | sed 's/ / #/g') already references it (dispatch it by name to take it anyway)"
         continue
       fi
-      if labeler_trusted "${cand}"; then n="${cand}"; break; fi
-      agent_log "skip #${cand}: agent:ready was applied by someone without write access"
+      if ! labeler_trusted "${cand}"; then
+        agent_log "skip #${cand}: agent:ready was applied by someone without write access"
+        continue
+      fi
+      # A writer's agent:hold, or close, stands until a writer lifts it: busy and the issue list read
+      # only the current labels and state.
+      stop="$(stop_blockers "${cand}" unlabeled reopened)"
+      if [[ -n "${stop}" ]]; then
+        agent_log "skip #${cand}: $(paste -sd';' - <<<"${stop}" | sed 's/;/; /g')"
+        continue
+      fi
+      n="${cand}"
+      break
     done < <(pick_ranked "${json}" "${max}")
     if [[ -z "${n}" ]]; then
       printf '::notice title=agent coder::no eligible agent:ready issue\n'
