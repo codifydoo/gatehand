@@ -8,7 +8,10 @@
 #   3. /approve on a `protected` request re-queues the issue WITH agent:allow-protected, on a
 #      `blocked` one without it, and dispatches the coder on the runner ref. An id the agent never
 #      issued, a request forged by another account, or one already answered (however long the inbox)
-#      does nothing; a failed dispatch is not recorded as answered.
+#      does nothing; a failed dispatch is not recorded as answered. An answered request's line is
+#      removed from the inbox checklist (with any `[x]` line an older version left), so the body,
+#      capped by GitHub, holds only open requests; answering again removes the line of a request
+#      that was answered but is still listed (a body edit that failed).
 #   4. /pause and /resume move the breaker on the ledger branch.
 #   5. The guard passes human PRs untouched and fails an agent PR on a protected path without
 #      permission, a missing `Refs #N`, or a closing keyword anywhere.
@@ -69,9 +72,9 @@ approve_case() { # approve_case <comments-json-array> [dispatch-rc] [command]
   stub_gh_reset_rules
   stub_gh_json 'api --paginate repos/o/r/issues/99/comments*' "$1"
   stub_gh_on 'issue view 7 --json labels *' $'agent:blocked\nagent:needs-human'
-  stub_gh_on 'issue view 99 --json body *' $'- [ ] REQ-20261105-ab12 · coder · #7 · blocked'
+  stub_gh_on 'issue view 99 --json body *' $'- [x] REQ-20261101-0000 · coder · #3 · old · approved\n- [ ] REQ-20261105-ab12 · coder · #7 · blocked\n- [ ] REQ-20261106-cd34 · fixer · #8 · other'
   stub_gh_on 'workflow run *' '' "${2:-0}"
-  ANSWERED=()
+  ANSWERED=() STALE=()
   COMMENT_AUTHOR=owner-login COMMENT_ID=1234 COMMENT_BODY="${3:-/approve REQ-20261105-ab12}" cmd_apply 2>/dev/null
 }
 reply() { stub_gh_last_body 'issue comment 99 *'; }
@@ -82,10 +85,11 @@ expect_call "approve protected: re-queued with one-shot permission" \
 expect_call "approve: the coder is dispatched on the RUNNER ref" "workflow run agent-coder.yml --ref agent-runner -f issue=7"
 if reply | grep -Fq '<!-- agent-answer:REQ-20261105-ab12 -->'; then t_pass "approve: the reply records the answer"; else t_fail "approve: the reply has no answer marker"; fi
 expect_call "approve: the command gets a thumbs-up" "api -X POST repos/o/r/issues/comments/1234/reactions -f content=+1"
-if stub_gh_last_body 'issue edit 99 *' | grep -Fq -- '- [x] REQ-20261105-ab12'; then
-  t_pass "approve: the inbox checklist line is ticked"
+checklist="$(stub_gh_last_body 'issue edit 99 *')"
+if [[ "${checklist}" == '- [ ] REQ-20261106-cd34 · fixer · #8 · other' ]]; then
+  t_pass "approve: the answered line and an old ticked one leave the inbox checklist; the other stays"
 else
-  t_fail "approve: the inbox checklist line was not ticked"
+  t_fail "approve: the inbox checklist is now '${checklist}'"
 fi
 
 approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker blocked)"))"
@@ -191,6 +195,11 @@ approve_case "$(jq -s . <(cj outsider "$(marker protected)"))"
 expect_no_call "a request comment forged by someone else is ignored" "workflow run"
 approve_case "$(jq -s . <(cj 'gatehand[bot]' "$(marker protected)") <(cj 'gatehand[bot]' '<!-- agent-answer:REQ-20261105-ab12 -->'))"
 expect_no_call "an already-answered request dispatches nothing" "workflow run"
+if [[ "$(stub_gh_last_body 'issue edit 99 *')" == '- [ ] REQ-20261106-cd34 · fixer · #8 · other' ]]; then
+  t_pass "an already-answered request's line still listed is removed"
+else
+  t_fail "an already-answered request's line stays listed"
+fi
 # 300 bot comments of padding after the answer: a `gh | grep -q` under pipefail would miss it.
 big="$(jq -cn --arg m "$(marker protected)" '[{user: {login: "gatehand[bot]"}, body: $m},
   {user: {login: "gatehand[bot]"}, body: "<!-- agent-answer:REQ-20261105-ab12 -->"}]
@@ -206,7 +215,7 @@ expect "the same id twice in one comment is applied once" "$(stub_gh_calls | gre
 # --- 4. pause / resume -----------------------------------------------------------------------------
 stub_gh_reset_calls
 stub_gh_reset_rules
-ANSWERED=()
+ANSWERED=() STALE=()
 COMMENT_AUTHOR=owner-login COMMENT_BODY='/pause coder' cmd_apply 2>/dev/null
 expect "/pause trips the breaker" \
   "$(git --git-dir="${TMP}/ledger.git" show agent-ledger:state/breaker.json | jq -r '.coder.tripped_at != null')" true

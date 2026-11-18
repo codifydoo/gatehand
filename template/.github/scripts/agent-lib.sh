@@ -566,24 +566,30 @@ EOF
   rm -f "${body}"
 }
 
-# inbox_add_line <issue> <line> / inbox_tick_line <issue> <REQ-id> <note>: keep the "Open requests"
+# inbox_add_line <issue> <line> / inbox_drop_line <issue> <REQ-id>: keep the "Open requests"
 # checklist in the inbox body current. Best effort by design: the request comments are the record and
 # this list is the at-a-glance view, so a lost update between two writers costs a stale line, not a
 # lost request. That is also why no concurrency group serialises the writers: a third queued job in
 # a group CANCELS the pending second one, which would lose a ledger row or a label change instead.
+# An answered request's line is removed, not ticked, so the body (capped at 65,536 characters by
+# GitHub) holds only what is open; the answer is in the bot's reply comment. Both writers also drop
+# any `- [x] REQ-` line, which earlier versions left behind when they ticked a line.
 inbox_add_line() {
-  local issue="$1" line="$2" body
+  local issue="$1" line="$2" body rc
   body="$(mktemp)"
   gh issue view "${issue}" --json body --jq '.body' >"${body}" || { rm -f "${body}"; return 1; }
   # The line goes through the environment, not `awk -v`, which decodes backslash escapes and would
   # turn a sanitised `\074!--` back into a live `<!--`.
   if grep -q '<!-- agent-inbox:open:end -->' "${body}"; then
-    L="${line}" awk '/<!-- agent-inbox:open:end -->/ { print ENVIRON["L"] } { print }' "${body}" >"${body}.new"
+    L="${line}" awk '/^- \[x\] REQ-/ { next }
+      /<!-- agent-inbox:open:end -->/ { print ENVIRON["L"] } { print }' "${body}" >"${body}.new"
   else
-    { cat "${body}"; printf '\n%s\n' "${line}"; } >"${body}.new"
+    { grep -v '^- \[x\] REQ-' "${body}"; printf '\n%s\n' "${line}"; } >"${body}.new"
   fi
   gh issue edit "${issue}" --body-file "${body}.new" >/dev/null
+  rc=$?
   rm -f "${body}" "${body}.new"
+  return "${rc}"
 }
 
 # inbox_request <kind> <role> <issue> <one-line summary> <body-file>: post one request on the inbox
@@ -615,15 +621,16 @@ inbox_request() {
   printf '%s\n' "${req}"
 }
 
-inbox_tick_line() {
-  local issue="$1" req="$2" note="$3" body
+inbox_drop_line() {
+  local issue="$1" req="$2" body rc
   body="$(mktemp)"
   gh issue view "${issue}" --json body --jq '.body' >"${body}" || { rm -f "${body}"; return 1; }
-  R="${req}" N="${note}" awk '
-    index($0, "- [ ] " ENVIRON["R"] " ") == 1 { sub(/^- \[ \] /, "- [x] "); $0 = $0 " · " ENVIRON["N"] }
+  R="${req}" awk 'index($0, "- [ ] " ENVIRON["R"] " ") == 1 || /^- \[x\] REQ-/ { next }
     { print }' "${body}" >"${body}.new"
   gh issue edit "${issue}" --body-file "${body}.new" >/dev/null
+  rc=$?
   rm -f "${body}" "${body}.new"
+  return "${rc}"
 }
 
 # --- infrastructure failures: runs that never reached the model ---------------------------------------
