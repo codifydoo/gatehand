@@ -25,8 +25,8 @@ jobs:
           - name: self-hosted runners
             policy_jq: '.runners.agent = ["self-hosted", "x-agent"] | .runners.ci = ["self-hosted", "x-ci"]'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.24"
           cache: false
