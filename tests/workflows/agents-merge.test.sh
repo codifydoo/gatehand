@@ -4,6 +4,11 @@
 # starting from an all-green PR and breaking exactly that one thing, so each assertion can fail:
 #   - kill switch, a tripped breaker, AGENT_AUTO_MERGE unset (dry run: reported, never merged);
 #   - the PR itself: author, agent:pr, draft, fork, base, mergeable, and each blocking label;
+#   - a writer's stop stands until a writer or the bot lifts it: the LATEST removal of agent:hold,
+#     reopen and addition of agent:pr on the timeline (read once) must each be by the bot or a writer;
+#     a non-writer's, a deleted account's (no actor, or `ghost`), an unreadable timeline or an
+#     unreadable permission waits, and is never updated past or re-reviewed; the stub serves a
+#     paginated array as two pages, so the latest is pinned across a page break;
 #   - each required check, and `agent pr guard`, must be `success` in its LATEST run on the head;
 #   - the newest trusted review must say Approve, be newer than the head's push, have been written by
 #     a review job that started after it, and no review may still be running;
@@ -69,9 +74,15 @@ checks() { # every required check and the guard, success; CHECK_OVERRIDE="<name>
   printf '%s\n' "${rows[@]}" | jq -s '{check_runs: .}'
 }
 REVIEW_OK=$'<!-- verify-pr-review -->\n\n### Blocking problems\nNone.\n\n### Verdict\nApprove'
+# A timeline event: tl_event <event> <label or ""> <actor or "" for a deleted account>.
+tl_event() { jq -cn --arg e "$1" --arg l "$2" --arg a "$3" '{event: $e, actor: (if $a == "" then null else {login: $a} end)}
+  + (if $l == "" then {} else {label: {name: $l}} end)'; }
+# What the outbox leaves: the bot adds agent:pr when it opens the PR.
+TIMELINE_CREATED="[$(tl_event labeled agent:pr 'gatehand[bot]')]"
 # stub_pr <pr> <head>: everything about one PR: the PR, its comments (the review, then BOT_COMMENTS:
 # a JSON array of the agent bot's bodies, all posted at BOT_AT), its files, how far its head is behind main (BEHIND), the
-# head's first parent (PARENT), and the branch update (UPDATE_RC/UPDATE_ERR).
+# head's first parent (PARENT), the branch update (UPDATE_RC/UPDATE_ERR), and its timeline (TIMELINE,
+# a JSON array; TIMELINE_FAIL makes it unreadable).
 stub_pr() {
   local pr="$1" head="$2" cid=$(($1 * 10))
   stub_gh_on "pr view ${pr} --json mergeCommit *" 'mmmmmmm'
@@ -89,6 +100,8 @@ stub_pr() {
   stub_gh_json "api repos/o/r/commits/${head} *" "$(jq -cn --arg h "${head}" --arg p "${PARENT:-pppppppppppppppppppppppppppppppppppppppp}" \
     '{sha: $h, parents: ([{sha: $p}] + (if env.ONE_PARENT == "1" then [] else [{sha: "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"}] end))}')"
   stub_gh_on "api -X PUT repos/o/r/pulls/${pr}/update-branch *" '' "${UPDATE_RC:-0}" "${UPDATE_ERR:-}"
+  if [[ -n "${TIMELINE_FAIL:-}" ]]; then stub_gh_on "api --paginate repos/o/r/issues/${pr}/timeline*" '' 1 'gh: HTTP 502'; fi
+  stub_gh_json "api --paginate repos/o/r/issues/${pr}/timeline*" "${TIMELINE:-${TIMELINE_CREATED}}"
 }
 green() {
   stub_gh_reset_calls
@@ -211,6 +224,46 @@ for later in APPROVED DISMISSED; do
   ( export REVIEWS="[{\"author\":{\"login\":\"owner-login\"},\"state\":\"CHANGES_REQUESTED\",\"submittedAt\":\"2026-11-05T09:30:00Z\"},{\"author\":{\"login\":\"owner-login\"},\"state\":\"${later}\",\"submittedAt\":\"2026-11-05T09:45:00Z\"}]"; green )
   if merged; then t_pass "a Request changes the writer later ${later,,}: merged"; else t_fail "a ${later,,} Request changes still blocked: $(cat "${TMP}/run.out")"; fi
 done
+# A writer's stop stands until a writer or the bot lifts it: the latest lift of each kind decides, so
+# each fixture puts an earlier event by the other kind of actor first. `outsider` reads as triage/read
+# (no write access), `owner-login` as admin.
+BOT='gatehand[bot]'
+tl() { local IFS=,; printf '[%s]' "$*"; }
+lifted_by() { # lifted_by <event> <label> <earlier actor> <latest actor>: the timeline, created by the bot
+  tl "$(tl_event labeled agent:pr "${BOT}")" "$(tl_event "$1" "$2" "$3")" "$(tl_event "$1" "$2" "$4")"
+}
+HOLD_LIFT='agent:hold was removed by outsider, who has no write access: a writer re-adds and removes it to lift the stop'
+REOPEN_LIFT='it was reopened by outsider, who has no write access: a writer closes and reopens it to lift the stop'
+PR_LIFT='agent:pr was added by outsider, who has no write access: a writer removes and re-adds it to lift the stop'
+not_merged "agent:hold last removed by a triage account" "${HOLD_LIFT}" TIMELINE="$(lifted_by unlabeled agent:hold owner-login outsider)"
+not_merged "the PR last reopened by a triage account" "${REOPEN_LIFT}" TIMELINE="$(lifted_by reopened '' owner-login outsider)"
+not_merged "agent:pr last re-added by a triage account" "${PR_LIFT}" TIMELINE="$(lifted_by labeled agent:pr owner-login outsider)"
+not_merged "agent:hold removed by a deleted account" "agent:hold was removed by a deleted account, which has no write access" \
+  TIMELINE="$(tl "$(tl_event labeled agent:pr "${BOT}")" "$(tl_event unlabeled agent:hold '')")"
+not_merged "an unreadable timeline" "timeline unreadable" TIMELINE_FAIL=1
+# gh runs --jq once per page, and the stub serves this four-event timeline as two: a writer's lift on
+# the first page must not hide a triage account's on the second.
+not_merged "a triage lift on the timeline's second page" "${HOLD_LIFT}" TIMELINE="$(tl "$(tl_event labeled agent:pr "${BOT}")" \
+  "$(tl_event unlabeled agent:hold owner-login)" "$(tl_event labeled agent:hold owner-login)" "$(tl_event unlabeled agent:hold outsider)")"
+# GitHub shows a deleted account as `ghost`, whose permission reads as `read` (checked 2026-11-18).
+not_merged "agent:hold removed by ghost" "agent:hold was removed by ghost, who has no write access" \
+  TIMELINE="$(lifted_by unlabeled agent:hold owner-login ghost)"
+not_merged "a lift whose actor's access cannot be read" "agent:hold was removed by owner-login, and whether they have write access could not be read" \
+  PERM_FAIL=1 TIMELINE="$(lifted_by unlabeled agent:hold outsider owner-login)"
+for ev in "unlabeled agent:hold" "reopened " "labeled agent:pr"; do
+  read -r e l <<<"${ev}"
+  ( export TIMELINE="$(lifted_by "${e}" "${l}" outsider owner-login)"; green )
+  if merged; then t_pass "${e}${l:+ ${l}} last done by a writer (after a triage account): merged"; else t_fail "a writer's ${e}${l:+ ${l}} did not merge: $(cat "${TMP}/run.out")"; fi
+done
+( export TIMELINE="$(lifted_by labeled agent:pr outsider "${BOT}")"; green )
+if merged; then t_pass "agent:pr last added by the agent bot: merged"; else t_fail "the bot's own agent:pr did not merge: $(cat "${TMP}/run.out")"; fi
+# Other events by a non-writer are none of the gate's business.
+( export TIMELINE="$(tl "$(tl_event labeled agent:pr "${BOT}")" "$(tl_event labeled agent:hold owner-login)" "$(tl_event unlabeled agent:hold owner-login)" \
+  "$(tl_event labeled bug outsider)" "$(tl_event unlabeled bug outsider)" "$(tl_event renamed '' outsider)")"; green )
+if merged; then t_pass "unrelated label events by a triage account, a writer's hold lifted by that writer: merged"; else t_fail "unrelated events blocked the merge: $(cat "${TMP}/run.out")"; fi
+( export TIMELINE='[]'; green )
+if merged; then t_pass "a PR never held, closed or relabelled: merged"; else t_fail "an empty timeline did not merge: $(cat "${TMP}/run.out")"; fi
+expect "the timeline is read once" "$(stub_gh_calls | grep -c '^api --paginate repos/o/r/issues/44/timeline')" 1
 # A force-push back to this head after the review: the review saw another head.
 not_merged "a force-push back to the head after the review" "is not newer than the head (2026-11-05T10:40:00Z)" FORCED_AT=2026-11-05T10:40:00Z
 # The review bot never edits its review; another PR's review job could have.
@@ -283,6 +336,8 @@ behind_and "a Request changes review" REVIEW_BODY=$'<!-- verify-pr-review -->\n\
 behind_and "a protected path" FILES=cli/x.go,deploy/Makefile
 behind_and "a mergeable GitHub has not computed yet" MERGEABLE=UNKNOWN
 behind_and "the kill switch" ENABLED=false
+behind_and "agent:hold lifted by a triage account" TIMELINE="$(lifted_by unlabeled agent:hold owner-login outsider)"
+behind_and "an unreadable timeline" TIMELINE_FAIL=1
 # A conflict with main is part of being behind: the update is what tells.
 ( export BEHIND=2 MERGEABLE=CONFLICTING; green )
 label="behind and CONFLICTING: the update is tried"; check called "${UPDATE}"
@@ -392,6 +447,10 @@ label="never while a check is red"; check_not called "${REVIEW_CALL}"
 label="nor while one is still running"; check_not called "${REVIEW_CALL}"
 ( export LABELS=agent:pr,agent:fixing; after_update )
 label="nor while the fixer has it"; check_not called "${REVIEW_CALL}"
+( export TIMELINE="$(lifted_by reopened '' owner-login outsider)"; after_update )
+label="nor on a PR a triage account reopened"; check_not called "${REVIEW_CALL}"
+( export TIMELINE_FAIL=1; after_update )
+label="nor while the timeline is unreadable"; check_not called "${REVIEW_CALL}"
 ( export BOT_COMMENTS='[]'; after_update )
 label="a head a person pushed (no update of the gate's under it) waits for that person"; check_not called "${REVIEW_CALL}"
 ( export PARENT=ffffffffffffffffffffffffffffffffffffffff; after_update )

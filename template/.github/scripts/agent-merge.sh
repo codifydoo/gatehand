@@ -6,6 +6,8 @@
 #   - the PR is open, not a draft, the agent bot's, labelled agent:pr, against main, from this
 #     repository, mergeable, and carries none of agent:hold, agent:blocked, agent:needs-human,
 #     agent:fixing or agent:allow-protected (that last one means a person merges it);
+#   - the latest removal of agent:hold, reopen, and addition of agent:pr on the PR's timeline were
+#     each by the agent bot or a person with write access: a writer's stop stands until one lifts it;
 #   - every policy.requiredChecks check run, and `agent pr guard`, is `success` on the head SHA,
 #     from GitHub Actions, in its latest run (the commit's check runs, not a PR summary);
 #   - the newest Claude review (a `<!-- verify-pr-review -->` comment by the review bot or a person
@@ -221,6 +223,7 @@ gate_one() {
   json="$(gh pr view "${pr}" --json "${MERGE_PR_FIELDS}")" || { echo "wait: #${pr} unreadable"; return 0; }
   sha="$(jq -r .headRefOid <<<"${json}")"
   blockers="$(pr_blockers "${json}")"
+  blockers+=$'\n'"$(stop_blockers "${pr}")"
   blockers+=$'\n'"$(person_review_blockers "${json}")"
   [[ "${AGENTS_ENABLED:-}" == true ]] || blockers+=$'\nAGENTS_ENABLED is not true'
   blockers+=$'\n'"$(breaker_blockers)"

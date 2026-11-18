@@ -396,6 +396,58 @@ pr_allow_protected() {
   is_agent_bot "$(tail -1 <<<"${who}")"
 }
 
+# stop_lifts <issue-or-pr>: from ONE read of its timeline, who last removed agent:hold, last
+# reopened it and last added agent:pr, as `unlabeled|<login>`, `reopened|<login>` and
+# `labeled|<login>` lines, only for what happened (an empty login: an event with no actor). The
+# latest is taken here, not in jq: gh runs --jq once per page. Exit 1 when the timeline cannot be
+# read. A label renamed or deleted repo-wide leaves no `unlabeled` event, so that is not seen.
+stop_lifts() {
+  local events kind
+  events="$(gh api --paginate "repos/${GH_REPO}/issues/$1/timeline?per_page=100" \
+    --jq '.[] | select((.event == "unlabeled" and .label.name == "agent:hold") or .event == "reopened"
+      or (.event == "labeled" and .label.name == "agent:pr")) | "\(.event)|\(.actor.login // "")"')" || return 1
+  for kind in unlabeled reopened labeled; do
+    grep "^${kind}|" <<<"${events}" | tail -1
+  done
+  return 0
+}
+
+# stop_blockers <issue-or-pr> [kind...]: a writer's stop stands until a writer or the agent bot lifts
+# it (the triage role can remove labels and reopen, but sits below the write-access line). Of
+# stop_lifts' events (the kinds named: unlabeled, reopened, labeled; all three by default), the
+# latest of each must be by someone actor_trusted says yes to; one line per one that is not, and
+# `timeline unreadable` when it cannot be read. No such event is no blocker, so the bot's own agent:pr
+# at a PR's creation passes. An event with no actor is untrusted; GitHub's `ghost` (a deleted
+# account) has no write access, so actor_trusted says no to it. The merge gate asks for all three
+# on a PR; the coder's pick asks for `unlabeled` and `reopened` on an issue, or a triage account
+# could lift a writer's hold, or reopen an issue a writer closed, and the PR that follows would carry
+# no lift of its own. A kind it does not know is a blocker, so a typo never reads as "no stop".
+stop_blockers() {
+  local n="$1" lifts kind who t what fix
+  shift
+  for kind in "$@"; do
+    case "${kind}" in unlabeled | reopened | labeled) ;; *) echo "stop_blockers: unknown kind '${kind}'"; return 0 ;; esac
+  done
+  lifts="$(stop_lifts "${n}")" || { echo "timeline unreadable"; return 0; }
+  while IFS='|' read -r kind who; do
+    [[ -n "${kind}" ]] || continue
+    [[ $# -eq 0 ]] || [[ " $* " == *" ${kind} "* ]] || continue
+    case "${kind}" in
+      unlabeled) what="agent:hold was removed by" fix="a writer re-adds and removes it to lift the stop" ;;
+      reopened) what="it was reopened by" fix="a writer closes and reopens it to lift the stop" ;;
+      labeled) what="agent:pr was added by" fix="a writer removes and re-adds it to lift the stop" ;;
+    esac
+    if [[ -z "${who}" ]]; then echo "${what} a deleted account, which has no write access: ${fix}"; continue; fi
+    actor_trusted "${who}" </dev/null
+    t=$?
+    case "${t}" in
+      0) ;;
+      2) echo "${what} ${who}, and whether they have write access could not be read" ;;
+      *) echo "${what} ${who}, who has no write access: ${fix}" ;;
+    esac
+  done <<<"${lifts}"
+}
+
 # label_applier <issue-or-pr> <label>: who applied <label> most recently, from the timeline.
 label_applier() {
   gh api --paginate "repos/${GH_REPO}/issues/$1/timeline?per_page=100" \
