@@ -338,7 +338,7 @@ ask_person_update() {
     req="$(new_req_id)"
     sed "s/REQ-ID/${req}/g" "${body}.req" >"${body}"
     rm -f "${body}.req"
-    if ! AGENT_REQ_ID="${req}" AGENT_INBOX_ISSUE="${inbox}" inbox_request merger merger "${issue:-0}" "#${pr}: cannot be brought up to date with ${base}" "${body}" >/dev/null; then
+    if ! AGENT_REQ_ID="${req}" AGENT_INBOX_RESOLVED="${inbox}" inbox_request merger merger "${issue:-0}" "#${pr}: cannot be brought up to date with ${base}" "${body}" >/dev/null; then
       rm -f "${body}"
       echo "#${pr}: cannot be brought up to date (${why}), and the inbox request failed; the next run asks again"
       return 1

@@ -582,6 +582,8 @@ EOF
 
 inbox_issue() {
   local num limit count new
+  # AGENT_INBOX_RESOLVED: a number this job's own inbox_issue already returned (and checked).
+  if [[ -n "${AGENT_INBOX_RESOLVED:-}" ]]; then printf '%s\n' "${AGENT_INBOX_RESOLVED}"; return 0; fi
   num="$(inbox_find)" || return 1
   if [[ -z "${num}" ]]; then inbox_create; return; fi
   # GitHub refuses every new comment on an issue past about 2,500 (undocumented; HTTP 403 "Commenting
@@ -608,23 +610,27 @@ inbox_bot_bodies() {
     --jq ".[] | select(.user.login == \"$(policy '.botLogin')\") | .body | @json"
 }
 
-# inbox_rotate <old> <comments>: replace the inbox <old> with a new one and print the new number.
+# inbox_rotate <old> <comments>: replace the inbox <old> with a new one; prints the inbox to use, which
+# is <old> itself until the move is complete.
 #   1. The new inbox is the lowest open inbox above <old>, opened here when there is none. Two jobs
 #      may rotate at once: issue numbers follow creation order, so every job settles on the lowest
 #      new one, and any other the bot opened above it is closed.
-#   2. Every open request listed on <old> is posted again on the new inbox, its comment copied whole
-#      (the marker line first, under the SAME id), and listed there; agent-inbox.sh only looks for a
-#      request on the issue the command is posted on. Only the bot's own request comment is copied;
-#      a request answered on <old>, or already on the new inbox, is skipped, so a rerun after a
-#      partial failure copies only what is missing.
-#   3. Once every request is across, one comment on <old> links the new inbox and carries an
-#      agent-answer marker per moved request, so a command posted on <old> (agent-inbox.yml still
-#      accepts it, closed or not) cannot apply a moved request a second time; then <old> is closed.
-#      Until then <old> stays open, so inbox_find keeps returning it and the next request retries.
-# The App cannot pin issues: the closing comment asks the owner to pin the new one.
+#   2. Every open request listed on <old> is posted again on the new inbox, its comment copied (the
+#      marker line first, under the SAME id); agent-inbox.sh only looks for a request on the issue the
+#      command is posted on. Only the bot's own request comment is copied, and a rerun after a partial
+#      failure copies only what is missing.
+#   3. One notice on <old> links the new inbox and carries an agent-answer marker per moved request, so
+#      a command posted on <old> (agent-inbox.yml still accepts it, closed or not) cannot apply a moved
+#      request a second time. Then the moved requests are listed on the new inbox and <old> is closed.
+# Until the notice is posted, <old> stays the inbox (open, and returned here), so nobody is pointed at
+# a copy and the next request retries. A request answered on either side before then counts as
+# answered on both: one answered on <old> gets an answer marker on its copy, and one answered on its
+# copy is in the notice and not listed. The notice's own markers are not answers. The App cannot pin
+# issues: the notice asks the owner to pin the new one.
 inbox_rotate() {
-  local old="$1" count="$2" bot list target n who old_body old_c new_c new_body line req c note lines="" incomplete=0
-  local carried=()
+  local old="$1" count="$2" bot list target n who old_body old_c new_c new_body line req c note
+  local lines="" incomplete=0 moved_mark answers='<!-- agent-answer:'
+  local carried=() settled=()
   bot="$(policy '.botLogin')"
   list="$(inbox_list)" || return 1
   target="$(awk -v o="${old}" '$1 + 0 > o + 0 { print $1; exit }' <<<"${list}")"
@@ -644,25 +650,37 @@ inbox_rotate() {
 
   if ! old_body="$(gh issue view "${old}" --json body --jq '.body')" || ! old_c="$(inbox_bot_bodies "${old}")" \
     || ! new_c="$(inbox_bot_bodies "${target}")"; then
-    agent_log "inbox: could not read #${old} or #${target}; #${old} stays open and the next request retries"
-    printf '%s\n' "${target}"
+    agent_log "inbox: could not read #${old} or #${target}; #${old} stays the inbox and the next request retries"
+    printf '%s\n' "${old}"
     return 0
   fi
+  moved_mark="<!-- agent-inbox-moved to=${target} -->"
+  # answered_on <bodies> <REQ-id>: an answer marker outside a move notice.
+  answered_on() {
+    jq -se --arg m "${answers}$2 -->" --arg n '<!-- agent-inbox-moved ' \
+      'any(.[]; (startswith($n) | not) and contains($m))' <<<"$1" >/dev/null
+  }
   new_body="$(gh issue view "${target}" --json body --jq '.body')" || new_body=""
   while IFS= read -r line; do
     line="${line%$'\r'}"
     req="${line#- \[ \] }"
     req="${req%% *}"
     [[ "${req}" == REQ-* ]] || continue
-    jq -se --arg m "<!-- agent-answer:${req} -->" 'any(.[]; contains($m))' <<<"${old_c}" >/dev/null && continue
-    if ! jq -se --arg m "<!-- agent-req:${req} " 'any(.[]; startswith($m))' <<<"${new_c}" >/dev/null; then
+    if jq -se --arg m "<!-- agent-req:${req} " 'any(.[]; startswith($m))' <<<"${new_c}" >/dev/null; then
+      if answered_on "${old_c}" "${req}"; then
+        answered_on "${new_c}" "${req}" || settled+=("${req}")
+        continue
+      fi
+    else
+      answered_on "${old_c}" "${req}" && continue
       c="$(jq -sr --arg m "<!-- agent-req:${req} " 'map(select(startswith($m))) | .[0] // empty' <<<"${old_c}")"
       if [[ -z "${c}" ]]; then
         agent_log "inbox: ${req} is listed on #${old}, but no request comment of the bot's carries it; not moved"
         continue
       fi
       note="$(mktemp)"
-      printf '%s\n\n_Moved from #%s, the previous inbox._\n' "${c}" "${old}" >"${note}"
+      # Capped, so a request near GitHub's 65,536-character limit still fits with the note.
+      { printf '%s' "${c}" | agent_cap 60000; printf '\n\n_Moved from #%s, the previous inbox._\n' "${old}"; } >"${note}"
       if ! gh issue comment "${target}" --body-file "${note}" >/dev/null; then
         agent_log "inbox: could not move ${req} to #${target}"
         incomplete=1
@@ -672,35 +690,51 @@ inbox_rotate() {
       rm -f "${note}"
     fi
     carried+=("${req}")
+    answered_on "${new_c}" "${req}" && continue
     grep -Fq -- "- [ ] ${req} " <<<"${new_body}" || lines+="${line}"$'\n'
   done < <(grep -E '^- \[ \] REQ-' <<<"${old_body}")
-  if [[ -n "${lines}" ]]; then
-    inbox_add_line "${target}" "${lines%$'\n'}" || agent_log "inbox: the moved requests are posted on #${target}, but its checklist was not updated"
+  if [[ "${#settled[@]}" -gt 0 ]]; then
+    note="$(mktemp)"
+    printf 'Answered on #%s before the move:' "${old}" >"${note}"
+    # shellcheck disable=SC2016 # literal markdown backticks
+    printf ' `%s`' "${settled[@]}" >>"${note}"
+    printf '\n' >>"${note}"
+    for req in "${settled[@]}"; do printf '%s%s -->\n' "${answers}" "${req}" >>"${note}"; done
+    gh issue comment "${target}" --body-file "${note}" >/dev/null || { agent_log "inbox: could not mark the requests answered on #${old} answered on #${target}"; incomplete=1; }
+    rm -f "${note}"
   fi
   if [[ "${incomplete}" == 1 ]]; then
-    agent_log "inbox: not every open request reached #${target}; #${old} stays open and the next request retries"
-    printf '%s\n' "${target}"
+    agent_log "inbox: not every open request reached #${target}; #${old} stays the inbox and the next request retries"
+    printf '%s\n' "${old}"
     return 0
   fi
 
-  if ! jq -se --arg m "<!-- agent-inbox-moved to=${target} -->" 'any(.[]; startswith($m))' <<<"${old_c}" >/dev/null; then
+  if ! jq -se --arg m "${moved_mark}" 'any(.[]; startswith($m))' <<<"${old_c}" >/dev/null; then
     note="$(mktemp)"
     {
-      printf '<!-- agent-inbox-moved to=%s -->\n' "${target}"
+      printf '%s\n' "${moved_mark}"
       printf 'This inbox has %s comments, and GitHub refuses new comments on an issue past about 2,500, so the agents now use #%s. **Pin #%s by hand** and unpin this one: the agents cannot pin issues.\n\n' \
         "${count}" "${target}" "${target}"
       if [[ "${#carried[@]}" -gt 0 ]]; then
         printf 'Open requests moved to #%s, to be answered there:' "${target}"
         # shellcheck disable=SC2016 # literal markdown backticks
         printf ' `%s`' "${carried[@]}"
-        printf '. A command for one of them posted here does nothing.\n'
+        printf '. A command for one of them posted here is refused as already answered.\n'
       else
         printf 'No open requests were moved.\n'
       fi
-      for req in "${carried[@]}"; do printf '<!-- agent-answer:%s -->\n' "${req}"; done
+      for req in "${carried[@]}"; do printf '%s%s -->\n' "${answers}" "${req}"; done
     } >"${note}"
-    gh issue comment "${old}" --body-file "${note}" >/dev/null || agent_log "inbox: could not post the move notice on #${old}"
+    if ! gh issue comment "${old}" --body-file "${note}" >/dev/null; then
+      agent_log "inbox: could not post the move notice on #${old}; it stays the inbox and the next request retries"
+      rm -f "${note}"
+      printf '%s\n' "${old}"
+      return 0
+    fi
     rm -f "${note}"
+  fi
+  if [[ -n "${lines}" ]]; then
+    inbox_add_line "${target}" "${lines%$'\n'}" || agent_log "inbox: the moved requests are posted on #${target}, but its checklist was not updated"
   fi
   gh issue close "${old}" >/dev/null || agent_log "inbox: could not close #${old}"
   agent_log "inbox: #${old} has ${count} comments; the inbox is now #${target} (pin it by hand)"

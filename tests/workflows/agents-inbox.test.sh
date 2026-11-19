@@ -22,8 +22,11 @@
 #      inbox, or forged by someone else, is not) and listed, the old one gets one notice that asks for
 #      the new one to be pinned and marks the moved ids answered there, and is closed. A command for a
 #      moved request on the old inbox then does nothing. Two jobs rotating at once settle on the
-#      lowest new inbox and close the bot's spare; a rerun posts nothing twice; a failed copy leaves the
-#      old inbox open for a retry; AGENT_INBOX_ISSUE pins the inbox and only warns.
+#      lowest new inbox and close the bot's spare; a rerun posts nothing twice, and the notice's own
+#      markers do not count as answers. Until the notice is posted the old inbox stays the inbox (a
+#      failed copy or notice leaves it open and in use, for a retry), and a request answered on either
+#      side meanwhile counts as answered on both, so it cannot be applied twice. AGENT_INBOX_ISSUE pins
+#      the inbox and only warns; AGENT_INBOX_RESOLVED (a caller's own earlier lookup) is used as is.
 # ANSWERED is reset here and read by the sourced cmd_apply.
 # shellcheck disable=SC2034
 set -uo pipefail
@@ -248,9 +251,9 @@ rotate_case() { # rotate_case <comment-count> [extra rule setup…]; prints what
   stub_gh_reset_rules
   "$@"
   stub_gh_on 'api repos/o/r/issues/99 --jq .comments' "${COUNT}"
-  STUB_AFTER='issue create *' stub_gh_json 'issue list --state open --limit 300 *' "$(il 99:app/gatehand 120:app/gatehand)"
+  STUB_AFTER='issue create *' stub_gh_json 'issue list --state open --limit 300 *' "${AFTER_LIST:-$(il 99:app/gatehand 120:app/gatehand)}"
   stub_gh_json 'issue list --state open --limit 300 *' "${LIST:-$(il 99:app/gatehand)}"
-  stub_gh_on 'issue create *' 'https://github.com/o/r/issues/120'
+  stub_gh_on 'issue create *' "https://github.com/o/r/issues/${CREATED:-120}"
   stub_gh_on 'issue view 99 --json body *' "${OLD_BODY}"
   stub_gh_on 'issue view 120 --json body *' $'<!-- agent-inbox -->\n<!-- agent-inbox:open:start -->\n<!-- agent-inbox:open:end -->'
   stub_gh_json 'api --paginate repos/o/r/issues/99/comments*' "${OLD_C:-${OLD_COMMENTS}}"
@@ -269,6 +272,8 @@ expect "rotation: a threshold of 0 turns it off" "$(AGENT_POLICY="${TMP}/policy0
 expect "rotation: AGENT_INBOX_ISSUE pins the inbox" "$(AGENT_INBOX_ISSUE=99 rotate_case)" 99
 expect_no_call "rotation: a pinned inbox is never replaced" "issue create"
 if grep -q 'WARNING: inbox #99 has 2000 comments .*AGENT_INBOX_ISSUE pins it' "${TMP}/rotate.log"; then t_pass "rotation: a pinned inbox over the threshold warns"; else t_fail "rotation: no warning: $(cat "${TMP}/rotate.log")"; fi
+expect "rotation: a caller's resolved inbox is used as is" "$(AGENT_INBOX_RESOLVED=99 rotate_case)" 99
+expect_no_call "rotation: ... without a second count or a warning" "api repos/o/r/issues/99 --jq .comments"
 
 expect "rotation: at the threshold the new inbox is used" "$(rotate_case)" 120
 created="$(stub_gh_last_body 'issue create *')"
@@ -294,25 +299,49 @@ expect_no_call "rotation: approving a moved request on the old inbox dispatches 
 if reply | grep -Fq "\`${RA}\`: already answered"; then t_pass "rotation: ... and says it is answered"; else t_fail "rotation: reply '$(reply)'"; fi
 
 # Another job opened #120 first and this one opened #121: it settles on #120 and closes its own.
-LIST="$(il 99:app/gatehand 120:app/gatehand 121:app/gatehand 130:owner-login)"
-expect "rotation race: the lowest new inbox wins" "$(rotate_case)" 120
-expect_no_call "rotation race: no third inbox is opened" "issue create"
-expect_call "rotation race: the bot's spare inbox is closed" "issue close 121 --comment"
+expect "rotation race: the lowest new inbox wins" \
+  "$(CREATED=121 AFTER_LIST="$(il 99:app/gatehand 120:app/gatehand 121:app/gatehand 130:owner-login)" rotate_case)" 120
+expect_call "rotation race: its own inbox is closed as the spare" "issue close 121 --comment"
 expect_no_call "rotation race: an inbox the owner opened is left alone" "issue close 130"
-LIST=''
+expect "rotation race: the request goes to the winner" "$(stub_gh_calls | grep -c '^issue comment 120 ')" 1
+# A job that comes later finds both open and opens nothing.
+expect "rotation race: a later job uses the lowest new inbox" "$(LIST="$(il 99:app/gatehand 120:app/gatehand 121:app/gatehand)" rotate_case)" 120
+expect_no_call "rotation race: ... and opens no third one" "issue create"
 
-# A rerun after a partial one: the request and the notice are already there, so nothing is posted twice.
-NEW_C="$(jq -s . <(cj 'gatehand[bot]' "${REQ_A}"))" OLD_C="$(jq -c --argjson n "$(cj 'gatehand[bot]' '<!-- agent-inbox-moved to=120 -->')" '. + [$n]' <<<"${OLD_COMMENTS}")"
+# A rerun after a partial one: the request and the notice (whose markers are not answers) are already
+# there, so nothing is posted twice.
+NEW_C="$(jq -s . <(cj 'gatehand[bot]' "${REQ_A}"))"
+OLD_C="$(jq -c --argjson n "$(cj 'gatehand[bot]' "$(printf '<!-- agent-inbox-moved to=120 -->\nmoved\n<!-- agent-answer:%s -->' "${RA}")")" '. + [$n]' <<<"${OLD_COMMENTS}")"
 expect "rotation rerun: the new inbox" "$(LIST="$(il 99:app/gatehand 120:app/gatehand)" NEW_C="${NEW_C}" OLD_C="${OLD_C}" rotate_case)" 120
 expect_no_call "rotation rerun: nothing is posted again" "issue comment"
 expect_call "rotation rerun: the old inbox is still closed" "issue close 99"
 NEW_C='' OLD_C=''
 
-# Copying a request fails: the old inbox stays open, so the next request retries.
-expect "rotation, failed copy: the new inbox is used meanwhile" "$(rotate_case stub_gh_on 'issue comment 120 *' '' 1)" 120
+# Copying a request fails: the old inbox stays open and in use, so the next request retries.
+expect "rotation, failed copy: the old inbox stays the inbox" "$(rotate_case stub_gh_on 'issue comment 120 *' '' 1)" 99
 expect_no_call "rotation, failed copy: the old inbox stays open" "issue close 99"
 expect_no_call "rotation, failed copy: no notice on the old inbox" "issue comment 99"
-COUNT=''
+expect_no_call "rotation, failed copy: nothing is listed on the new one" "issue edit 120"
+# The notice fails: the same, so a command on the old inbox can never apply a request twice.
+expect "rotation, failed notice: the old inbox stays the inbox" "$(rotate_case stub_gh_on 'issue comment 99 *' '' 1)" 99
+expect_no_call "rotation, failed notice: the old inbox stays open" "issue close 99"
+expect_no_call "rotation, failed notice: nothing is listed on the new one" "issue edit 120"
+# Between a partial run and the retry, the request was answered on the old inbox: its copy is marked
+# answered on the new one, it is not moved or listed, and the rotation completes.
+NEW_C="$(jq -s . <(cj 'gatehand[bot]' "${REQ_A}"))"
+OLD_C="$(jq -c --argjson n "$(cj 'gatehand[bot]' "<!-- agent-answer:${RA} -->")" '. + [$n]' <<<"${OLD_COMMENTS}")"
+expect "rotation, answered on the old inbox meanwhile: the move completes" "$(NEW_C="${NEW_C}" OLD_C="${OLD_C}" rotate_case)" 120
+if stub_gh_last_body 'issue comment 120 *' | grep -Fxq "<!-- agent-answer:${RA} -->"; then t_pass "rotation, answered on the old inbox meanwhile: its copy is marked answered"; else t_fail "rotation: copy not marked: '$(stub_gh_last_body 'issue comment 120 *')'"; fi
+if stub_gh_last_body 'issue comment 99 *' | grep -Fq "${RA}"; then t_fail "rotation: the notice lists ${RA}"; else t_pass "rotation, answered on the old inbox meanwhile: the notice does not list it"; fi
+expect_no_call "rotation, answered on the old inbox meanwhile: it is not listed on the new one" "issue edit 120"
+# ... or answered on its copy: the notice marks it answered on the old inbox, and it is not listed.
+OLD_C=''
+NEW_C="$(jq -s . <(cj 'gatehand[bot]' "${REQ_A}") <(cj 'gatehand[bot]' "<!-- agent-answer:${RA} -->"))"
+expect "rotation, answered on the copy meanwhile: the move completes" "$(NEW_C="${NEW_C}" rotate_case)" 120
+if stub_gh_last_body 'issue comment 99 *' | grep -Fxq "<!-- agent-answer:${RA} -->"; then t_pass "rotation, answered on the copy meanwhile: the notice marks it answered"; else t_fail "rotation: notice '$(stub_gh_last_body 'issue comment 99 *')'"; fi
+expect_no_call "rotation, answered on the copy meanwhile: it is not listed again" "issue edit 120"
+expect_no_call "rotation, answered on the copy meanwhile: nothing is posted on the new inbox" "issue comment 120"
+NEW_C='' OLD_C='' COUNT=''
 
 # --- 5. the PR guard -------------------------------------------------------------------------------
 printf 'Body.\n\nRefs #7\n' >"${TMP}/body"

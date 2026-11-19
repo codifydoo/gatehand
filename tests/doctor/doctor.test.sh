@@ -31,7 +31,7 @@ gh() {
     "api repos/o/r/commits/"*"/pulls") [[ "${STUB_PULLS:-}" == fail ]] && return 1; printf '%s\n' "${STUB_PULLS:-[]}" ;;
     "api repos/o/r/actions/workflows/agent-sweep.yml/runs?event=schedule&per_page=1 "*) printf '%s\n' "${STUB_FIRED:-0}" ;;
     "variable list --repo o/r --json name,value") [[ -n "${STUB_PIN:-}" ]] || return 1
-      printf '[{"name":"AGENT_INBOX_ISSUE","value":"%s"}]\n' "${STUB_PIN}" ;;
+      printf '[{"name":"AGENT_INBOX_ISSUE","value":"%s"}]\n' "${STUB_PIN#none}" ;;
     "api repos/o/r/issues/${STUB_PIN:-x} --jq .comments") [[ "${STUB_COUNT:-}" == fail ]] && return 1; printf '%s\n' "${STUB_COUNT:-0}" ;;
     *) return 1 ;;
   esac
@@ -86,11 +86,14 @@ STUB_COUNT=2000
 pin_is "a pinned inbox at 2,000 comments warns" '^WARN +AGENT_INBOX_ISSUE pins inbox #7, which has 2000 comments'
 jq '.inboxRotateAt = 3000' "${TMP}/policy" >"${P}"
 pin_is "policy.inboxRotateAt moves the threshold" '^ok +AGENT_INBOX_ISSUE pins inbox #7'
+jq 'del(.inboxRotateAt)' "${TMP}/policy" >"${P}"
+pin_is "without inboxRotateAt in policy.json the threshold is 2,000" '^WARN +AGENT_INBOX_ISSUE pins inbox #7, which has 2000 comments \(inboxRotateAt is 2000\)'
 cp "${TMP}/policy" "${P}"
 STUB_COUNT=fail
 pin_is "an unreadable count warns" '^WARN +cannot read the comment count of the inbox AGENT_INBOX_ISSUE pins \(#7\)'
+STUB_PIN=none
+if [[ -z "$(pin_line)" ]]; then t_pass "a readable variable list without the pin: no inbox line"; else t_fail "no pin, no inbox line: got '$(pin_line)'"; fi
 STUB_PIN=""
-if [[ -z "$(pin_line)" ]]; then t_pass "no pin, no inbox line"; else t_fail "no pin, no inbox line: got '$(pin_line)'"; fi
 
 printf '\n[doctor] %d passed, %d failed\n' "${pass}" "${fail}"
 [[ "${fail}" -eq 0 ]]
