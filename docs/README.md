@@ -95,8 +95,10 @@ The model never shares a job with a write-capable token, and nothing it wrote is
 Residual risks you accept by running this:
 
 - **The model's own job.** A prompt-injected run controls its job and can read the Claude credential
-  from its environment. Use a capped API key (`claude.auth: "api-key"`) if that matters to you, and
-  on self-hosted runners an egress allowlist (`addons/hardened-runner`).
+  from its environment. If that matters to you, give the coder and fixer a capped key of their own
+  (`claude.agentAuth: "api-key"`, secret `ANTHROPIC_API_KEY_AGENTS`): losing it then costs neither the
+  review's credential nor your subscription. On self-hosted runners add an egress allowlist
+  (`addons/hardened-runner`).
 - **CI runs agent code.** An agent PR's code runs in your CI like any PR's, without a person reading
   it first. Keep secrets out of PR-triggered CI jobs, and on self-hosted runners keep the agent pool
   apart from the CI pool.
@@ -126,6 +128,7 @@ The install skill (`/gatehand:install`) walks through this; it is here for refer
    gh variable set AGENT_BOT_ID --body "$(gh api 'users/<slug>[bot]' --jq .id)"
    gh variable set AGENT_OWNER_LOGIN --body "<your GitHub login>"
    gh secret set CLAUDE_CODE_OAUTH_TOKEN   # from `claude setup-token`; or ANTHROPIC_API_KEY with claude.auth "api-key"
+   gh secret set ANTHROPIC_API_KEY_AGENTS  # only with claude.agentAuth "api-key": the coder's and fixer's own key
    ```
 
 4. **Labels and the runner ref:**

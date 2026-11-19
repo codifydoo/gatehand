@@ -56,7 +56,8 @@ bash <root>/bin/render.sh .
 That writes the package files and, once, the files that are the repo's own under `.github/agents/`.
 Then edit those to fit what you found:
 - `policy.json`: `botLogin`, `baseBranch`, `ci.workflowName`, `ci.workflowFile`, `requiredChecks`,
-  `runners`, `claude.auth`, and `tools.allow` with one `Bash(<command prefix>:*)` per check command
+  `runners`, `claude.auth` (and `claude.agentAuth: "api-key"` to give the coder and fixer their own
+  capped key), and `tools.allow` with one `Bash(<command prefix>:*)` per check command
   in `project.md` (for example `Bash(npm test:*)`, `Bash(go:*)`). Keep the defaults for the limits.
   If a check command matches a `tools.deny` entry or the built-in deny list (git push, gh, curl,
   docker, sudo…), it cannot be allowed: say so.
@@ -85,7 +86,8 @@ Give them these, in order, as commands where possible (the runbook's "Setup" has
    statuses, Metadata read; **no Workflows**. Install it on this repository only.
 2. Install the Claude GitHub App on the repository (https://github.com/apps/claude).
 3. Secrets and variables: `AGENT_APP_PRIVATE_KEY`, `AGENT_APP_CLIENT_ID`, `AGENT_BOT_ID`,
-   `AGENT_OWNER_LOGIN`, and `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`.
+   `AGENT_OWNER_LOGIN`, `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`, and
+   `ANTHROPIC_API_KEY_AGENTS` with `claude.agentAuth: "api-key"`.
 4. Actions defaults: read-only token, no PR approval by Actions.
 5. After the install PR merges: `bash .github/scripts/agent-labels.sh`, then
    `git push origin origin/<default>:refs/heads/agent-runner`.
