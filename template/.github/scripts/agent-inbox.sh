@@ -95,7 +95,7 @@ find_request() {
 # answered <REQ-id> <bot-comments>: exit 0 when an answer marker for it already exists here, also for
 # an id answered earlier in the SAME comment, which is not posted yet. For a request moved here from
 # earlier inboxes (agent-lib.sh inbox_rotate), exit 3 when it was answered on any of them, and 2 when
-# one of them cannot be read (a deleted one has no answer). Otherwise 1.
+# one of them cannot be read (a deleted one, 404 or 410, has no answer). Otherwise 1.
 declare -A INBOX_BODIES=()  # inbox number -> its bot comments, read once per command
 answered() {
   local e from err rc=1
@@ -105,7 +105,7 @@ answered() {
     if [[ -z "${INBOX_BODIES[${from}]+x}" ]]; then
       err="$(mktemp)"
       if e="$(inbox_bot_bodies "${from}" 2>"${err}")"; then INBOX_BODIES[${from}]="${e}"
-      elif grep -q 'HTTP 404' "${err}"; then INBOX_BODIES[${from}]=""
+      elif grep -qE 'HTTP (404|410)' "${err}"; then INBOX_BODIES[${from}]=""
       else rm -f "${err}"; rc=2; continue
       fi
       rm -f "${err}"
