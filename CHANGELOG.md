@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 (2026-11-19)
 
 - Inbox: the agents now replace the inbox issue before GitHub's per-issue comment limit stops it.
   GitHub refuses every new comment on an issue past about 2,500 (undocumented; "Commenting is
