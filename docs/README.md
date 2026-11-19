@@ -107,7 +107,8 @@ Residual risks you accept by running this:
   also needs green CI, the PR guard and no protected path, and it never merges a PR a writer let
   touch protected paths; set `AGENT_AUTO_MERGE` off if you want a person to merge every agent PR.
 - **Shared subscription.** With `claude.auth: "oauth"` the runs count against the same Claude
-  subscription as your interactive sessions; `runsPerDay` is the guard.
+  subscription as your interactive sessions (only the review's, once `claude.agentAuth` is
+  `"api-key"`); `runsPerDay` is the guard.
 
 ## Setup
 
@@ -245,7 +246,7 @@ the details.
 
 ## Changing the rules
 
-- **Numbers, models, schedules, runners, tools:** edit `policy.json`, then re-render
+- **Numbers, models, schedules, runners, tools, Claude auth:** edit `policy.json`, then re-render
   (`/gatehand:update`, or `bin/render.sh .` from a checkout of the package) and commit both.
 - **Your project's rules and checks:** `project.md`. The coder and fixer read it on every run. Every
   check command must also be in `policy.json` `tools.allow`, as `Bash(<prefix>:*)`.

@@ -41,6 +41,9 @@ Ask (AskUserQuestion), recommending defaults:
 - The owner login whose inbox commands count. Default: `gh api user --jq .login`.
 - Claude auth: `oauth` (a `claude setup-token` subscription token) or `api-key` (an Anthropic
   Console key, which can be spend-capped; recommended for teams).
+- The coder's and fixer's credential: the same as above (default), or their own spend-capped
+  Console key (`claude.agentAuth: "api-key"`, secret `ANTHROPIC_API_KEY_AGENTS`; recommended: the
+  code they write can read it, so a lost key then costs nothing else).
 - Runners: GitHub-hosted (default) or a self-hosted pool (then read
   `<root>/addons/hardened-runner/README.md` with them first).
 - Which CI checks must pass before an agent PR merges.

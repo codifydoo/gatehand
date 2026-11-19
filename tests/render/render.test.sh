@@ -87,6 +87,17 @@ for f in agent-coder.yml agent-fixup.yml; do
 done
 check "  while the review keeps claude.auth's token" grep -q 'claude_code_oauth_token: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}' "${WF}/claude-code-review.yml"
 check "  and never the agents' key" bash -c "! grep -q ANTHROPIC_API_KEY_AGENTS '${WF}/claude-code-review.yml'"
+check "  which no other workflow holds" \
+  test "$(grep -rc ANTHROPIC_API_KEY_AGENTS "${WF}" | grep -v ':0$' | sort | tr '\n' ' ')" \
+  == "${WF}/agent-coder.yml:1 ${WF}/agent-fixup.yml:1 "
+fresh
+"${R}" "${TMP}/r" >/dev/null
+pol '.claude.auth = "api-key" | .claude.agentAuth = "oauth"'
+"${R}" "${TMP}/r" >/dev/null
+for f in agent-coder.yml agent-fixup.yml; do
+  check "agentAuth oauth over auth api-key: ${f} reads the subscription token" grep -q 'claude_code_oauth_token: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}' "${WF}/${f}"
+done
+check "  while the review reads the API key" grep -q 'anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}' "${WF}/claude-code-review.yml"
 
 # --- 3 -----------------------------------------------------------------------------------------------
 fresh
