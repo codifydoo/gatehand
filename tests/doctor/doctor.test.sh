@@ -6,6 +6,8 @@
 #      (a merge commit keeps the feature branch's older date), else the commit's own date.
 #   2. Two hours with no scheduled run warns; under two hours, or any scheduled run, does not.
 #   3. A sweep schedule that is not hourly is not checked; an unreadable one, or a failing API, warns.
+#   4. With claude.agentAuth set apart from claude.auth, the agents' own secret is checked as well:
+#      a dedicated key the coder and fixer need but nobody set is a FAIL, not a silent outage.
 set -uo pipefail
 PKG="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 pass=0 fail=0
@@ -27,6 +29,7 @@ gh() {
       printf '%s\n' "${STUB_COMMITS:-}" ;;
     "api repos/o/r/commits/"*"/pulls") [[ "${STUB_PULLS:-}" == fail ]] && return 1; printf '%s\n' "${STUB_PULLS:-[]}" ;;
     "api repos/o/r/actions/workflows/agent-sweep.yml/runs?event=schedule&per_page=1 "*) printf '%s\n' "${STUB_FIRED:-0}" ;;
+    "secret list --repo o/r --json name --jq .[].name") printf '%s\n' ${STUB_SECRETS:-} ;;
     *) return 1 ;;
   esac
 }
@@ -65,6 +68,26 @@ case_is "a schedule that is not hourly is not checked" '^ok +the sweep.s schedul
 jq '.schedules.sweep = null' "${TMP}/policy" >"${P}"
 case_is "an unreadable sweep schedule warns" '^WARN +cannot read schedules.sweep'
 cp "${TMP}/policy" "${P}"
+
+# --- 4 ---------------------------------------------------------------------------------------------
+cred_lines() { bash "${PKG}/bin/doctor.sh" "${TMP}/r" 2>/dev/null | grep -E '^(ok|WARN|FAIL) +secret (CLAUDE|ANTHROPIC)'; }
+cred_is() {
+  local label="$1" want="$2" got
+  got="$(cred_lines | tr '\n' '|')"
+  if [[ "${got}" == "${want}" ]]; then t_pass "${label}"; else t_fail "${label}: got '${got}'"; fi
+}
+export STUB_SECRETS
+STUB_SECRETS="CLAUDE_CODE_OAUTH_TOKEN"
+cred_is "no agentAuth: one credential, checked once" 'ok    secret CLAUDE_CODE_OAUTH_TOKEN is set|'
+jq '.claude.agentAuth = "oauth"' "${TMP}/policy" >"${P}" && "${PKG}/bin/render.sh" "${TMP}/r" >/dev/null
+cred_is "agentAuth equal to auth: still checked once" 'ok    secret CLAUDE_CODE_OAUTH_TOKEN is set|'
+jq '.claude.agentAuth = "api-key"' "${TMP}/policy" >"${P}" && "${PKG}/bin/render.sh" "${TMP}/r" >/dev/null
+cred_is "agentAuth api-key without its secret fails" 'ok    secret CLAUDE_CODE_OAUTH_TOKEN is set|FAIL  secret ANTHROPIC_API_KEY_AGENTS is not set (policy.json claude.agentAuth)|'
+STUB_SECRETS="CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY_AGENTS"
+cred_is "...and passes once it is set" 'ok    secret CLAUDE_CODE_OAUTH_TOKEN is set|ok    secret ANTHROPIC_API_KEY_AGENTS is set|'
+STUB_SECRETS="ANTHROPIC_API_KEY_AGENTS"
+cred_is "...and the review's own credential is still required" 'FAIL  secret CLAUDE_CODE_OAUTH_TOKEN is not set (policy.json claude.auth)|ok    secret ANTHROPIC_API_KEY_AGENTS is set|'
+cp "${TMP}/policy" "${P}" && "${PKG}/bin/render.sh" "${TMP}/r" >/dev/null
 
 printf '\n[doctor] %d passed, %d failed\n' "${pass}" "${fail}"
 [[ "${fail}" -eq 0 ]]

@@ -155,6 +155,17 @@ case "$(p '.claude.auth // "oauth"')" in
   api-key) CLAUDE_AUTH='anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}' ;;
   *) die "policy.json: claude.auth must be oauth or api-key" ;;
 esac
+# The coder and fixer run code the model wrote, so that code can read their credential.
+# claude.agentAuth gives them their own: "api-key" reads ANTHROPIC_API_KEY_AGENTS, a secret no other
+# workflow uses, so a key lost from an agent job is not the review's or your subscription.
+# Unset, they use claude.auth's credential like the review.
+# shellcheck disable=SC2016
+case "$(p '.claude.agentAuth // ""')" in
+  "") CLAUDE_AGENT_AUTH="${CLAUDE_AUTH}" ;;
+  oauth) CLAUDE_AGENT_AUTH='claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}' ;;
+  api-key) CLAUDE_AGENT_AUTH='anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY_AGENTS }}' ;;
+  *) die "policy.json: claude.agentAuth must be oauth or api-key" ;;
+esac
 # The review workflow and /verify-pr emit this exact marker; the scripts look for policy.json's.
 # The RAW file, not the merged view: the scripts read policy.json itself at run time.
 [[ "$(jq -r .reviewMarker "${POLICY}")" == '<!-- verify-pr-review -->' ]] || die "policy.json: reviewMarker must be '<!-- verify-pr-review -->'"
@@ -187,7 +198,7 @@ AGENT_DISALLOWED_TOOLS="$(join_by , "${DENY[@]}")"
 : "${CI_FILE}" # validated only: the scripts read ci.workflowFile from policy.json themselves
 
 PLACEHOLDERS=(RUNS_ON_AGENT RUNS_ON_CI RUNS_ON_REVIEW BOT_SLUG REVIEW_BOT_LOGIN BASE_BRANCH CLAUDE_AUTH
-  CI_WORKFLOW_NAME CODER_MODEL CODER_MAX_TURNS CODER_TIMEOUT FIXER_MODEL FIXER_MAX_TURNS FIXER_TIMEOUT
+  CLAUDE_AGENT_AUTH   CI_WORKFLOW_NAME CODER_MODEL CODER_MAX_TURNS CODER_TIMEOUT FIXER_MODEL FIXER_MAX_TURNS FIXER_TIMEOUT
   REVIEW_MODEL CRON_CODER CRON_SWEEP CRON_MERGE CRON_TRIAGE CRON_DIGEST AGENT_ALLOWED_TOOLS
   AGENT_ALLOWED_TOOLS_FM AGENT_DISALLOWED_TOOLS)
 declare -A V=()

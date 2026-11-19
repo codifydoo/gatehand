@@ -264,7 +264,7 @@ jobs:
           # (addons/hardened-runner) they are would-deny noise, then refused.
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
         with:
-          @@CLAUDE_AUTH@@
+          @@CLAUDE_AGENT_AUTH@@
           # Supplying a token skips the action's OIDC exchange for the Claude App's token, which
           # would carry contents/issues/pull-requests WRITE into this job. This one is read-only.
           github_token: ${{ secrets.GITHUB_TOKEN }}

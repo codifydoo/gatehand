@@ -95,8 +95,10 @@ The model never shares a job with a write-capable token, and nothing it wrote is
 Residual risks you accept by running this:
 
 - **The model's own job.** A prompt-injected run controls its job and can read the Claude credential
-  from its environment. Use a capped API key (`claude.auth: "api-key"`) if that matters to you, and
-  on self-hosted runners an egress allowlist (`addons/hardened-runner`).
+  from its environment. If that matters to you, give the coder and fixer a capped key of their own
+  (`claude.agentAuth: "api-key"`, secret `ANTHROPIC_API_KEY_AGENTS`): losing it then costs neither the
+  review's credential nor your subscription. On self-hosted runners add an egress allowlist
+  (`addons/hardened-runner`).
 - **CI runs agent code.** An agent PR's code runs in your CI like any PR's, without a person reading
   it first. Keep secrets out of PR-triggered CI jobs, and on self-hosted runners keep the agent pool
   apart from the CI pool.
@@ -105,7 +107,8 @@ Residual risks you accept by running this:
   also needs green CI, the PR guard and no protected path, and it never merges a PR a writer let
   touch protected paths; set `AGENT_AUTO_MERGE` off if you want a person to merge every agent PR.
 - **Shared subscription.** With `claude.auth: "oauth"` the runs count against the same Claude
-  subscription as your interactive sessions; `runsPerDay` is the guard.
+  subscription as your interactive sessions (only the review's, once `claude.agentAuth` is
+  `"api-key"`); `runsPerDay` is the guard.
 
 ## Setup
 
@@ -126,6 +129,7 @@ The install skill (`/gatehand:install`) walks through this; it is here for refer
    gh variable set AGENT_BOT_ID --body "$(gh api 'users/<slug>[bot]' --jq .id)"
    gh variable set AGENT_OWNER_LOGIN --body "<your GitHub login>"
    gh secret set CLAUDE_CODE_OAUTH_TOKEN   # from `claude setup-token`; or ANTHROPIC_API_KEY with claude.auth "api-key"
+   gh secret set ANTHROPIC_API_KEY_AGENTS  # only with claude.agentAuth "api-key": the coder's and fixer's own key
    ```
 
 4. **Labels and the runner ref:**
@@ -242,7 +246,7 @@ the details.
 
 ## Changing the rules
 
-- **Numbers, models, schedules, runners, tools:** edit `policy.json`, then re-render
+- **Numbers, models, schedules, runners, tools, Claude auth:** edit `policy.json`, then re-render
   (`/gatehand:update`, or `bin/render.sh .` from a checkout of the package) and commit both.
 - **Your project's rules and checks:** `project.md`. The coder and fixer read it on every run. Every
   check command must also be in `policy.json` `tools.allow`, as `Bash(<prefix>:*)`.

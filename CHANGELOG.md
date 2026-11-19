@@ -1,7 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 (2026-11-19)
 
+- New policy key `claude.agentAuth` (`oauth` or `api-key`) for the coder and fixer, the two roles
+  whose model runs code it wrote. That code can read the job's Claude credential, so a
+  prompt-injected run could take it. With `"api-key"` the two jobs read `ANTHROPIC_API_KEY_AGENTS`, a
+  secret no other workflow uses: give it a spend limit in its own Console workspace, and a lost key
+  costs neither the review's credential nor your subscription. Unset, nothing changes: the coder and
+  fixer use `claude.auth`'s credential, as before.
+- The doctor checks the agents' secret too when `claude.agentAuth` names a different one.
+- To switch an installed repository to the separate key, set the secret first, then `claude.agentAuth: "api-key"` in `policy.json`, re-render, and fast-forward the
+  runner ref (the coder and fixer workflows change).
 - Inbox: an answered request's line now leaves the "Open requests" list in the inbox issue's body
   instead of being ticked; the answer stays in the bot's reply comment. Ticked lines were never
   removed, so a long-lived inbox grew towards GitHub's 65,536-character body limit. Past that,
