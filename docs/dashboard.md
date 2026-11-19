@@ -48,7 +48,9 @@ you is also in the tab's title.
 Numbers are computed the way the agents compute them (`agent-digest.sh`, `agent-state.sh`): a ledger
 line that does not parse costs that line only; a run with `counted: false` never reached the model
 and is not a run for the daily cap. Without the repository's variables (a login with less than write
-access) or its `policy.json`, the page does not guess which issue is the inbox.
+access) or its `policy.json`, the page does not guess which issue is the inbox. When the agents
+replace a full inbox (README: The inbox), the page follows to the new one once the old one is closed;
+the open requests are posted there again under the same ids.
 
 Data arrives in parts, a repository at a time, and rows fill in place. A part that could not be read
 is never shown as zero, "off" or "nothing waits": it is `?`, and named under the repository. In the

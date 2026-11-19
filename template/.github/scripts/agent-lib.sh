@@ -526,9 +526,11 @@ ensure_labels() {
 # into one and receive every later request. AGENT_INBOX_ISSUE (the repo variable), when set, is
 # trusted outright and skips the search. inbox_find is the same lookup without the create, for a
 # caller that must not open an inbox (the digest posts with a token the lookup would not trust).
-inbox_find() {
+# An inbox with policy.inboxRotateAt comments or more is replaced first (inbox_rotate), unless
+# AGENT_INBOX_ISSUE pins it.
+# inbox_list: every open issue that counts as an inbox, lowest number first, as "number author" lines.
+inbox_list() {
   local marker bot
-  if [[ -n "${AGENT_INBOX_ISSUE:-}" ]]; then printf '%s\n' "${AGENT_INBOX_ISSUE}"; return 0; fi
   marker="$(policy '.inboxMarker')"
   bot="$(policy '.botLogin')"
   # gh prints an App author as `app/<slug>`; accept the REST spelling too.
@@ -536,13 +538,20 @@ inbox_find() {
     [.[] | select((.body | contains(\"${marker}\"))
       and ((.author.login == \"app/${bot%\[bot\]}\") or (.author.login == \"${bot}\")
            or (.author.login == \"${AGENT_OWNER_LOGIN:-}\" and \"${AGENT_OWNER_LOGIN:-}\" != \"\")))]
-    | sort_by(.number) | .[0].number // empty"
+    | sort_by(.number) | .[] | \"\(.number) \(.author.login)\""
 }
 
-inbox_issue() {
-  local marker num body
-  num="$(inbox_find)" || return 1
-  if [[ -n "${num}" ]]; then printf '%s\n' "${num}"; return 0; fi
+inbox_find() {
+  local list
+  if [[ -n "${AGENT_INBOX_ISSUE:-}" ]]; then printf '%s\n' "${AGENT_INBOX_ISSUE}"; return 0; fi
+  list="$(inbox_list)" || return 1
+  awk 'NR == 1 { print $1 }' <<<"${list}"
+}
+
+# inbox_create [previous]: open a new inbox issue and print its number. <previous> is the inbox it
+# replaces, named in the header so its history is one click away.
+inbox_create() {
+  local marker body num
   marker="$(policy '.inboxMarker')"
   body="$(mktemp)"
   cat >"${body}" <<EOF
@@ -557,13 +566,145 @@ Requests from the autonomous agents land here as comments. Answer by commenting 
 | \`/pause coder\` · \`/resume coder\` | stop or restart the coder (also resets its circuit breaker) |
 
 Only the owner's commands are applied. Runbook: \`.github/agents/README.md\`.
+EOF
+  [[ -n "${1:-}" ]] && printf '\nThis inbox continues #%s, closed when it neared GitHub'"'"'s limit on comments per issue.\n' "$1" >>"${body}"
+  cat >>"${body}" <<'EOF'
 
 ## Open requests
 <!-- agent-inbox:open:start -->
 <!-- agent-inbox:open:end -->
 EOF
-  gh issue create --title "Needs a human (agent inbox)" --body-file "${body}" | grep -oE '[0-9]+$'
+  num="$(gh issue create --title "Needs a human (agent inbox)" --body-file "${body}" | grep -oE '[0-9]+$')"
   rm -f "${body}"
+  [[ -n "${num}" ]] || return 1
+  printf '%s\n' "${num}"
+}
+
+inbox_issue() {
+  local num limit count new
+  num="$(inbox_find)" || return 1
+  if [[ -z "${num}" ]]; then inbox_create; return; fi
+  # GitHub refuses every new comment on an issue past about 2,500 (undocumented; HTTP 403 "Commenting
+  # is disabled on issues with more than 2500 comments"), which would stop both the requests and the
+  # answers. Fail open: a count that cannot be read, or a threshold of 0, leaves the inbox as it is.
+  limit="$(policy '.inboxRotateAt // 2000')"
+  [[ "${limit}" =~ ^[0-9]+$ && "${limit}" -gt 0 ]] || { printf '%s\n' "${num}"; return 0; }
+  count="$(gh api "repos/${GH_REPO:-}/issues/${num}" --jq '.comments' 2>/dev/null)" || count=""
+  if [[ "${count}" =~ ^[0-9]+$ && "${count}" -ge "${limit}" ]]; then
+    if [[ -n "${AGENT_INBOX_ISSUE:-}" ]]; then
+      agent_log "WARNING: inbox #${num} has ${count} comments (policy.inboxRotateAt is ${limit}), and AGENT_INBOX_ISSUE pins it, so it is not replaced. GitHub refuses comments past about 2,500: unset AGENT_INBOX_ISSUE and the agents replace it at their next request"
+    elif new="$(inbox_rotate "${num}" "${count}")" && [[ "${new}" =~ ^[0-9]+$ ]]; then
+      num="${new}"
+    else
+      agent_log "inbox: #${num} has ${count} comments and could not be replaced; it is used as it is"
+    fi
+  fi
+  printf '%s\n' "${num}"
+}
+
+# inbox_bot_bodies <issue>: the agent bot's comment bodies on <issue>, one JSON string a line.
+inbox_bot_bodies() {
+  gh api --paginate "repos/${GH_REPO}/issues/$1/comments?per_page=100" \
+    --jq ".[] | select(.user.login == \"$(policy '.botLogin')\") | .body | @json"
+}
+
+# inbox_rotate <old> <comments>: replace the inbox <old> with a new one and print the new number.
+#   1. The new inbox is the lowest open inbox above <old>, opened here when there is none. Two jobs
+#      may rotate at once: issue numbers follow creation order, so every job settles on the lowest
+#      new one, and any other the bot opened above it is closed.
+#   2. Every open request listed on <old> is posted again on the new inbox, its comment copied whole
+#      (the marker line first, under the SAME id), and listed there; agent-inbox.sh only looks for a
+#      request on the issue the command is posted on. Only the bot's own request comment is copied;
+#      a request answered on <old>, or already on the new inbox, is skipped, so a rerun after a
+#      partial failure copies only what is missing.
+#   3. Once every request is across, one comment on <old> links the new inbox and carries an
+#      agent-answer marker per moved request, so a command posted on <old> (agent-inbox.yml still
+#      accepts it, closed or not) cannot apply a moved request a second time; then <old> is closed.
+#      Until then <old> stays open, so inbox_find keeps returning it and the next request retries.
+# The App cannot pin issues: the closing comment asks the owner to pin the new one.
+inbox_rotate() {
+  local old="$1" count="$2" bot list target n who old_body old_c new_c new_body line req c note lines="" incomplete=0
+  local carried=()
+  bot="$(policy '.botLogin')"
+  list="$(inbox_list)" || return 1
+  target="$(awk -v o="${old}" '$1 + 0 > o + 0 { print $1; exit }' <<<"${list}")"
+  if [[ -z "${target}" ]]; then
+    target="$(inbox_create "${old}")" || return 1
+    if list="$(inbox_list)"; then
+      n="$(awk -v o="${old}" '$1 + 0 > o + 0 { print $1; exit }' <<<"${list}")"
+      [[ -n "${n}" ]] && target="${n}"
+    fi
+  fi
+  while read -r n who; do
+    [[ -n "${n}" && "${n}" -gt "${target}" ]] || continue
+    [[ "${who}" == "app/${bot%\[bot\]}" || "${who}" == "${bot}" ]] || continue
+    gh issue close "${n}" --comment "Two agent jobs replaced the inbox at the same time; this is the spare one. The inbox is #${target}." >/dev/null \
+      || agent_log "inbox: could not close the spare inbox #${n}"
+  done <<<"${list}"
+
+  if ! old_body="$(gh issue view "${old}" --json body --jq '.body')" || ! old_c="$(inbox_bot_bodies "${old}")" \
+    || ! new_c="$(inbox_bot_bodies "${target}")"; then
+    agent_log "inbox: could not read #${old} or #${target}; #${old} stays open and the next request retries"
+    printf '%s\n' "${target}"
+    return 0
+  fi
+  new_body="$(gh issue view "${target}" --json body --jq '.body')" || new_body=""
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    req="${line#- \[ \] }"
+    req="${req%% *}"
+    [[ "${req}" == REQ-* ]] || continue
+    jq -se --arg m "<!-- agent-answer:${req} -->" 'any(.[]; contains($m))' <<<"${old_c}" >/dev/null && continue
+    if ! jq -se --arg m "<!-- agent-req:${req} " 'any(.[]; startswith($m))' <<<"${new_c}" >/dev/null; then
+      c="$(jq -sr --arg m "<!-- agent-req:${req} " 'map(select(startswith($m))) | .[0] // empty' <<<"${old_c}")"
+      if [[ -z "${c}" ]]; then
+        agent_log "inbox: ${req} is listed on #${old}, but no request comment of the bot's carries it; not moved"
+        continue
+      fi
+      note="$(mktemp)"
+      printf '%s\n\n_Moved from #%s, the previous inbox._\n' "${c}" "${old}" >"${note}"
+      if ! gh issue comment "${target}" --body-file "${note}" >/dev/null; then
+        agent_log "inbox: could not move ${req} to #${target}"
+        incomplete=1
+        rm -f "${note}"
+        continue
+      fi
+      rm -f "${note}"
+    fi
+    carried+=("${req}")
+    grep -Fq -- "- [ ] ${req} " <<<"${new_body}" || lines+="${line}"$'\n'
+  done < <(grep -E '^- \[ \] REQ-' <<<"${old_body}")
+  if [[ -n "${lines}" ]]; then
+    inbox_add_line "${target}" "${lines%$'\n'}" || agent_log "inbox: the moved requests are posted on #${target}, but its checklist was not updated"
+  fi
+  if [[ "${incomplete}" == 1 ]]; then
+    agent_log "inbox: not every open request reached #${target}; #${old} stays open and the next request retries"
+    printf '%s\n' "${target}"
+    return 0
+  fi
+
+  if ! jq -se --arg m "<!-- agent-inbox-moved to=${target} -->" 'any(.[]; startswith($m))' <<<"${old_c}" >/dev/null; then
+    note="$(mktemp)"
+    {
+      printf '<!-- agent-inbox-moved to=%s -->\n' "${target}"
+      printf 'This inbox has %s comments, and GitHub refuses new comments on an issue past about 2,500, so the agents now use #%s. **Pin #%s by hand** and unpin this one: the agents cannot pin issues.\n\n' \
+        "${count}" "${target}" "${target}"
+      if [[ "${#carried[@]}" -gt 0 ]]; then
+        printf 'Open requests moved to #%s, to be answered there:' "${target}"
+        # shellcheck disable=SC2016 # literal markdown backticks
+        printf ' `%s`' "${carried[@]}"
+        printf '. A command for one of them posted here does nothing.\n'
+      else
+        printf 'No open requests were moved.\n'
+      fi
+      for req in "${carried[@]}"; do printf '<!-- agent-answer:%s -->\n' "${req}"; done
+    } >"${note}"
+    gh issue comment "${old}" --body-file "${note}" >/dev/null || agent_log "inbox: could not post the move notice on #${old}"
+    rm -f "${note}"
+  fi
+  gh issue close "${old}" >/dev/null || agent_log "inbox: could not close #${old}"
+  agent_log "inbox: #${old} has ${count} comments; the inbox is now #${target} (pin it by hand)"
+  printf '%s\n' "${target}"
 }
 
 # inbox_add_line <issue> <line> / inbox_drop_line <issue> <REQ-id>: keep the "Open requests"

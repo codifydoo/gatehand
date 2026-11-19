@@ -11,6 +11,18 @@
   answered while its line could not be removed (a full body, a failed edit) still shows as open;
   `/approve` or `/reject` it again and the reply says "already answered" and removes the line. A
   failed edit of the list is now logged as such. Installed repositories need an update to get this.
+- Inbox: the agents now replace the inbox issue before GitHub's per-issue comment limit stops it.
+  GitHub refuses every new comment on an issue past about 2,500 (undocumented; "Commenting is
+  disabled on issues with more than 2500 comments"), and each request costs about three comments, so
+  a long-lived inbox would stop taking both requests and answers. When a request is about to be filed
+  on an inbox with `inboxRotateAt` comments or more (new in `policy.json`, 2,000 by default, `0` turns
+  it off), a new inbox issue opens. Every open request the agent bot filed is posted again there under
+  the same id and listed. The old issue gets one comment linking the new one, which also marks the
+  moved requests answered there so a command on the old issue cannot apply one twice, and it is
+  closed. **Pin the new inbox by hand**; the App cannot pin issues. An inbox pinned with
+  `AGENT_INBOX_ISSUE` is never replaced: the agents log a warning, and `bin/doctor.sh` warns once it
+  is past the threshold. Installed repositories need an update to get this; `policy.json` needs no
+  change.
 
 ## 0.8.3 (2026-11-18)
 

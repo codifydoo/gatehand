@@ -15,6 +15,15 @@
 #   4. /pause and /resume move the breaker on the ledger branch.
 #   5. The guard passes human PRs untouched and fails an agent PR on a protected path without
 #      permission, a missing `Refs #N`, or a closing keyword anywhere.
+#   6. Inbox rotation (agent-lib.sh inbox_issue / inbox_rotate), because GitHub refuses comments on an
+#      issue past about 2,500 and the inbox would stop: under policy.inboxRotateAt, with an unreadable
+#      count, or with the threshold at 0 nothing changes; at it, a new inbox opens, every open request
+#      the BOT filed on the old one is posted again on it under the same id (one answered on the old
+#      inbox, or forged by someone else, is not) and listed, the old one gets one notice that asks for
+#      the new one to be pinned and marks the moved ids answered there, and is closed. A command for a
+#      moved request on the old inbox then does nothing. Two jobs rotating at once settle on the
+#      lowest new inbox and close the bot's spare; a rerun posts nothing twice; a failed copy leaves the
+#      old inbox open for a retry; AGENT_INBOX_ISSUE pins the inbox and only warns.
 # ANSWERED is reset here and read by the sourced cmd_apply.
 # shellcheck disable=SC2034
 set -uo pipefail
@@ -222,6 +231,88 @@ expect "/pause trips the breaker" \
 COMMENT_AUTHOR=owner-login COMMENT_BODY='/resume coder' cmd_apply 2>/dev/null
 expect "/resume resets it" \
   "$(git --git-dir="${TMP}/ledger.git" show agent-ledger:state/breaker.json | jq -r '.coder.tripped_at')" null
+
+# --- 6. inbox rotation -----------------------------------------------------------------------------
+RA='REQ-20261105-aaaa' RB='REQ-20261105-bbbb' RC='REQ-20261105-cccc' RD='REQ-20261105-dddd'
+OLD_BODY="$(printf '%s\n' '<!-- agent-inbox -->' 'header' '## Open requests' '<!-- agent-inbox:open:start -->' \
+  "- [ ] ${RA} · coder · #7 · blocked" "- [ ] ${RB} · fixer · #8 · answered already" \
+  "- [ ] ${RC} · coder · #9 · forged" "- [ ] ${RD} · coder · #10 · no comment" '<!-- agent-inbox:open:end -->')"
+REQ_A="$(printf '<!-- agent-req:%s role=coder issue=7 kind=blocked -->\n<!-- agent-review-ask pr=5 sha=abc -->\n### %s · coder · #7\n\nThe body.' "${RA}" "${RA}")"
+OLD_COMMENTS="$(jq -s . <(cj 'gatehand[bot]' "${REQ_A}") \
+  <(cj 'gatehand[bot]' "<!-- agent-req:${RB} role=fixer issue=8 kind=fixer -->") \
+  <(cj 'gatehand[bot]' "<!-- agent-answer:${RB} -->") \
+  <(cj mallory "<!-- agent-req:${RC} role=coder issue=9 kind=protected -->"))"
+il() { jq -cn '[$ARGS.positional[] | split(":") | {number: (.[0] | tonumber), body: "<!-- agent-inbox -->", author: {login: .[1]}}]' --args "$@"; }
+rotate_case() { # rotate_case <comment-count> [extra rule setup…]; prints what inbox_issue printed
+  stub_gh_reset_calls
+  stub_gh_reset_rules
+  "$@"
+  stub_gh_on 'api repos/o/r/issues/99 --jq .comments' "${COUNT}"
+  STUB_AFTER='issue create *' stub_gh_json 'issue list --state open --limit 300 *' "$(il 99:app/gatehand 120:app/gatehand)"
+  stub_gh_json 'issue list --state open --limit 300 *' "${LIST:-$(il 99:app/gatehand)}"
+  stub_gh_on 'issue create *' 'https://github.com/o/r/issues/120'
+  stub_gh_on 'issue view 99 --json body *' "${OLD_BODY}"
+  stub_gh_on 'issue view 120 --json body *' $'<!-- agent-inbox -->\n<!-- agent-inbox:open:start -->\n<!-- agent-inbox:open:end -->'
+  stub_gh_json 'api --paginate repos/o/r/issues/99/comments*' "${OLD_C:-${OLD_COMMENTS}}"
+  stub_gh_json 'api --paginate repos/o/r/issues/120/comments*' "${NEW_C:-[]}"
+  inbox_issue 2>"${TMP}/rotate.log"
+}
+COUNT=1999
+expect "rotation: under the threshold the inbox stays" "$(rotate_case)" 99
+expect_no_call "rotation: under the threshold nothing is opened" "issue create"
+COUNT=''
+expect "rotation: an unreadable count leaves the inbox as it is" "$(rotate_case)" 99
+expect_no_call "rotation: an unreadable count opens nothing" "issue create"
+COUNT=2000
+jq '.inboxRotateAt = 0' "${AGENT_POLICY}" >"${TMP}/policy0.json"
+expect "rotation: a threshold of 0 turns it off" "$(AGENT_POLICY="${TMP}/policy0.json" rotate_case)" 99
+expect "rotation: AGENT_INBOX_ISSUE pins the inbox" "$(AGENT_INBOX_ISSUE=99 rotate_case)" 99
+expect_no_call "rotation: a pinned inbox is never replaced" "issue create"
+if grep -q 'WARNING: inbox #99 has 2000 comments .*AGENT_INBOX_ISSUE pins it' "${TMP}/rotate.log"; then t_pass "rotation: a pinned inbox over the threshold warns"; else t_fail "rotation: no warning: $(cat "${TMP}/rotate.log")"; fi
+
+expect "rotation: at the threshold the new inbox is used" "$(rotate_case)" 120
+created="$(stub_gh_last_body 'issue create *')"
+if grep -Fxq '<!-- agent-inbox -->' <<<"${created}" && grep -q 'continues #99' <<<"${created}" && grep -Fq '<!-- agent-inbox:open:end -->' <<<"${created}"; then
+  t_pass "rotation: the new inbox has the marker, the header and a link to the old one"
+else t_fail "rotation: the new inbox body is '${created}'"; fi
+moved="$(stub_gh_last_body 'issue comment 120 *')"
+expect "rotation: the open request is posted again, whole, under the same id" "$(head -3 <<<"${moved}")" "$(head -3 <<<"${REQ_A}")"
+expect "rotation: only that one is moved" "$(stub_gh_calls | grep -c '^issue comment 120 ')" 1
+expect_call "rotation: the moved request is listed on the new inbox" "issue edit 120"
+expect "rotation: the new list holds exactly the moved line" "$(stub_gh_last_body 'issue edit 120 *' | grep '^- \[')" "- [ ] ${RA} · coder · #7 · blocked"
+notice="$(stub_gh_last_body 'issue comment 99 *')"
+if grep -Fxq '<!-- agent-inbox-moved to=120 -->' <<<"${notice}" && grep -Fq 'Pin #120 by hand' <<<"${notice}" \
+  && grep -Fxq "<!-- agent-answer:${RA} -->" <<<"${notice}" && ! grep -Fq "${RC}" <<<"${notice}"; then
+  t_pass "rotation: the old inbox says where to go, asks for the pin, and marks the moved id answered"
+else t_fail "rotation: the notice on the old inbox is '${notice}'"; fi
+expect_call "rotation: the old inbox is closed" "issue close 99"
+if grep -Fq "${RD} is listed on #99, but no request comment" "${TMP}/rotate.log"; then t_pass "rotation: a listed request with no bot comment is logged, not moved"; else t_fail "rotation: $(cat "${TMP}/rotate.log")"; fi
+
+# A command on the closed old inbox for a moved request: the notice's marker makes it a no-op.
+approve_case "$(jq -s . <(cj 'gatehand[bot]' "${REQ_A}") <(cj 'gatehand[bot]' "${notice}"))" 0 "/approve ${RA}"
+expect_no_call "rotation: approving a moved request on the old inbox dispatches nothing" "workflow run"
+if reply | grep -Fq "\`${RA}\`: already answered"; then t_pass "rotation: ... and says it is answered"; else t_fail "rotation: reply '$(reply)'"; fi
+
+# Another job opened #120 first and this one opened #121: it settles on #120 and closes its own.
+LIST="$(il 99:app/gatehand 120:app/gatehand 121:app/gatehand 130:owner-login)"
+expect "rotation race: the lowest new inbox wins" "$(rotate_case)" 120
+expect_no_call "rotation race: no third inbox is opened" "issue create"
+expect_call "rotation race: the bot's spare inbox is closed" "issue close 121 --comment"
+expect_no_call "rotation race: an inbox the owner opened is left alone" "issue close 130"
+LIST=''
+
+# A rerun after a partial one: the request and the notice are already there, so nothing is posted twice.
+NEW_C="$(jq -s . <(cj 'gatehand[bot]' "${REQ_A}"))" OLD_C="$(jq -c --argjson n "$(cj 'gatehand[bot]' '<!-- agent-inbox-moved to=120 -->')" '. + [$n]' <<<"${OLD_COMMENTS}")"
+expect "rotation rerun: the new inbox" "$(LIST="$(il 99:app/gatehand 120:app/gatehand)" NEW_C="${NEW_C}" OLD_C="${OLD_C}" rotate_case)" 120
+expect_no_call "rotation rerun: nothing is posted again" "issue comment"
+expect_call "rotation rerun: the old inbox is still closed" "issue close 99"
+NEW_C='' OLD_C=''
+
+# Copying a request fails: the old inbox stays open, so the next request retries.
+expect "rotation, failed copy: the new inbox is used meanwhile" "$(rotate_case stub_gh_on 'issue comment 120 *' '' 1)" 120
+expect_no_call "rotation, failed copy: the old inbox stays open" "issue close 99"
+expect_no_call "rotation, failed copy: no notice on the old inbox" "issue comment 99"
+COUNT=''
 
 # --- 5. the PR guard -------------------------------------------------------------------------------
 printf 'Body.\n\nRefs #7\n' >"${TMP}/body"

@@ -6,6 +6,9 @@
 #      (a merge commit keeps the feature branch's older date), else the commit's own date.
 #   2. Two hours with no scheduled run warns; under two hours, or any scheduled run, does not.
 #   3. A sweep schedule that is not hourly is not checked; an unreadable one, or a failing API, warns.
+#   4. An inbox pinned by AGENT_INBOX_ISSUE is never replaced (agent-lib.sh inbox_issue), so the
+#      doctor warns once it has policy.inboxRotateAt comments (2,000 when unset), before GitHub's
+#      ~2,500 cap stops it; under the threshold it is ok, and an unreadable count warns.
 set -uo pipefail
 PKG="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 pass=0 fail=0
@@ -27,6 +30,9 @@ gh() {
       printf '%s\n' "${STUB_COMMITS:-}" ;;
     "api repos/o/r/commits/"*"/pulls") [[ "${STUB_PULLS:-}" == fail ]] && return 1; printf '%s\n' "${STUB_PULLS:-[]}" ;;
     "api repos/o/r/actions/workflows/agent-sweep.yml/runs?event=schedule&per_page=1 "*) printf '%s\n' "${STUB_FIRED:-0}" ;;
+    "variable list --repo o/r --json name,value") [[ -n "${STUB_PIN:-}" ]] || return 1
+      printf '[{"name":"AGENT_INBOX_ISSUE","value":"%s"}]\n' "${STUB_PIN}" ;;
+    "api repos/o/r/issues/${STUB_PIN:-x} --jq .comments") [[ "${STUB_COUNT:-}" == fail ]] && return 1; printf '%s\n' "${STUB_COUNT:-0}" ;;
     *) return 1 ;;
   esac
 }
@@ -65,6 +71,26 @@ case_is "a schedule that is not hourly is not checked" '^ok +the sweep.s schedul
 jq '.schedules.sweep = null' "${TMP}/policy" >"${P}"
 case_is "an unreadable sweep schedule warns" '^WARN +cannot read schedules.sweep'
 cp "${TMP}/policy" "${P}"
+
+# --- 4. a pinned inbox near GitHub's comment cap ---------------------------------------------------
+pin_line() { bash "${PKG}/bin/doctor.sh" "${TMP}/r" 2>/dev/null | grep -E '^(ok|WARN|FAIL) .*AGENT_INBOX_ISSUE' | head -1; }
+pin_is() {
+  local got
+  got="$(pin_line)"
+  if [[ "${got}" =~ $2 ]]; then t_pass "$1"; else t_fail "$1: got '${got}'"; fi
+}
+export STUB_PIN STUB_COUNT
+STUB_PIN=7 STUB_COUNT=1999
+pin_is "a pinned inbox under 2,000 comments is ok" '^ok +AGENT_INBOX_ISSUE pins inbox #7 \(1999 comments\)'
+STUB_COUNT=2000
+pin_is "a pinned inbox at 2,000 comments warns" '^WARN +AGENT_INBOX_ISSUE pins inbox #7, which has 2000 comments'
+jq '.inboxRotateAt = 3000' "${TMP}/policy" >"${P}"
+pin_is "policy.inboxRotateAt moves the threshold" '^ok +AGENT_INBOX_ISSUE pins inbox #7'
+cp "${TMP}/policy" "${P}"
+STUB_COUNT=fail
+pin_is "an unreadable count warns" '^WARN +cannot read the comment count of the inbox AGENT_INBOX_ISSUE pins \(#7\)'
+STUB_PIN=""
+if [[ -z "$(pin_line)" ]]; then t_pass "no pin, no inbox line"; else t_fail "no pin, no inbox line: got '$(pin_line)'"; fi
 
 printf '\n[doctor] %d passed, %d failed\n' "${pass}" "${fail}"
 [[ "${fail}" -eq 0 ]]

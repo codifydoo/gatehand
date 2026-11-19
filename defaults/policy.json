@@ -4,6 +4,7 @@
   "baseBranch": "main",
   "ledgerBranch": "agent-ledger",
   "inboxMarker": "<!-- agent-inbox -->",
+  "inboxRotateAt": 2000,
   "runnerRef": "agent-runner",
   "branchTypes": ["feat", "fix", "docs", "ci", "refactor", "test", "chore"],
   "maxPrBodyBytes": 60000,
