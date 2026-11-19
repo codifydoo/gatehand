@@ -269,7 +269,7 @@ jobs:
           # Build-time dummies a project needs belong in GITHUB_ENV from .github/agents/toolchain.
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
         with:
-          @@CLAUDE_AUTH@@
+          @@CLAUDE_AGENT_AUTH@@
           github_token: ${{ secrets.GITHUB_TOKEN }}
           bot_name: @@BOT_SLUG@@[bot]
           bot_id: ${{ vars.AGENT_BOT_ID }}

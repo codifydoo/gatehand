@@ -3,6 +3,7 @@
 # what is pinned is what keeps it from damaging one:
 #   1. The repo's own files are created once and never overwritten; package files are rewritten.
 #   2. Every value that lands in YAML or shell is validated, and a bad one renders nothing.
+#      claude.agentAuth gives the coder and fixer a credential of their own and leaves the review's.
 #   3. A package file edited in the repo is not overwritten without --force; --check sees drift.
 #   4. Optional workflows come and go with policy.json, and keys missing from an older policy.json
 #      render with the package defaults.
@@ -54,7 +55,7 @@ check "...and does not bring the example back once hooks/lib.sh exists" test ! -
 for bad in '.botLogin = "Evil Bot[bot]"' '.botLogin = "nobot"' '.roles.coder.model = "opus; rm -rf /"' \
   '.roles.coder.maxTurns = "5\n- run: x"' '.schedules.coder = "* * *"' '.runners.agent = "ubuntu latest"' \
   '.runners.agent = ["self-hosted", "a b"]' '.tools.allow = ["Bash(npm test:*)\", \"x"]' '.tools.allow = ["Bash(a,b)"]' \
-  '.tools.allow = ["WebFetch"]' '.claude.auth = "token"' '.ci.workflowName = "CI\"]\n  evil: ["' \
+  '.tools.allow = ["WebFetch"]' '.claude.auth = "token"' '.claude.agentAuth = "token"' '.ci.workflowName = "CI\"]\n  evil: ["' \
   '.ci.workflowFile = "../x.yml"' '.baseBranch = "main;x"' '.baseBranch = null' \
   '.tools.allow = ["Bash(echo ${{ secrets.AGENT_APP_PRIVATE_KEY }})"]' '.tools.allow = ["Bash(make test #x)"]' \
   '.tools.allow = ["Bash(npm run: x)"]' '.tools.deny = ["Bash(@@BOT_SLUG@@)"]' \
@@ -76,6 +77,27 @@ check "and the command's frontmatter" grep -q '^allowed-tools: .*Bash(npm test:\
 check "api-key auth" grep -q 'anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}' "${WF}/agent-coder.yml"
 check "no oauth token left" bash -c "! grep -rq CLAUDE_CODE_OAUTH_TOKEN '${WF}'"
 check "the CI workflow name is quoted in the triggers" grep -qx '    workflows: \["Build and test", Claude Code Review\]' "${WF}/agent-fixup.yml"
+fresh
+"${R}" "${TMP}/r" >/dev/null
+pol '.claude.auth = "oauth" | .claude.agentAuth = "api-key"'
+"${R}" "${TMP}/r" >/dev/null
+for f in agent-coder.yml agent-fixup.yml; do
+  check "agentAuth api-key: ${f} reads the agents' own key" grep -q 'anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY_AGENTS }}' "${WF}/${f}"
+  check "  and holds no shared credential" bash -c "! grep -qE 'CLAUDE_CODE_OAUTH_TOKEN|secrets.ANTHROPIC_API_KEY }}' '${WF}/${f}'"
+done
+check "  while the review keeps claude.auth's token" grep -q 'claude_code_oauth_token: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}' "${WF}/claude-code-review.yml"
+check "  and never the agents' key" bash -c "! grep -q ANTHROPIC_API_KEY_AGENTS '${WF}/claude-code-review.yml'"
+check "  which no other workflow holds" \
+  test "$(grep -rc ANTHROPIC_API_KEY_AGENTS "${WF}" | grep -v ':0$' | sort | tr '\n' ' ')" \
+  == "${WF}/agent-coder.yml:1 ${WF}/agent-fixup.yml:1 "
+fresh
+"${R}" "${TMP}/r" >/dev/null
+pol '.claude.auth = "api-key" | .claude.agentAuth = "oauth"'
+"${R}" "${TMP}/r" >/dev/null
+for f in agent-coder.yml agent-fixup.yml; do
+  check "agentAuth oauth over auth api-key: ${f} reads the subscription token" grep -q 'claude_code_oauth_token: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}' "${WF}/${f}"
+done
+check "  while the review reads the API key" grep -q 'anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}' "${WF}/claude-code-review.yml"
 
 # --- 3 -----------------------------------------------------------------------------------------------
 fresh

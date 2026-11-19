@@ -60,6 +60,12 @@ case "$(p '.claude.auth // "oauth"')" in
   *) cred=ANTHROPIC_API_KEY ;;
 esac
 [[ "${can_secrets}" -eq 0 ]] || { grep -qx "${cred}" <<<"${secrets}" && ok "secret ${cred} is set" || bad "secret ${cred} is not set (policy.json claude.auth)"; }
+case "$(p '.claude.agentAuth // ""')" in
+  "") agent_cred="${cred}" ;;
+  oauth) agent_cred=CLAUDE_CODE_OAUTH_TOKEN ;;
+  *) agent_cred=ANTHROPIC_API_KEY_AGENTS ;;
+esac
+[[ "${can_secrets}" -eq 0 || "${agent_cred}" == "${cred}" ]] || { grep -qx "${agent_cred}" <<<"${secrets}" && ok "secret ${agent_cred} is set" || bad "secret ${agent_cred} is not set (policy.json claude.agentAuth)"; }
 
 bot="$(p .botLogin)"
 if bot_id="$(gh api "users/${bot}" --jq .id 2>/dev/null)"; then

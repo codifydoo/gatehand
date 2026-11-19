@@ -2,15 +2,6 @@
 
 ## Unreleased
 
-- Inbox: an answered request's line now leaves the "Open requests" list in the inbox issue's body
-  instead of being ticked; the answer stays in the bot's reply comment. Ticked lines were never
-  removed, so a long-lived inbox grew towards GitHub's 65,536-character body limit. Past that,
-  every edit of the body failed (logged and ignored), new requests no longer showed in the digest's
-  or the dashboard's "waiting" list, and answered ones kept showing as open. The `[x]` lines earlier
-  versions left are removed the next time a request is filed or answered. A request that was
-  answered while its line could not be removed (a full body, a failed edit) still shows as open;
-  `/approve` or `/reject` it again and the reply says "already answered" and removes the line. A
-  failed edit of the list is now logged as such. Installed repositories need an update to get this.
 - Inbox: the agents now replace the inbox issue before GitHub's per-issue comment limit stops it.
   GitHub refuses every new comment on an issue past about 2,500 (undocumented; "Commenting is
   disabled on issues with more than 2500 comments"), and each request costs about three comments, so
@@ -25,6 +16,27 @@
   `AGENT_INBOX_ISSUE` is never replaced: the agents log a warning, and `bin/doctor.sh` warns once it
   is past the threshold. Installed repositories need an update to get this; `policy.json` needs no
   change.
+
+## 0.9.0 (2026-11-19)
+
+- New policy key `claude.agentAuth` (`oauth` or `api-key`) for the coder and fixer, the two roles
+  whose model runs code it wrote. That code can read the job's Claude credential, so a
+  prompt-injected run could take it. With `"api-key"` the two jobs read `ANTHROPIC_API_KEY_AGENTS`, a
+  secret no other workflow uses: give it a spend limit in its own Console workspace, and a lost key
+  costs neither the review's credential nor your subscription. Unset, nothing changes: the coder and
+  fixer use `claude.auth`'s credential, as before.
+- The doctor checks the agents' secret too when `claude.agentAuth` names a different one.
+- To switch an installed repository to the separate key, set the secret first, then `claude.agentAuth: "api-key"` in `policy.json`, re-render, and fast-forward the
+  runner ref (the coder and fixer workflows change).
+- Inbox: an answered request's line now leaves the "Open requests" list in the inbox issue's body
+  instead of being ticked; the answer stays in the bot's reply comment. Ticked lines were never
+  removed, so a long-lived inbox grew towards GitHub's 65,536-character body limit. Past that,
+  every edit of the body failed (logged and ignored), new requests no longer showed in the digest's
+  or the dashboard's "waiting" list, and answered ones kept showing as open. The `[x]` lines earlier
+  versions left are removed the next time a request is filed or answered. A request that was
+  answered while its line could not be removed (a full body, a failed edit) still shows as open;
+  `/approve` or `/reject` it again and the reply says "already answered" and removes the line. A
+  failed edit of the list is now logged as such. Installed repositories need an update to get this.
 
 ## 0.8.3 (2026-11-18)
 

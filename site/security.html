@@ -103,8 +103,8 @@
     </div>
     <ul>
       <li><strong>The model's own job.</strong> A prompt-injected run controls its job and can read
-        the Claude credential from its environment. Use a capped API key if that matters to you,
-        and on self-hosted runners an egress allowlist.</li>
+        the Claude credential from its environment. If that matters to you, give the coder and fixer
+        a capped API key of their own, and on self-hosted runners add an egress allowlist.</li>
       <li><strong>CI runs agent code.</strong> An agent PR's code runs in your CI like any PR's,
         without a person reading it first. Keep secrets out of PR-triggered CI jobs, and on
         self-hosted runners keep the agent pool apart from the CI pool.</li>
@@ -112,8 +112,8 @@
         Approve. The merge gate also needs green CI, the PR guard and no protected path; leave
         <code>AGENT_AUTO_MERGE</code> off if you want a person to merge every agent PR.</li>
       <li><strong>Shared subscription.</strong> With a Claude subscription token, the runs count
-        against the same subscription as your interactive sessions; <code>runsPerDay</code> is the
-        guard.</li>
+        against the same subscription as your interactive sessions (only the review's, once the
+        coder and fixer have their own key); <code>runsPerDay</code> is the guard.</li>
     </ul>
   </section>
 
