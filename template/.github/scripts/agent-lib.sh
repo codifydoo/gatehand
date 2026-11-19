@@ -618,8 +618,9 @@ inbox_bot_bodies() {
 #   2. Every open request listed on <old> is posted again on the new inbox, its comment copied (the
 #      marker line first, under the SAME id); agent-inbox.sh only looks for a request on the issue the
 #      command is posted on. Only the bot's own request comment is copied, and a rerun after a partial
-#      failure copies only what is missing. The copy ends with `<!-- agent-req-moved from=<old> -->`,
-#      and agent-inbox.sh refuses it when it was answered on <old>, whenever that answer came.
+#      failure copies only what is missing. The copy ends with `<!-- agent-req-moved from=<old> -->`
+#      (after those of earlier moves), and agent-inbox.sh refuses it when it was answered on any inbox
+#      it came from, whenever that answer came.
 #   3. One notice on <old> links the new inbox and carries an agent-answer marker per moved request, so
 #      a command posted on <old> (agent-inbox.yml still accepts it, closed or not) cannot apply a moved
 #      request a second time. Then the moved requests are listed on the new inbox and <old> is closed.

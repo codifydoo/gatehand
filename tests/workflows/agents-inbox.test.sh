@@ -25,9 +25,10 @@
 #      lowest new inbox and close the bot's spare; a rerun posts nothing twice, and the notice's own
 #      markers do not count as answers. Until the moved requests are listed the old inbox stays the
 #      inbox (a failed copy, notice or listing leaves it open and in use, for a retry). A copy names
-#      the inbox it came from, and a command on the copy is refused when the request was answered
-#      there (whenever that was), and when that inbox cannot be read; one answered on its copy before
-#      the notice is marked answered by it. So no request can be applied twice. AGENT_INBOX_ISSUE pins
+#      every inbox it came from, and a command on the copy is refused when the request was answered on
+#      any of them (whenever that was; the refusal records the answer on the new inbox), and when one
+#      cannot be read, though a deleted one has no answer; one answered on its copy before the notice
+#      is marked answered by it. So no request can be applied twice. AGENT_INBOX_ISSUE pins
 #      the inbox and only warns; AGENT_INBOX_RESOLVED (a caller's own earlier lookup) is used as is.
 # ANSWERED is reset here and read by the sourced cmd_apply.
 # shellcheck disable=SC2034
@@ -351,18 +352,37 @@ copy_case() { # copy_case <comments-of-99-json> [rc of reading #99]
   stub_gh_json 'api --paginate repos/o/r/issues/120/comments*' "$(jq -s . <(cj 'gatehand[bot]' "${COPY}") <(cj 'gatehand[bot]' "<!-- agent-req:${RB} role=fixer issue=8 kind=fixer -->"))"
   if [[ "${2:-0}" == 0 ]]; then stub_gh_json 'api --paginate repos/o/r/issues/99/comments*' "$1"; else stub_gh_on 'api --paginate repos/o/r/issues/99/comments*' '' 1; fi
   stub_gh_on 'issue view 7 --json labels *' 'agent:blocked'
-  ANSWERED=() STALE=()
+  ANSWERED=() STALE=() INBOX_BODIES=()
   INBOX=120 COMMENT_AUTHOR=owner-login COMMENT_ID=1 COMMENT_BODY="/approve ${RA}" cmd_apply 2>/dev/null
 }
 copy_case "$(jq -s . <(cj 'gatehand[bot]' "${REQ_A}") <(cj 'gatehand[bot]' "<!-- agent-answer:${RA} -->"))"
 expect_no_call "copy: answered on the old inbox, it is not applied again" "workflow run"
 if stub_gh_last_body 'issue comment 120 *' | grep -Fq "\`${RA}\`: already answered"; then t_pass "copy: ... and the reply says so"; else t_fail "copy: reply '$(stub_gh_last_body 'issue comment 120 *')'"; fi
 expect_call "copy: ... and its line leaves the new inbox's list" "issue edit 120"
+if stub_gh_last_body 'issue comment 120 *' | grep -Fxq "<!-- agent-answer:${RA} -->"; then t_pass "copy: ... and the answer is recorded on the new inbox"; else t_fail "copy: no answer marker on #120"; fi
 copy_case "$(jq -s . <(cj 'gatehand[bot]' "${REQ_A}") <(cj 'gatehand[bot]' "$(printf '<!-- agent-inbox-moved to=120 -->\n<!-- agent-answer:%s -->' "${RA}")"))"
 expect_call "copy: only the move notice marks it on the old inbox, so it is applied" "workflow run agent-coder.yml --ref agent-runner -f issue=7"
 copy_case '' 1
 expect_no_call "copy: an unreadable old inbox applies nothing" "workflow run"
 if stub_gh_last_body 'issue comment 120 *' | grep -Fq 'could not be read'; then t_pass "copy: ... and asks for the command again"; else t_fail "copy: reply '$(stub_gh_last_body 'issue comment 120 *')'"; fi
+stub_gh_reset_calls
+stub_gh_reset_rules
+stub_gh_json 'api --paginate repos/o/r/issues/120/comments*' "$(jq -s . <(cj 'gatehand[bot]' "${COPY}"))"
+stub_gh_on 'api --paginate repos/o/r/issues/99/comments*' '' 1 'gh: Not Found (HTTP 404)'
+stub_gh_on 'issue view 7 --json labels *' 'agent:blocked'
+ANSWERED=() STALE=() INBOX_BODIES=()
+INBOX=120 COMMENT_AUTHOR=owner-login COMMENT_ID=1 COMMENT_BODY="/approve ${RA}" cmd_apply 2>/dev/null
+expect_call "copy: a deleted old inbox holds no answer, so it is applied" "workflow run agent-coder.yml --ref agent-runner -f issue=7"
+# Moved twice (#99, then #120, then #140): answered on #120, the inbox it came from last.
+stub_gh_reset_calls
+stub_gh_reset_rules
+COPY2="$(printf '%s\n\n_Moved from #120, the previous inbox._\n<!-- agent-req-moved from=120 -->' "${COPY}")"
+stub_gh_json 'api --paginate repos/o/r/issues/140/comments*' "$(jq -s . <(cj 'gatehand[bot]' "${COPY2}"))"
+stub_gh_json 'api --paginate repos/o/r/issues/99/comments*' "$(jq -s . <(cj 'gatehand[bot]' "${REQ_A}") <(cj 'gatehand[bot]' "$(printf '<!-- agent-inbox-moved to=120 -->\n<!-- agent-answer:%s -->' "${RA}")"))"
+stub_gh_json 'api --paginate repos/o/r/issues/120/comments*' "$(jq -s . <(cj 'gatehand[bot]' "${COPY}") <(cj 'gatehand[bot]' "<!-- agent-answer:${RA} -->"))"
+ANSWERED=() STALE=() INBOX_BODIES=()
+INBOX=140 COMMENT_AUTHOR=owner-login COMMENT_ID=1 COMMENT_BODY="/approve ${RA}" cmd_apply 2>/dev/null
+expect_no_call "copy of a copy: answered on the middle inbox, it is not applied again" "workflow run"
 
 # ... or answered on its copy: the notice marks it answered on the old inbox, and it is not listed.
 OLD_C=''
