@@ -619,7 +619,7 @@ ask_review_by_hand() {
   req="$(new_req_id)"
   sed "s/REQ-ID/${req}/g" "${body}.req" >"${body}"
   rm -f "${body}.req"
-  if ! AGENT_REQ_ID="${req}" AGENT_INBOX_ISSUE="${inbox}" inbox_request review merger "${issue:-0}" "#${pr}: its Claude review never posted" "${body}" >/dev/null; then
+  if ! AGENT_REQ_ID="${req}" AGENT_INBOX_RESOLVED="${inbox}" inbox_request review merger "${issue:-0}" "#${pr}: its Claude review never posted" "${body}" >/dev/null; then
     rm -f "${body}"
     echo "#${pr}: the review of ${sha:0:9} was requested ${n} times and never posted, and the inbox request failed; the next run asks again"
     return 1

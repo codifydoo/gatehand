@@ -127,7 +127,9 @@
 
     <h3>The inbox</h3>
     <p>Everything that needs a person lands as a comment on the "Needs a human (agent inbox)" issue.
-      Answer with a comment that starts with a command; only the owner's count.</p>
+      Answer with a comment that starts with a command; only the owner's count. GitHub refuses
+      comments on an issue past about 2,500, so at 2,000 the agents open a new inbox, move the open
+      requests to it and close the old one. Pin the new one by hand: the agents cannot pin issues.</p>
     <div class="scroll">
       <table>
         <thead><tr><th>Command</th><th>Effect</th></tr></thead>

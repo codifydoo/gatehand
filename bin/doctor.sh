@@ -79,6 +79,19 @@ case "$(var AGENTS_ENABLED)" in
   *) warn "AGENTS_ENABLED is not true: the agents are off" ;;
 esac
 [[ "$(var AGENT_AUTO_MERGE)" == true ]] && ok "AGENT_AUTO_MERGE is on" || warn "AGENT_AUTO_MERGE is off: the merge gate is a dry run"
+# A pinned inbox is never replaced (agent-lib.sh inbox_issue), and GitHub refuses comments on an
+# issue past about 2,500, so a pin near that stops the inbox.
+pinned="$(var AGENT_INBOX_ISSUE)"
+if [[ "${pinned}" =~ ^[0-9]+$ ]]; then
+  limit="$(p '.inboxRotateAt // 2000')"
+  if ! count="$(gh api "repos/${NWO}/issues/${pinned}" --jq .comments 2>/dev/null)" || [[ ! "${count}" =~ ^[0-9]+$ ]]; then
+    warn "cannot read the comment count of the inbox AGENT_INBOX_ISSUE pins (#${pinned})"
+  elif [[ "${limit}" =~ ^[0-9]+$ && "${limit}" -gt 0 && "${count}" -ge "${limit}" ]]; then
+    warn "AGENT_INBOX_ISSUE pins inbox #${pinned}, which has ${count} comments (inboxRotateAt is ${limit}): GitHub refuses comments past about 2,500 and a pinned inbox is never replaced. Unset it (gh variable delete AGENT_INBOX_ISSUE) and the agents replace the inbox at their next request"
+  else
+    ok "AGENT_INBOX_ISSUE pins inbox #${pinned} (${count} comments)"
+  fi
+fi
 
 runner_ref="$(p .runnerRef)"
 blob() { gh api "repos/${NWO}/contents/.github/workflows/$1?ref=$2" --jq .sha 2>/dev/null; }

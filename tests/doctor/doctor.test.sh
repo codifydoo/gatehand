@@ -8,6 +8,9 @@
 #   3. A sweep schedule that is not hourly is not checked; an unreadable one, or a failing API, warns.
 #   4. With claude.agentAuth set apart from claude.auth, the agents' own secret is checked as well:
 #      a dedicated key the coder and fixer need but nobody set is a FAIL, not a silent outage.
+#   5. An inbox pinned by AGENT_INBOX_ISSUE is never replaced (agent-lib.sh inbox_issue), so the
+#      doctor warns once it has policy.inboxRotateAt comments (2,000 when unset), before GitHub's
+#      ~2,500 cap stops it; under the threshold it is ok, and an unreadable count warns.
 set -uo pipefail
 PKG="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 pass=0 fail=0
@@ -30,6 +33,9 @@ gh() {
     "api repos/o/r/commits/"*"/pulls") [[ "${STUB_PULLS:-}" == fail ]] && return 1; printf '%s\n' "${STUB_PULLS:-[]}" ;;
     "api repos/o/r/actions/workflows/agent-sweep.yml/runs?event=schedule&per_page=1 "*) printf '%s\n' "${STUB_FIRED:-0}" ;;
     "secret list --repo o/r --json name --jq .[].name") printf '%s\n' ${STUB_SECRETS:-} ;;
+    "variable list --repo o/r --json name,value") [[ -n "${STUB_PIN:-}" ]] || return 1
+      printf '[{"name":"AGENT_INBOX_ISSUE","value":"%s"}]\n' "${STUB_PIN#none}" ;;
+    "api repos/o/r/issues/${STUB_PIN:-x} --jq .comments") [[ "${STUB_COUNT:-}" == fail ]] && return 1; printf '%s\n' "${STUB_COUNT:-0}" ;;
     *) return 1 ;;
   esac
 }
@@ -88,6 +94,29 @@ cred_is "...and passes once it is set" 'ok    secret CLAUDE_CODE_OAUTH_TOKEN is 
 STUB_SECRETS="ANTHROPIC_API_KEY_AGENTS"
 cred_is "...and the review's own credential is still required" 'FAIL  secret CLAUDE_CODE_OAUTH_TOKEN is not set (policy.json claude.auth)|ok    secret ANTHROPIC_API_KEY_AGENTS is set|'
 cp "${TMP}/policy" "${P}" && "${PKG}/bin/render.sh" "${TMP}/r" >/dev/null
+
+# --- 5. a pinned inbox near GitHub's comment cap ---------------------------------------------------
+pin_line() { bash "${PKG}/bin/doctor.sh" "${TMP}/r" 2>/dev/null | grep -E '^(ok|WARN|FAIL) .*AGENT_INBOX_ISSUE' | head -1; }
+pin_is() {
+  local got
+  got="$(pin_line)"
+  if [[ "${got}" =~ $2 ]]; then t_pass "$1"; else t_fail "$1: got '${got}'"; fi
+}
+export STUB_PIN STUB_COUNT
+STUB_PIN=7 STUB_COUNT=1999
+pin_is "a pinned inbox under 2,000 comments is ok" '^ok +AGENT_INBOX_ISSUE pins inbox #7 \(1999 comments\)'
+STUB_COUNT=2000
+pin_is "a pinned inbox at 2,000 comments warns" '^WARN +AGENT_INBOX_ISSUE pins inbox #7, which has 2000 comments'
+jq '.inboxRotateAt = 3000' "${TMP}/policy" >"${P}"
+pin_is "policy.inboxRotateAt moves the threshold" '^ok +AGENT_INBOX_ISSUE pins inbox #7'
+jq 'del(.inboxRotateAt)' "${TMP}/policy" >"${P}"
+pin_is "without inboxRotateAt in policy.json the threshold is 2,000" '^WARN +AGENT_INBOX_ISSUE pins inbox #7, which has 2000 comments \(inboxRotateAt is 2000\)'
+cp "${TMP}/policy" "${P}"
+STUB_COUNT=fail
+pin_is "an unreadable count warns" '^WARN +cannot read the comment count of the inbox AGENT_INBOX_ISSUE pins \(#7\)'
+STUB_PIN=none
+if [[ -z "$(pin_line)" ]]; then t_pass "a readable variable list without the pin: no inbox line"; else t_fail "no pin, no inbox line: got '$(pin_line)'"; fi
+STUB_PIN=""
 
 printf '\n[doctor] %d passed, %d failed\n' "${pass}" "${fail}"
 [[ "${fail}" -eq 0 ]]

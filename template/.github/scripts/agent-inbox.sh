@@ -92,13 +92,38 @@ find_request() {
   sed -E 's/.* role=([a-z]+) issue=([0-9]+) kind=([a-z]+) .*/\1 \2 \3/' <<<"${m%%$'\n'*}"
 }
 
-# answered <REQ-id> <bot-comments>: exit 0 when an answer marker for it already exists.
-# Also true for an id answered earlier in the SAME comment, which is not posted yet.
+# answered <REQ-id> <bot-comments>: exit 0 when an answer marker for it already exists here, also for
+# an id answered earlier in the SAME comment, which is not posted yet. For a request moved here from
+# earlier inboxes (agent-lib.sh inbox_rotate), exit 3 when it was answered on any of them, and 2 when
+# one of them cannot be read (a deleted one, 404 or 410, has no answer). Otherwise 1.
+declare -A INBOX_BODIES=()  # inbox number -> its bot comments, read once per command
 answered() {
-  local e
+  local e from err rc=1
   grep -Fq "<!-- agent-answer:$1 -->" <<<"$2" && return 0
   for e in "${ANSWERED[@]}"; do [[ "${e%%|*}" == "$1" ]] && return 0; done
-  return 1
+  for from in $(moved_from "$1" "$2"); do
+    if [[ -z "${INBOX_BODIES[${from}]+x}" ]]; then
+      err="$(mktemp)"
+      if e="$(inbox_bot_bodies "${from}" 2>"${err}")"; then INBOX_BODIES[${from}]="${e}"
+      elif grep -qE 'HTTP (404|410)' "${err}"; then INBOX_BODIES[${from}]=""
+      else rm -f "${err}"; rc=2; continue
+      fi
+      rm -f "${err}"
+    fi
+    # The move notice on an earlier inbox marks every moved id answered; only a real answer counts.
+    jq -se --arg m "<!-- agent-answer:$1 -->" --arg n '<!-- agent-inbox-moved ' \
+      'any(.[]; (startswith($n) | not) and contains($m))' <<<"${INBOX_BODIES[${from}]}" >/dev/null && return 3
+  done
+  return "${rc}"
+}
+
+# moved_from <REQ-id> <bot-comments>: every inbox the request was moved from, one a line. Each move
+# appends `<!-- agent-req-moved from=N -->` to the copy, so a request moved twice names both.
+moved_from() {
+  awk -v m="<!-- agent-req:$1 " '
+    index($0, m) == 1 { on = 1; next }
+    on && /^<!-- agent-req:/ { exit }
+    on && /^<!-- agent-req-moved from=[0-9]+ -->$/ { gsub(/[^0-9]/, ""); print }' <<<"$2"
 }
 
 requeue() {  # requeue <issue> <extra-label-or-empty>
@@ -128,12 +153,21 @@ apply_one() {
       req="${arg1}"
       found="$(find_request "${req}" "$2")"
       if [[ -z "${found}" ]]; then printf -- '- `%s`: no request by the agent has that id\n' "${req}"; return; fi
-      if answered "${req}" "$2"; then
-        # Answered in an earlier comment, but its line may still be listed (an edit of the inbox body
-        # that failed, or a lost update): answering again removes it.
-        grep -Fq "<!-- agent-answer:${req} -->" <<<"$2" && STALE+=("${req}")
-        printf -- '- `%s`: already answered\n' "${req}"; return
-      fi
+      answered "${req}" "$2"
+      case $? in
+        0)
+          # Answered in an earlier comment, but its line may still be listed (an edit of the inbox
+          # body that failed, or a lost update): answering again removes it.
+          [[ " ${ANSWERED[*]} " == *" ${req}|"* ]] || STALE+=("${req}")
+          printf -- '- `%s`: already answered\n' "${req}"; return ;;
+        3)
+          # Answered on an inbox it was moved from: record that here too, so it reads as answered.
+          mark_answered "${req}" "answered before the move"
+          printf -- '- `%s`: already answered on an earlier inbox; nothing done\n' "${req}"; return ;;
+        2)
+          printf -- '- `%s`: it was moved from an earlier inbox that could not be read to check for an answer there; nothing done, send it again\n' "${req}"
+          return ;;
+      esac
       read -r role issue kind <<<"${found}"
       if [[ "${verb}" == reject ]]; then
         # A breaker request has no issue to tell; a fixer, merger or review request is about the PR,
