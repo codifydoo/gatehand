@@ -128,7 +128,12 @@ apply_one() {
       req="${arg1}"
       found="$(find_request "${req}" "$2")"
       if [[ -z "${found}" ]]; then printf -- '- `%s`: no request by the agent has that id\n' "${req}"; return; fi
-      if answered "${req}" "$2"; then printf -- '- `%s`: already answered\n' "${req}"; return; fi
+      if answered "${req}" "$2"; then
+        # Answered in an earlier comment, but its line may still be listed (an edit of the inbox body
+        # that failed, or a lost update): answering again removes it.
+        grep -Fq "<!-- agent-answer:${req} -->" <<<"$2" && STALE+=("${req}")
+        printf -- '- `%s`: already answered\n' "${req}"; return
+      fi
       read -r role issue kind <<<"${found}"
       if [[ "${verb}" == reject ]]; then
         # A breaker request has no issue to tell; a fixer, merger or review request is about the PR,
@@ -240,9 +245,10 @@ apply_one() {
 
 ANSWERED=()
 mark_answered() { ANSWERED+=("$1|$2"); }
+STALE=()  # ids answered in an earlier comment, whose checklist line is removed again
 
 cmd_apply() {
-  local cmds line reply entry req note comments
+  local cmds line reply entry req comments
   [[ -n "${AGENT_OWNER_LOGIN:-}" && "${COMMENT_AUTHOR:-}" == "${AGENT_OWNER_LOGIN}" ]] \
     || { agent_log "comment author is not AGENT_OWNER_LOGIN; nothing applied"; return 0; }
   cmds="$(printf '%s\n' "${COMMENT_BODY:-}" | parse_commands)"
@@ -253,9 +259,12 @@ cmd_apply() {
     apply_one "${line}" "${comments}" >>"${reply}"
   done <<<"${cmds}"
   for entry in "${ANSWERED[@]}"; do
-    IFS='|' read -r req note <<<"${entry}"
+    IFS='|' read -r req _ <<<"${entry}"
     printf '<!-- agent-answer:%s -->\n' "${req}" >>"${reply}"
-    inbox_tick_line "${INBOX}" "${req}" "${note}" || agent_log "could not tick ${req} in the inbox list"
+    inbox_drop_line "${INBOX}" "${req}" || agent_log "could not remove ${req} from the inbox list"
+  done
+  for req in "${STALE[@]}"; do
+    inbox_drop_line "${INBOX}" "${req}" || agent_log "could not remove ${req} from the inbox list"
   done
   gh issue comment "${INBOX}" --body-file "${reply}" >/dev/null
   if [[ -n "${COMMENT_ID:-}" ]]; then

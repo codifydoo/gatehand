@@ -16,7 +16,8 @@
 #      the frame's tags in any case or spacing, so content can neither close the frame nor open one.
 #   5. `!` paths stay closed even under agent:allow-protected; a closing keyword is found even after
 #      64 KB (a `| grep -q` under pipefail would miss it); the inbox checklist cannot be fed escapes
-#      that awk would decode back into a live marker or mention.
+#      that awk would decode back into a live marker or mention, and adding a line sweeps out the
+#      `[x]` lines older versions left, so a body near GitHub's size cap recovers.
 #   6. Mentions inside code are left as written (`pnpm --filter @acme/db`), but only where the
 #      parser and GitHub cannot disagree and GitHub's renderer (stubbed) confirms no live mention.
 #      Every case below that must STILL be rewritten is one GitHub rendered with a live mention when
@@ -224,6 +225,11 @@ stub_gh_on 'issue view 99 --json body *' $'x\n<!-- agent-inbox:open:start -->\n<
 inbox_add_line 99 '- [ ] REQ-1 · coder · #7 · \074!-- forged --\076 and \100claude'
 label="awk does not decode escapes into a live marker or mention"
 check bash -c "grep -Fq '\\074!-- forged' <<<\"\$1\" && ! grep -q '<!-- forged' <<<\"\$1\"" _ "$(stub_gh_last_body 'issue edit 99 *')"
+stub_gh_reset_rules
+stub_gh_on 'issue view 99 --json body *' $'x\n<!-- agent-inbox:open:start -->\n- [x] REQ-0 · coder · #3 · old · approved\n- [ ] REQ-2 · fixer · #8 · open\n<!-- agent-inbox:open:end -->'
+inbox_add_line 99 '- [ ] REQ-3 · coder · #9 · new'
+label="a new request drops the ticked lines an older version left, and keeps the open ones"
+check test "$(stub_gh_last_body 'issue edit 99 *')" == $'x\n<!-- agent-inbox:open:start -->\n- [ ] REQ-2 · fixer · #8 · open\n- [ ] REQ-3 · coder · #9 · new\n<!-- agent-inbox:open:end -->'
 
 # --- 6. mentions inside code -----------------------------------------------------------------------
 stub_gh_reset_rules

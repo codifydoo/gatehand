@@ -221,7 +221,7 @@ function needRows(repo) {
   const findIssue = (n) => Object.values(issues).flat().find((i) => i && i.number === n) || null;
   const add = (r) => out.rows.push(Object.assign({ repo }, r));
   // The open requests are the inbox checklist's unticked lines, the same list for every repository
-  // whether it is on screen or not; the agents tick a line when its request is answered. A request's
+  // whether it is on screen or not; the agents remove a line when its request is answered. A request's
   // kind and time come from its comment. Until the comments are read the requests wait (loading); if
   // they cannot be read, or a line's comment is not among the newest 1,000, the kind is told from the
   // line: the fixer's, merger's and review's start "#<PR>:", a breaker's is "circuit breaker tripped".
@@ -239,7 +239,7 @@ function needRows(repo) {
       created_at: c ? c.created_at : "", summary: l.summary };
   };
   const onPr = (r) => (["fixer", "merger", "review"].includes(r.kind) ? /^#(\d+):/.exec(r.summary) : null);
-  // Ticking a line is best effort, so a line whose comment says answered is dropped once that is known.
+  // Removing a line is best effort, so a line whose comment says answered is dropped once that is known.
   const reqs = out.loading ? [] : lines.filter((l) => !(comments && comments.some((r) => r.id === l.id && r.answered))).map(asRequest);
   // While loading, a PR a line names waits for its PR row, so it does not show as "to merge" first.
   const linePr = new Set(out.loading ? lines.map((l) => /^#(\d+):/.exec(l.summary)).filter(Boolean).map((m) => Number(m[1])) : []);
@@ -832,7 +832,7 @@ const REQ_PANE = {
     why: (n) => `Someone without write access changed #${n} after the label the run trusts, or its trust check failed, so nothing reached the agent.`,
     next: (n) => `Nothing runs on #${n} until a person with write access vouches for its text.`,
     step: (n, url) => [h("strong", {}, "Read the change, then re-apply agent:ready yourself "), link(url, `on #${n} on GitHub ↗`),
-      h("div", { class: "muted" }, "Only your own label vouches for the text. Then Acknowledge here, which ticks the request and changes nothing; the issue then has its own item in Needs you, to rerun the coder from.")],
+      h("div", { class: "muted" }, "Only your own label vouches for the text. Then Acknowledge here, which removes the request from the inbox's list and changes nothing; the issue then has its own item in Needs you, to rerun the coder from.")],
   },
 };
 const REQUEUE = new Set(["blocked", "failed", "protected"]);
@@ -1210,7 +1210,7 @@ function rolePane(r) {
       : (stopped ? `${b.reason || "Its breaker tripped."}` : "Its breaker was reset, but its breaker request is still open.")),
     kv("What happens next", stopped
       ? `No ${role} runs in ${short(repo)} until it is reset${role === "coder" && queued !== null ? `; ${queued} queued ${queued === 1 ? "issue waits" : "issues wait"}` : ""}. No agent PR merges either: the merge gate stops on any tripped breaker.`
-      : (known ? `The ${role} runs. Answering the request ticks it.` : "Not known.")),
+      : (known ? `The ${role} runs. Answering the request removes it from the inbox's list.` : "Not known.")),
     full ? h("div", { class: "said" }, h("div", { class: "muted" }, "What the agent wrote (plain text from GitHub)"), h("pre", { class: "body" }, full.body)) : null,
     !paused && streak && streak.length ? h("div", {}, h("div", { class: "muted" }, `The last ${streak.length} ${role} runs in the ledger`),
       h("ul", { class: "items" }, streak.map((x) => { const e = runEvent(x); return h("li", {}, h("span", { class: "muted" }, `${String(e.at).slice(5, 16).replace("T", " ")} `), e.url ? link(e.url, `${e.text} ↗`) : e.text); }))) : null,

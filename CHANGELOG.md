@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Inbox: an answered request's line now leaves the "Open requests" list in the inbox issue's body
+  instead of being ticked; the answer stays in the bot's reply comment. Ticked lines were never
+  removed, so a long-lived inbox grew towards GitHub's 65,536-character body limit. Past that,
+  every edit of the body failed (logged and ignored), new requests no longer showed in the digest's
+  or the dashboard's "waiting" list, and answered ones kept showing as open. The `[x]` lines earlier
+  versions left are removed the next time a request is filed or answered. A request that was
+  answered while its line could not be removed (a full body, a failed edit) still shows as open;
+  `/approve` or `/reject` it again and the reply says "already answered" and removes the line. A
+  failed edit of the list is now logged as such. Installed repositories need an update to get this.
+
 ## 0.8.3 (2026-11-18)
 
 - A writer's stop on an agent PR or a queued issue now stands until a writer or the agent bot lifts

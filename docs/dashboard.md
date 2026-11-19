@@ -130,7 +130,7 @@ A request whose comment was not read (the inbox could not be read, or it is olde
 counts in a row (or "Paused by the owner" for a role paused with `/pause`), then why it stopped (the
 breaker's own reason) and what that holds up: that role's runs, and every agent PR's merge, since
 the merge gate stops on any tripped breaker. Its one action: "Reset the breaker" posts
-`/approve REQ-…` for its open breaker request, which resets it and ticks the request; with no request
+`/approve REQ-…` for its open breaker request, which resets it and removes the request from the inbox's list; with no request
 (paused by hand) it reads "Resume" and posts `/resume <role>`, offered only for a role in
 `policy.json`. Neither starts a run: the coder's next scheduled run picks from the queue, and the
 fixer runs again the next time CI fails or a review asks for changes. A role whose breaker was reset
