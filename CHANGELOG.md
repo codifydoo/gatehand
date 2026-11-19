@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.10.0 (2026-11-19)
+## Unreleased
 
 - Coder: a run that committed and wrote `pr.json` but forgot `pr-body.md` now opens its PR instead
   of ending as a no-op. Its `summary.md` becomes the PR body, with a note saying so and a
@@ -8,6 +8,9 @@
   the work was dropped and the issue lost one of its attempts over a missing file. The prompt now
   says the three files are required and to check them before stopping, and a no-op's reason names
   the file that was missing. Installed repositories need an update to get this.
+
+## 0.10.0 (2026-11-19)
+
 - Inbox: the agents now replace the inbox issue before GitHub's per-issue comment limit stops it.
   GitHub refuses every new comment on an issue past about 2,500 (undocumented; "Commenting is
   disabled on issues with more than 2500 comments"), and each request costs about three comments, so
