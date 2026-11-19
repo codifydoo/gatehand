@@ -11,6 +11,9 @@
 #   3. With `agent:allow-protected` on the issue a protected path is let through, and the PR is
 #      labelled so the guard and a person can see it.
 #   4. The non-PR outcomes: a failed code job, a `blocked.md` question, and no commits.
+#   4b. Commits and pr.json but no pr-body.md: summary.md becomes the body (sanitised, with a note
+#      and `Refs #N`, through the same checks), so the work is not dropped; with neither file, or no
+#      pr.json, it is still a no-op.
 #   5. The review's bypasses stay closed: a non-ASCII protected path (which plain `--name-only`
 #      would quote), a `!` path even WITH permission, a commit authored as someone else, a closing
 #      keyword hidden after 300 KB of message, and an over-long body are all refused.
@@ -325,6 +328,46 @@ expect "an uncut code span keeps its scoped package" "$(grep -c 'pnpm --filter @
 new_case nothing
 publish
 expect "no commits: outcome" "$(outv outcome)" "no-op"
+
+# --- 4b. commits and pr.json but no pr-body.md: the summary becomes the body ---------------------
+new_case nobody
+agent_commit cli/table.go $'fix(cli): handle a nil table\n\nRefs #7'
+bundle
+rm -f "${OUT}/pr-body.md"
+publish
+expect "no pr-body.md: the PR still opens" "$(outv outcome)" "pr-opened"
+body="$(stub_gh_last_body 'pr create *')"
+expect "no pr-body.md: the body is the summary" "$(grep -c '^Changed table.go' <<<"${body}")" 1
+expect "no pr-body.md: and says so" "$(grep -c 'wrote no PR description' <<<"${body}")" 1
+expect "no pr-body.md: it says Refs #7" "$(grep -c '^Refs #7$' <<<"${body}")" 1
+expect "no pr-body.md: the summary is sanitised like a body" "$(grep -c '@-owner-login' <<<"${body}")" 1
+expect "no pr-body.md: the body still ends with the run marker" "$(tail -1 <<<"${body}")" "<!-- agent-run:coder run=900 issue=7 -->"
+
+new_case nobodyclose
+agent_commit cli/table.go $'fix(cli): handle a nil table\n\nRefs #7'
+bundle
+rm -f "${OUT}/pr-body.md"
+printf 'Changed table.go. Fixes #7\n' >"${OUT}/summary.md"
+publish
+expect "no pr-body.md, a closing keyword in the summary: refused" "$(outv outcome)" "refused"
+expect "...for the closing keyword" "$(outv reason)" "PR body uses a closing keyword; agent PRs say Refs #N"
+expect "...and nothing pushed" "$(remote_branches)" ""
+
+new_case nobodynosummary
+agent_commit cli/table.go $'fix(cli): handle a nil table\n\nRefs #7'
+bundle
+rm -f "${OUT}/pr-body.md" "${OUT}/summary.md"
+publish
+expect "neither pr-body.md nor summary.md: no-op" "$(outv outcome)" "no-op"
+expect "...the reason names both" "$(outv reason)" "commits but no pr-body.md or summary.md"
+
+new_case nometa
+agent_commit cli/table.go $'fix(cli): handle a nil table\n\nRefs #7'
+bundle
+rm -f "${OUT}/pr.json"
+publish
+expect "no pr.json: no-op" "$(outv outcome)" "no-op"
+expect "...the reason names it" "$(outv reason)" "commits but no pr.json"
 
 # --- 6. publish-fix: the fixer's commits on top of an open agent PR --------------------------------
 # fix_case <name>: an agent PR branch fix/agent-x on "GitHub" (one coder commit on main), and the

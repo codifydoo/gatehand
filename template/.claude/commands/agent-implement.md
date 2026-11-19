@@ -57,7 +57,8 @@ Below, `ISSUE` is the first word and `AGENT_DIR` the second.
    `Refs #ISSUE`. Never write `Closes`, `Fixes` or `Resolves` followed by an issue: a merge is not a
    deploy, and the owner closes issues themselves once the fix is live. The validator refuses them.
 
-7. Write these files in `AGENT_DIR/outbox/` and stop:
+7. Write these files in `AGENT_DIR/outbox/` and stop. `pr.json`, `pr-body.md` and `summary.md` are
+   all required once you have committed: check that each exists before you stop.
    - `pr.json`: `{"type": "fix", "slug": "cli-nil-table", "title": "fix(cli): handle a nil table"}`.
      `type` is one of the commit types, `slug` is 3 to 60 lowercase letters, digits and dashes, and
      `title` is a conventional subject with a scope whose type equals `type`, at most 120 characters.
