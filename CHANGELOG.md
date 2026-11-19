@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.1 (2026-11-19)
 
 - Coder: a run that committed and wrote `pr.json` but forgot `pr-body.md` now opens its PR instead
   of ending as a no-op. Its `summary.md` becomes the PR body, with a note saying so and a
