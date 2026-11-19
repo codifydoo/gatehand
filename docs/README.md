@@ -197,11 +197,11 @@ which would stop both the requests and your answers. So when the agents are abou
 on an inbox with `policy.json` `inboxRotateAt` comments or more (2,000 by default; `0` turns this
 off), they open a new inbox issue first. Every request listed under "Open requests" is posted again
 there under the same `REQ-…` id and listed. The old issue gets one comment that links the new one
-and is closed; its history stays. Until that comment is posted the old issue stays the inbox, so a
+and is closed; its history stays. Until the move is complete the old issue stays the inbox, so a
 move that fails half way is retried with the next request. **Pin the new inbox by hand and unpin the
 old one**: the App cannot pin issues. Answer moved requests on the new inbox; a command for one of
 them on the old issue is refused as already answered, while one for any other request there still
-applies. If `AGENT_INBOX_ISSUE` is set, the
+applies. A request answered on the old issue is also refused on the new one. If `AGENT_INBOX_ISSUE` is set, the
 inbox it names is never replaced: the agents log a warning and `bin/doctor.sh` warns once it is past
 the threshold. Unset the variable and the agents replace the inbox at their next request.
 

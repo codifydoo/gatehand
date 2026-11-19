@@ -93,12 +93,28 @@ find_request() {
 }
 
 # answered <REQ-id> <bot-comments>: exit 0 when an answer marker for it already exists.
-# Also true for an id answered earlier in the SAME comment, which is not posted yet.
+# Also true for an id answered earlier in the SAME comment, which is not posted yet, and for a request
+# moved here from an earlier inbox (agent-lib.sh inbox_rotate) that was answered there; exit 2 when
+# that earlier inbox cannot be read.
 answered() {
-  local e
+  local e from
   grep -Fq "<!-- agent-answer:$1 -->" <<<"$2" && return 0
   for e in "${ANSWERED[@]}"; do [[ "${e%%|*}" == "$1" ]] && return 0; done
-  return 1
+  from="$(moved_from "$1" "$2")"
+  [[ -n "${from}" ]] || return 1
+  e="$(inbox_bot_bodies "${from}")" || return 2
+  # The move notice on the earlier inbox marks every moved id answered; only a real answer counts.
+  jq -se --arg m "<!-- agent-answer:$1 -->" --arg n '<!-- agent-inbox-moved ' \
+    'any(.[]; (startswith($n) | not) and contains($m))' <<<"${e}" >/dev/null
+}
+
+# moved_from <REQ-id> <bot-comments>: the inbox the request was moved from, or nothing. The copy's
+# last line is `<!-- agent-req-moved from=N -->`, before any later comment's request marker.
+moved_from() {
+  awk -v m="<!-- agent-req:$1 " '
+    index($0, m) == 1 { on = 1; next }
+    on && /^<!-- agent-req:/ { exit }
+    on && match($0, /^<!-- agent-req-moved from=[0-9]+ -->$/) { gsub(/[^0-9]/, ""); print; exit }' <<<"$2"
 }
 
 requeue() {  # requeue <issue> <extra-label-or-empty>
@@ -128,12 +144,18 @@ apply_one() {
       req="${arg1}"
       found="$(find_request "${req}" "$2")"
       if [[ -z "${found}" ]]; then printf -- '- `%s`: no request by the agent has that id\n' "${req}"; return; fi
-      if answered "${req}" "$2"; then
-        # Answered in an earlier comment, but its line may still be listed (an edit of the inbox body
-        # that failed, or a lost update): answering again removes it.
-        grep -Fq "<!-- agent-answer:${req} -->" <<<"$2" && STALE+=("${req}")
-        printf -- '- `%s`: already answered\n' "${req}"; return
-      fi
+      answered "${req}" "$2"
+      case $? in
+        0)
+          # Answered in an earlier comment (or on the inbox it was moved from), but its line may still
+          # be listed (an edit of the inbox body that failed, or a lost update): answering again
+          # removes it.
+          [[ " ${ANSWERED[*]} " == *" ${req}|"* ]] || STALE+=("${req}")
+          printf -- '- `%s`: already answered\n' "${req}"; return ;;
+        2)
+          printf -- '- `%s`: it was moved from an earlier inbox that could not be read to check for an answer there; nothing done, send it again\n' "${req}"
+          return ;;
+      esac
       read -r role issue kind <<<"${found}"
       if [[ "${verb}" == reject ]]; then
         # A breaker request has no issue to tell; a fixer, merger or review request is about the PR,

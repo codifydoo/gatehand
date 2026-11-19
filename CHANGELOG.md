@@ -18,9 +18,10 @@
   on an inbox with `inboxRotateAt` comments or more (new in `policy.json`, 2,000 by default, `0` turns
   it off), a new inbox issue opens. Every request listed as open that the agent bot filed is posted
   again there under the same id and listed. The old issue gets one comment linking the new one, which
-  also marks the moved requests answered there so a command on the old issue cannot apply one twice,
-  and it is closed. Until that comment is posted the old issue stays the inbox, and a move that fails
-  half way is retried with the next request. **Pin the new inbox by hand**; the App cannot pin issues. An inbox pinned with
+  also marks the moved requests answered there, and it is closed. Each copy names the issue it came
+  from, and a command on the copy is refused when the request was answered there, so no request is
+  applied twice. Until the move is complete the old issue stays the inbox, and a move that fails half
+  way is retried with the next request. **Pin the new inbox by hand**; the App cannot pin issues. An inbox pinned with
   `AGENT_INBOX_ISSUE` is never replaced: the agents log a warning, and `bin/doctor.sh` warns once it
   is past the threshold. Installed repositories need an update to get this; `policy.json` needs no
   change.
