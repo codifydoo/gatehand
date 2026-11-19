@@ -25,6 +25,12 @@
 #     a person put `agent:allow-protected` on the issue (reason `protected:<paths>`)
 #   - an open agent PR for the same issue already exists
 #
+# A MISSING pr-body.md. When the coder committed and wrote pr.json but no pr-body.md, its summary.md
+# (the issue comment, written for the same audience) becomes the PR body, with a note saying so and
+# a `Refs #<issue>` line, and goes through the same checks. Without this the run's work was dropped
+# as a no-op and the issue lost one of its attempts over a forgotten file. With neither file, or no
+# pr.json, it is still a no-op.
+#
 # FIXES (publish-fix): the fixer's commits go on top of an existing agent PR's branch instead. The
 # same commit rules apply to them, the range must sit on the PR's head as preflight saw it, and the
 # push is a fast-forward or nothing (a person who pushed meanwhile wins). Paths are checked over the
@@ -111,8 +117,8 @@ check_commits() {
 check_body() {
   local f="$1" issue="$2" max
   max="$(policy '.maxPrBodyBytes')"
-  [[ -s "${f}" ]] || { refuse "pr-body.md is empty"; return 1; }
-  [[ "$(wc -c <"${f}")" -le "${max}" ]] || { refuse "pr-body.md is longer than ${max} bytes"; return 1; }
+  [[ -s "${f}" ]] || { refuse "PR body is empty"; return 1; }
+  [[ "$(wc -c <"${f}")" -le "${max}" ]] || { refuse "PR body is longer than ${max} bytes"; return 1; }
   grep -Eq "(^|[^[:alnum:]_])Refs #${issue}([^0-9]|$)" "${f}" || { refuse "PR body does not say Refs #${issue}"; return 1; }
   if has_closing_keyword <"${f}"; then refuse "PR body uses a closing keyword; agent PRs say Refs #N"; return 1; fi
 }
@@ -247,9 +253,16 @@ cmd_publish() {
     return 0
   fi
   if [[ ! -s "${outbox}/agent.bundle" ]]; then finish no-op "the agent made no commits"; return 0; fi
-  if [[ ! -s "${outbox}/pr.json" || ! -s "${outbox}/pr-body.md" ]]; then
-    finish no-op "commits but no pr.json or pr-body.md"
-    return 0
+  if [[ ! -s "${outbox}/pr.json" ]]; then finish no-op "commits but no pr.json"; return 0; fi
+  if [[ ! -s "${outbox}/pr-body.md" ]]; then
+    if [[ ! -s "${outbox}/summary.md" ]]; then finish no-op "commits but no pr-body.md or summary.md"; return 0; fi
+    # Written into this job's own copy of the outbox, from the raw summary rather than the sanitised
+    # one: from here on it is checked and sanitised exactly like a pr-body.md the agent wrote.
+    {
+      cat "${outbox}/summary.md"
+      printf '\n\n_The agent wrote no PR description, so this is its summary for the issue._\n\nRefs #%s\n' "${issue}"
+    } >"${outbox}/pr-body.md"
+    agent_log "no pr-body.md: the PR body is the agent's summary.md"
   fi
 
   if ! git bundle verify -q "${outbox}/agent.bundle" >/dev/null 2>&1; then finish refused "the bundle does not verify"; return 0; fi
