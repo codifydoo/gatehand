@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.2 (2026-11-20)
+
+- Coder and fixer: every run's outbox artifact (`agent-outbox` for the coder, `agent-fix-outbox` for
+  the fixer) now holds `session.json`, saying why the session stopped: the result's `stop_reason`,
+  `terminal_reason` and `errors`, the agent's final message (first 4,000 characters), the tool calls
+  it was refused, and its last 15 tool calls (inputs capped). A run that ended "success" without
+  writing its outbox files left no trace of why before, because the model's transcript is not kept;
+  three coder runs in a row ended that way on 2026-11-20. The file is for people and nothing reads it. The step rewrites any `session.json` the agent wrote, but it is
+  still the model job's output, so treat it as the agent's account of the run, and note that tool
+  inputs (file content included) are in an artifact anyone with read access can download.
+  Installed repositories need an update to get this.
+
 ## 0.10.1 (2026-11-19)
 
 - Coder: a run that committed and wrote `pr.json` but forgot `pr-body.md` now opens its PR instead

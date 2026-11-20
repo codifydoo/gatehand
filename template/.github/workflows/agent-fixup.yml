@@ -284,6 +284,8 @@ jobs:
             --add-dir ${{ runner.temp }}/agent
             --allowedTools "@@AGENT_ALLOWED_TOOLS@@"
             --disallowedTools "@@AGENT_DISALLOWED_TOOLS@@"
+      # session.json (why the session stopped: its stop reasons, final text, refused and last tool
+      # calls) is for people; nothing reads it.
       - name: package the work
         if: always() && steps.agent.outcome != 'skipped'
         env:
@@ -295,6 +297,7 @@ jobs:
           out="$AGENT_DIR/outbox"
           mkdir -p "$out"
           rm -f "$out/agent.bundle" "$out/metrics.json"
+          rm -rf "$out/session.json"
           if [ "$(git rev-list --count "$HEAD_SHA..agent-work" 2>/dev/null || echo 0)" -gt 0 ]; then
             git bundle create "$out/agent.bundle" "$HEAD_SHA..agent-work"
           fi
@@ -303,6 +306,15 @@ jobs:
               | {turns: .num_turns, duration_ms: .duration_ms, cost_usd: .total_cost_usd,
                  is_error: .is_error, subtype: .subtype, step_outcome: $o}' "$EXECUTION_FILE" \
               > "$out/metrics.json" || echo '{}' > "$out/metrics.json"
+            jq -c '([.[] | select(.type == "result")] | last // {}) as $r
+              | {stop_reason: $r.stop_reason, terminal_reason: $r.terminal_reason,
+                 subtype: $r.subtype, result: (($r.result // "") | tostring | .[0:4000]),
+                 errors: (($r.errors // []) | tostring | .[0:1000]),
+                 permission_denials: [($r.permission_denials // [])[]
+                   | {tool: (.tool_name? // null), input: ((.tool_input? // .) | tostring | .[0:500])}],
+                 last_tools: [[.[] | select(.type == "assistant") | .message.content[]?
+                   | select(.type? == "tool_use") | {tool: .name, input: (.input | tostring | .[0:300])}]
+                   | .[-15:][]]}' "$EXECUTION_FILE" > "$out/session.json" || rm -rf "$out/session.json"
           fi
           ls -la "$out"
       - uses: actions/upload-artifact@v4

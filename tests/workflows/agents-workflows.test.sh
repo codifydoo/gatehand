@@ -18,6 +18,8 @@
 #   6. Every job that mints the App token runs on the configured agent runner (policy.json
 #      runners.agent), never wherever CI runs PR code; every coder checkout is of the default branch (the run's ref only scopes
 #      caches); the gate is told the run's ref.
+#   7. The coder's and fixer's package steps keep session.json (why the session stopped), and a
+#      file the agent planted there is replaced.
 # t_pass always returns 0, so `test && t_pass … || t_fail …` cannot run both branches.
 # shellcheck disable=SC2015
 # `${{ … }}` in single quotes is literal workflow text to match, never shell.
@@ -469,6 +471,52 @@ done
 t_pass "neither allowlist frees drop sudo or prepare the work branch, nor the fixer's project dependencies"
 has "the coder's daily grace is set" '^[0-9]+$' "$(jq -r '.roles.coder.infraGracePerDay' "${REPO_ROOT}/.github/agents/policy.json")"
 has "the fixer's daily grace is set" '^[0-9]+$' "$(jq -r '.roles.fixer.infraGracePerDay' "${REPO_ROOT}/.github/agents/policy.json")"
+
+# 7. Each package step keeps session.json beside metrics.json: the result message's stop reasons and
+#    final text, the refused tool calls and the last tool calls, each capped. A run that ends
+#    "success" without its outbox files left no other trace of why it stopped (2026-11-20: three
+#    coder runs in a row, each wrote pr.json and nothing else). The step runs as rendered, over a
+#    fixture execution file, in a scratch repository.
+package_run() { # package_run <workflow>: the package step's run script, dedented, expressions blanked
+  awk '/^      - name: package the work$/ {on = 1; next} on && /^      - / {exit}
+       on && body {print; next} on && /^        run: \|$/ {body = 1}' "$1" | sed -e 's/^          //' -e 's/\${{[^}]*}}/main/g'
+}
+PKG="$(mktemp -d)"
+python3 - "${PKG}/exec.json" <<'PY'
+import json, sys
+msgs = [{"type": "system", "subtype": "init"}]
+for i in range(20):
+    msgs.append({"type": "assistant", "message": {"content": [{"type": "text", "text": "t"}, {"type": "tool_use", "name": "Bash", "input": {"command": "c%d" % i}}]}})
+msgs.append({"type": "assistant", "message": {"content": "a plain string"}})
+msgs.append({"type": "result", "subtype": "success", "num_turns": 21, "stop_reason": "end_turn", "terminal_reason": "completed",
+             "result": "x" * 5000, "permission_denials": [{"tool_name": "Bash", "tool_use_id": "u1", "tool_input": {"command": "gh pr create " + "y" * 600}}, "odd"]})
+json.dump(msgs, open(sys.argv[1], "w"))
+PY
+printf 'not json' >"${PKG}/bad.json"
+for wf in agent-coder.yml agent-fixup.yml; do
+  script="$(package_run "${WF}/${wf}")"
+  has "${wf}: the package step writes session.json" 'session\.json' "${script}"
+  rm -rf "${PKG}/repo" "${PKG}/agent" && git init -q -b main "${PKG}/repo" && git -C "${PKG}/repo" commit -q --allow-empty -m base && git -C "${PKG}/repo" branch agent-work
+  mkdir -p "${PKG}/agent/outbox" && echo '{"planted": true}' >"${PKG}/agent/outbox/session.json"
+  (cd "${PKG}/repo" && AGENT_DIR="${PKG}/agent" EXECUTION_FILE="${PKG}/exec.json" AGENT_OUTCOME=success HEAD_SHA="$(git rev-parse HEAD)" bash -c "${script}") >/dev/null 2>&1
+  s="${PKG}/agent/outbox/session.json"
+  got="$(jq -c '[.planted, .stop_reason, .terminal_reason, .subtype, (.result | length), (.permission_denials | length),
+    .permission_denials[0].tool, (.permission_denials[0].input | length), .permission_denials[1].tool, .permission_denials[1].input,
+    (.last_tools | length), .last_tools[0].input, .last_tools[-1].input]' "${s}" 2>/dev/null)"
+  [[ "${got}" == '[null,"end_turn","completed","success",4000,2,"Bash",500,null,"odd",15,"{\"command\":\"c5\"}","{\"command\":\"c19\"}"]' ]] \
+    && t_pass "${wf}: session.json replaces a planted one and holds the capped reasons, denials and last tools" \
+    || t_fail "${wf}: session.json is wrong: ${got:-missing}"
+  rm -rf "${PKG}/agent" && mkdir -p "${PKG}/agent/outbox" && echo '{"planted": true}' >"${PKG}/agent/outbox/session.json"
+  (cd "${PKG}/repo" && AGENT_DIR="${PKG}/agent" EXECUTION_FILE="${PKG}/bad.json" AGENT_OUTCOME=failure HEAD_SHA="$(git rev-parse HEAD)" bash -c "${script}") >/dev/null 2>&1
+  [[ ! -e "${s}" && "$(cat "${PKG}/agent/outbox/metrics.json" 2>/dev/null)" == '{}' ]] \
+    && t_pass "${wf}: an unreadable execution file leaves no session.json and metrics {}" \
+    || t_fail "${wf}: an unreadable execution file left session.json or bad metrics"
+  rm -rf "${PKG}/agent" && mkdir -p "${PKG}/agent/outbox" && echo '{"planted": true}' >"${PKG}/agent/outbox/session.json"
+  (cd "${PKG}/repo" && AGENT_DIR="${PKG}/agent" EXECUTION_FILE="" AGENT_OUTCOME=failure HEAD_SHA="$(git rev-parse HEAD)" bash -c "${script}") >/dev/null 2>&1
+  [[ ! -e "${s}" ]] && t_pass "${wf}: no execution file leaves no session.json, not the agent's own" \
+    || t_fail "${wf}: with no execution file, the agent's planted session.json survived"
+done
+rm -rf "${PKG}"
 
 printf '\n[agents-workflows] %d passed, %d failed\n' "${pass}" "${fail}"
 [[ "${fail}" -eq 0 ]]

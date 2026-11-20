@@ -235,6 +235,10 @@ the details.
   is installed with Contents access. The gate fails closed on purpose.
 - **`refused` with a reason:** the outbox rule that fired is in the reason and on the issue; the
   agent's commits are in the run's `agent-outbox` artifact for 14 days.
+- **A `no-op` the agent should not have made** (it ended without the files it was asked for): the
+  run's outbox artifact (`agent-outbox`, or `agent-fix-outbox` for the fixer) holds `session.json`
+  for 14 days: why the session stopped (`stop_reason`, `terminal_reason`, `errors`), its final
+  message, the tool calls it was refused and its last 15 tool calls.
 - **`untrusted-change`:** someone without write access changed the issue after the label. Read the
   change, re-apply `agent:ready` yourself, then `/rerun coder #N`.
 - **An issue stuck in `agent:in-progress`:** the hourly sweep frees it once the lock expires and its
