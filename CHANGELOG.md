@@ -7,10 +7,11 @@
   `terminal_reason` and `errors`, the agent's final message (first 4,000 characters), the tool calls
   it was refused, and its last 15 tool calls (inputs capped). A run that ended "success" without
   writing its outbox files left no trace of why before, because the model's transcript is not kept;
-  three coder runs in a row ended that way on 2026-11-20. The file is for people and nothing reads it. The step rewrites any `session.json` the agent wrote, but it is
-  still the model job's output, so treat it as the agent's account of the run, and note that tool
-  inputs (file content included) are in an artifact anyone with read access can download.
-  Installed repositories need an update to get this.
+  three coder runs in a row ended that way on 2026-11-20. The file is for people and nothing reads
+  it. The step rewrites any `session.json` the agent wrote, but it is still the model job's output,
+  so treat it as the agent's account of the run, and note that tool inputs (file content included)
+  are in an artifact anyone with read access can download. Installed repositories need an update to
+  get this.
 
 ## 0.10.1 (2026-11-19)
 
