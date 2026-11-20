@@ -235,6 +235,12 @@ the details.
   is installed with Contents access. The gate fails closed on purpose.
 - **`refused` with a reason:** the outbox rule that fired is in the reason and on the issue; the
   agent's commits are in the run's `agent-outbox` artifact for 14 days.
+- **A coder run that ended without its outbox files** (a no-op that names a missing `pr-body.md`,
+  `summary.md` or `pr.json`, or one that made no commits): the log shows only the session's last
+  message. `gh variable set AGENT_KEEP_TRANSCRIPT --body true` keeps each later run's whole session
+  as an `agent-transcript` artifact for 14 days. It holds every tool result unmasked, so anyone
+  who can read the repository can read whatever the agent printed: leave it off on a public
+  repository, and delete the variable once you have what you need.
 - **`untrusted-change`:** someone without write access changed the issue after the label. Read the
   change, re-apply `agent:ready` yourself, then `/rerun coder #N`.
 - **An issue stuck in `agent:in-progress`:** the hourly sweep frees it once the lock expires and its
