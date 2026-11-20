@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Coder and fixer: the prompts now say that the session ends with the agent's turn and that a
+  background command never reports back, so the agent must not end its turn to wait for one; checks
+  run in the foreground with a timeout, and once it has committed the agent writes its outbox files
+  before running anything long again. On 2026-11-20, four tabulark coder runs ended `success`
+  without `pr-body.md` and `summary.md` (two after committing), and the one transcript kept that day
+  showed background `pnpm build` / `pnpm test:changed` runs whose completion notice never arrived.
+  Installed repositories need an update to get this.
+
 ## 0.11.0 (2026-11-20)
 
 - Coder: with the repository variable `AGENT_KEEP_TRANSCRIPT` set to `true`, the code job keeps the

@@ -12,7 +12,8 @@
 #   4. --model, --max-turns and timeout-minutes equal policy.json's coder role, so the numbers the
 #      runbook quotes are the numbers that run.
 #   5. The command still states the rules the outbox enforces: Refs not Closes, the outbox files,
-#      the untrusted-issue framing, and that it cannot push.
+#      the untrusted-issue framing, that it cannot push, and that it never ends its turn to wait on a
+#      background command (a headless session ends with the turn; 2026-11-20).
 #
 # The needles match LITERAL text such as `$ARGUMENTS`, so they are single-quoted on purpose.
 # shellcheck disable=SC2016
@@ -86,7 +87,8 @@ got_timeout="$(awk '/^  code:/ {on = 1} on && /^    timeout-minutes:/ {print $2;
 # --- 5 ---------------------------------------------------------------------------------------------
 body="$(awk 'NR==1 && $0=="---" {fm=1; next} fm==1 && $0=="---" {fm=2; next} fm!=1' "${CMD}")"
 for needle in 'Refs #ISSUE' 'Never write `Closes`' 'blocked.md' 'pr.json' 'pr-body.md' 'summary.md' \
-  '<untrusted-issue>' 'CANNOT push' 'protected-paths.txt'; do
+  '<untrusted-issue>' 'CANNOT push' 'protected-paths.txt' \
+  'never end your turn to wait for one' 'before you run anything long again'; do
   grep -Fq -- "${needle}" <<<"${body}" && t_pass "the command says: ${needle}" || t_fail "the command no longer says: ${needle}"
 done
 
