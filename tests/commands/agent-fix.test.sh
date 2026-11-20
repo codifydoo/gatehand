@@ -12,7 +12,8 @@
 #      network, docker), and no allowed tool is also denied.
 #   4. --model, --max-turns and timeout-minutes equal policy.json's fixer role.
 #   5. The command still states the rules the outbox enforces: Refs not Closes, a fast-forward on the
-#      PR's head, the outbox files, the untrusted-input framing, and that it cannot push.
+#      PR's head, the outbox files, the untrusted-input framing, that it cannot push, and that it never
+#      ends its turn to wait on a background command (a headless session ends with the turn).
 #
 # The needles match LITERAL text such as `$ARGUMENTS`, so they are single-quoted on purpose.
 # shellcheck disable=SC2016
@@ -91,7 +92,8 @@ got_timeout="$(awk '/^  fix:/ {on = 1} on && /^    timeout-minutes:/ {print $2; 
 body="$(awk 'NR==1 && $0=="---" {fm=1; next} fm==1 && $0=="---" {fm=2; next} fm!=1' "${CMD}")"
 for needle in 'Refs #N' 'Never write `Closes`' 'blocked.md' 'summary.md' 'fast-forward' \
   '<untrusted-fix-input>' 'CANNOT push' 'protected-paths.txt' 'Never weaken' \
-  'AGENT_DIR/outbox/pr-body.md' 'Leave out the footer' 'Protected paths: OPEN.'; do
+  'AGENT_DIR/outbox/pr-body.md' 'Leave out the footer' 'Protected paths: OPEN.' \
+  'never end your turn to wait for one' 'before you run anything long again'; do
   grep -Fq -- "${needle}" <<<"${body}" && t_pass "the command says: ${needle}" || t_fail "the command no longer says: ${needle}"
 done
 
