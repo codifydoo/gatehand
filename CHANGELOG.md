@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 (2026-11-20)
 
 - Coder: with the repository variable `AGENT_KEEP_TRANSCRIPT` set to `true`, the code job keeps the
   agent's whole session as an `agent-transcript` artifact for 14 days, so a run that ended without
