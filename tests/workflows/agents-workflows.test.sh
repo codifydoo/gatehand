@@ -9,7 +9,8 @@
 #      unnarrowed token carries everything the App was granted).
 #   3. The coder's code job: the agent pool, read-only permissions, no id-token, no App key, no
 #      dependency caches (they would let a hijacked run poison main's caches), and the read-only
-#      GITHUB_TOKEN handed to the action.
+#      GITHUB_TOKEN handed to the action. Its transcript upload is opt-in (the artifact is not
+#      secret-masked), separate from the outbox, and cannot fail the run.
 #   4. The publish job checks out the default branch without persisted credentials; the guard
 #      checks out the PR's BASE; the inbox needs AGENT_OWNER_LOGIN and holds no Claude credential.
 #   5. The review accepts the agent bot. Without `allowed_bots` the review silently skips every
@@ -96,6 +97,13 @@ hasnt "code job saves no pnpm cache" 'cache: pnpm' "${code_nc}"
 hasnt "code job restores no cache" 'actions/cache@|cache: (true|npm|pnpm|yarn|pip|gradle|maven)' "${code_nc}"
 has "code job hands the action the read-only GITHUB_TOKEN" 'github_token: \$\{\{ secrets.GITHUB_TOKEN \}\}' "${code}"
 has "code job checks out without persisting credentials" 'persist-credentials: false' "${code}"
+# The transcript is not secret-masked, so it is opt-in, its own artifact (publish downloads only
+# agent-outbox), and a failed upload must not turn the run's outcome into a failure.
+transcript="$(awk '/^      - name: keep the transcript$/ {on = 1; print; next} on && /^      - / {exit} on' <<<"${code_nc}")"
+has "the transcript is kept only when AGENT_KEEP_TRANSCRIPT is true" "^        if: .*vars\\.AGENT_KEEP_TRANSCRIPT == 'true'" "${transcript}"
+hasline "the transcript upload cannot fail the run" "        continue-on-error: true" "${transcript}"
+hasline "the transcript is its own artifact" "          name: agent-transcript" "${transcript}"
+hasline "the transcript is the action's execution file" '          path: ${{ steps.agent.outputs.execution_file }}' "${transcript}"
 # The repo's setup is two composite actions from MAIN's checkout, then sudo goes, then the model.
 corder="$(grep -oE '^      - name: (project system packages|project toolchain|project dependencies|drop sudo|implement)$' <<<"${code_nc}" | sed 's/^      - name: //' | tr '\n' '|')"
 expect_eq "code job: system packages, toolchain, dependencies, drop sudo, then the model" "${corder}" "project system packages|project toolchain|project dependencies|drop sudo|implement|"

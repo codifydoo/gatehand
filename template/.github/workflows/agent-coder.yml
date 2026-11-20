@@ -317,6 +317,20 @@ jobs:
           path: ${{ runner.temp }}/agent/outbox/
           if-no-files-found: ignore
           retention-days: 14
+      # The agent's whole session (every message and tool result), for finding out why a run ended
+      # without its outbox files. Off unless the repository variable AGENT_KEEP_TRANSCRIPT is `true`:
+      # unlike the log, an artifact is not secret-masked, and anyone who can read the repository can
+      # download it. A separate artifact, so publish never reads it, and a failed upload is not a
+      # failed run: it must not change the outcome it is there to explain.
+      - name: keep the transcript
+        if: always() && steps.agent.outcome != 'skipped' && vars.AGENT_KEEP_TRANSCRIPT == 'true' && steps.agent.outputs.execution_file != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-transcript
+          path: ${{ steps.agent.outputs.execution_file }}
+          if-no-files-found: ignore
+          retention-days: 14
 
   publish:
     name: publish and finalize

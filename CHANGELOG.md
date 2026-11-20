@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Coder: with the repository variable `AGENT_KEEP_TRANSCRIPT` set to `true`, the code job keeps the
+  agent's whole session as an `agent-transcript` artifact for 14 days, so a run that ended without
+  its outbox files can be diagnosed; the log shows only its last message. Off by default: the
+  artifact is not secret-masked and anyone who can read the repository can download it. A failed
+  upload does not fail the run. Installed repositories need an update to get this.
+
 ## 0.10.1 (2026-11-19)
 
 - Coder: a run that committed and wrote `pr.json` but forgot `pr-body.md` now opens its PR instead
