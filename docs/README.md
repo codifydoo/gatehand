@@ -64,6 +64,10 @@ up to N go at once; re-render after changing it, and fast-forward `agent-runner`
   is over a cap. Two runs can both stop for one free place; the next kick fills it.
 - **The ledger.** Concurrent writes to the ledger branch are retried on the new tip, never forced;
   no row is lost or written twice, and two failures at once both count towards the breaker.
+- **The infra grace.** One outage can fail every run at once, before any of their ledger rows
+  land. So each of the day's `infraGracePerDay` units is also a ref,
+  `refs/agent-locks/grace/coder/<day>/<k>`, that only one run can create; the sweep deletes past
+  days' refs.
 - **The cost.** More runs at once means more agent PRs against the same files at once, so more
   merge conflicts for the merge gate and the fixer to stall on, and more runs on your Claude
   account. Nothing keeps two runs off issues that touch the same files. Set `maxOpenPrs` to at
@@ -95,9 +99,10 @@ The model never shares a job with a write-capable token, and nothing it wrote is
   every `CLAUDE.md`, `.mcp.json`. The outbox and the PR guard both enforce it, both from the default
   branch's copy.
 - **The claim is preflight's only write to contents.** With `roles.coder.parallelism` above 1,
-  the coder's preflight token has `contents: write` instead of read, for the claim alone: a commit
-  reachable from no branch and the ref `refs/agent-locks/issue-<n>`. Preflight runs no model and
-  only the default branch's scripts; the model's job stays read-only.
+  preflight mints a second App token with `contents: write`, held by the pick step alone, for the
+  claim: a commit reachable from no branch and the ref `refs/agent-locks/issue-<n>`. Preflight's own
+  token stays read-only for contents, it runs no model and only the default branch's scripts, and
+  the model's job stays read-only.
 - **The `agent-runner` ref.** The model controls its own job, including the Actions runtime token
   later steps hold, so it could write cache entries. Runs are dispatched on `agent-runner`, whose
   cache scope the default branch and PRs never read, and the code job restores no caches.

@@ -861,6 +861,34 @@ infra_grace_left() {
   [[ "${grace}" =~ ^[0-9]+$ && "${used}" =~ ^[0-9]+$ && "${used}" -lt "${grace}" ]]
 }
 
+# take_infra_grace <role> <day>: exit 0 when this run took one of the day's infraGracePerDay units,
+# 2 when other runs took them all, 1 when that cannot be told. With several coder runs at once
+# (roles.coder.parallelism > 1) one outage can fail them all together, and each would read the
+# ledger before any of their rows landed and find the grace unused. So each unit is also a ref,
+# refs/agent-locks/grace/<role>/<day>/<k>, which GitHub creates for one caller only; it points at the
+# base branch's tip and changes nothing. The sweep deletes the refs of past days.
+take_infra_grace() {
+  local role="$1" day="$2" grace k sha err
+  grace="$(policy ".roles[\"${role}\"].infraGracePerDay // 0")"
+  [[ "${grace}" =~ ^[0-9]+$ && "${grace}" -gt 0 ]] || return 2
+  sha="$(gh api "repos/${GH_REPO}/commits/$(policy '.baseBranch')" --jq '.sha')" && [[ -n "${sha}" ]] || return 1
+  err="$(mktemp)"
+  for ((k = 1; k <= grace; k++)); do
+    if jq -n --arg r "refs/agent-locks/grace/${role}/${day}/${k}" --arg s "${sha}" '{ref: $r, sha: $s}' \
+      | gh api -X POST "repos/${GH_REPO}/git/refs" --input - >/dev/null 2>"${err}"; then
+      rm -f "${err}"
+      return 0
+    fi
+    if ! { grep -q 'HTTP 422' "${err}" && grep -qi 'already exists' "${err}"; }; then
+      agent_log "infra: could not take a grace unit: $(head -c 200 "${err}")"
+      rm -f "${err}"
+      return 1
+    fi
+  done
+  rm -f "${err}"
+  return 2
+}
+
 # infra_failure <role> <job-name> <agent-step> <allowed-ere>...: prints "<evidence>|<step>" and exits
 # 0 when this run (RUN_ID) failed before its model step and may go uncounted. Exits 2, printing
 # "grace-used|<step>", when it did but the role's grace for today is spent; 1 otherwise.
@@ -890,6 +918,23 @@ infra_failure() {
     agent_log "infra: '${step}' failed before the agent started, but today's grace for ${role} is used; counted"
     echo "grace-used|${step}"
     return 2
+  fi
+  # Several coder runs at once: the ledger alone cannot tell, so take a unit (take_infra_grace).
+  if [[ "${role}" == coder && "$(coder_parallelism)" -gt 1 ]]; then
+    take_infra_grace "${role}" "${day}"
+    case $? in
+      0) ;;
+      2)
+        agent_log "infra: '${step}' failed before the agent started, but other runs took today's grace for ${role}; counted"
+        echo "grace-used|${step}"
+        return 2
+        ;;
+      *)
+        # Fails closed: counted, as with an unreadable ledger, and said as such.
+        agent_log "infra: '${step}' failed before the agent started, and today's grace could not be checked; counted"
+        return 1
+        ;;
+    esac
   fi
   echo "step|${step}"
 }
@@ -928,15 +973,17 @@ coder_free_slots() {
   done
 }
 
-# coder_pick_slot: the slot a dispatch should take, for `-f slot=<k>`; nothing with N = 1. The first
-# free slot; failing that, the first one with a run going but none waiting (the new run waits behind
-# it and cancels nothing); failing that, nothing (the workflow's default, slot 1). Exit 1 when the
-# runs are unreadable.
+# coder_pick_slot [slot]...: the slot a dispatch should take, for `-f slot=<k>`; nothing with N = 1.
+# The first free slot; failing that, the first one with a run going but none waiting (the new run
+# waits behind it and cancels nothing); failing that, nothing (the workflow's default, slot 1). The
+# [slot]s are runs this caller dispatched a moment ago, which the runs list may not show yet: each
+# counts as a run waiting in that slot. Exit 1 when the runs are unreadable.
 coder_pick_slot() {
-  local n runs k
+  local n runs k s
   n="$(coder_parallelism)"
   [[ "${n}" -gt 1 ]] || return 0
   runs="$(coder_active_runs)" || return 1
+  for s in "$@"; do runs+=$'\n'"${s} queued"; done
   k="$(coder_free_slots "${runs}" | head -1)"
   if [[ -z "${k}" ]]; then
     for ((k = 1; k <= n; k++)); do

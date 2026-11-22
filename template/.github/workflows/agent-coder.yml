@@ -111,13 +111,13 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
       - uses: ./.github/actions/install-gh
-@@CODER_PREFLIGHT_TOKEN_NOTE@@      - name: agent App token (issues write, everything else read)
+      - name: agent App token (issues write, everything else read)
         id: app
         uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ vars.AGENT_APP_CLIENT_ID }}
           private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
-          permission-contents: @@CODER_PREFLIGHT_CONTENTS@@
+          permission-contents: read
           permission-issues: write
           permission-pull-requests: read
       - name: gh auth status
@@ -137,11 +137,11 @@ jobs:
           RUN_REF: ${{ github.ref_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: bash .github/scripts/agent-state.sh gate coder
-      - name: pick an issue
+@@CODER_CLAIM_TOKEN@@      - name: pick an issue
         id: pick
         if: steps.gate.outputs.go == 'true'
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GH_TOKEN: ${{ steps.@@CODER_PICK_TOKEN_STEP@@.outputs.token }}
           GH_REPO: ${{ github.repository }}
           WANT: ${{ inputs.issue }}
         run: bash .github/scripts/agent-state.sh pick "$WANT"

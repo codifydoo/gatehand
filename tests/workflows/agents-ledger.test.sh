@@ -9,7 +9,8 @@
 #   5. Writers racing for real (roles.coder.parallelism > 1 finalizes at once): every row lands once;
 #      concurrent failures all count and the breaker announces its trip exactly once; an attempt that
 #      tripped it but lost the race does not report the trip; a row already on the tip is not
-#      written twice.
+#      written twice; a breaker step repeated with the same key (its push landed but reported an
+#      error) is not counted twice, and says "tripped" again when it was the one that tripped it.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -114,6 +115,30 @@ export -f trip_racer
 out="$(AGENT_LEDGER_TEST_RACE=trip_racer bash "${LEDGER}" breaker-record coder failed s3 2>/dev/null)"
 expect "an attempt that tripped it but lost the race does not report the trip" "${out}" ""
 expect "and the winning edit counted it on top" "$(show state/breaker.json | jq -r .coder.consecutive)" 4
+bash "${LEDGER}" breaker-reset coder >/dev/null
+bash "${LEDGER}" breaker-record coder failed k1 key-1 >/dev/null
+bash "${LEDGER}" breaker-record coder failed k1 key-1 >/dev/null
+expect "a breaker step repeated with its key counts once" "$(show state/breaker.json | jq -r .coder.consecutive)" 1
+bash "${LEDGER}" breaker-record coder failed k2 key-2 >/dev/null
+first="$(bash "${LEDGER}" breaker-record coder failed k3 key-3)"
+again="$(bash "${LEDGER}" breaker-record coder failed k3 key-3)"
+expect "the step that tripped it, repeated, says tripped again and counts once" "${first}|${again}|$(show state/breaker.json | jq -r .coder.consecutive)" "tripped|tripped|3"
+expect "a later step, a new key, is counted and does not announce" "$(bash "${LEDGER}" breaker-record coder failed k4 key-4)|$(show state/breaker.json | jq -r .coder.consecutive)" "|4"
+# Another run's step lands between a step and its retry (a, b, a): still counted once, and the
+# step that tripped it still says so.
+bash "${LEDGER}" breaker-reset coder >/dev/null
+bash "${LEDGER}" breaker-record coder failed x1 key-a >/dev/null
+bash "${LEDGER}" breaker-record coder failed x2 key-b >/dev/null
+bash "${LEDGER}" breaker-record coder failed x1 key-a >/dev/null
+expect "a, b, a: the retried step is not counted again" "$(show state/breaker.json | jq -r .coder.consecutive)" 2
+trip="$(bash "${LEDGER}" breaker-record coder failed x3 key-c)"
+bash "${LEDGER}" breaker-record coder failed x4 key-d >/dev/null
+again="$(bash "${LEDGER}" breaker-record coder failed x3 key-c)"
+expect "a, b, a after a trip: the tripping step says tripped again, counted once" "${trip}|${again}|$(show state/breaker.json | jq -r .coder.consecutive)" "tripped|tripped|4"
+bash "${LEDGER}" breaker-record coder pr-opened x5 key-e >/dev/null
+bash "${LEDGER}" breaker-record coder failed x6 key-f >/dev/null
+bash "${LEDGER}" breaker-record coder pr-opened x5 key-e >/dev/null
+expect "a success retried after another run's failure does not wipe that failure" "$(show state/breaker.json | jq -r .coder.consecutive)" 1
 row='{"role":"coder","outcome":"pr-opened","run_id":"dup"}'
 bash "${LEDGER}" append "${row}" >/dev/null
 bash "${LEDGER}" append "${row}" >/dev/null

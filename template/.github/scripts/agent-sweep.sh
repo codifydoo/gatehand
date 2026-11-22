@@ -15,7 +15,8 @@
 #   claims    a coder claim (refs/agent-locks/issue-N, roles.coder.parallelism > 1) whose run has
 #             ended is deleted; so is one naming no run that is older than lockTtlMinutes. With
 #             parallelism > 1 the locks part leaves alone an issue whose claim's run is still going,
-#             instead of waiting for no coder run at all.
+#             instead of waiting for no coder run at all. The infra grace units of past days
+#             (refs/agent-locks/grace/…, agent-lib.sh take_infra_grace) are deleted too.
 #   prs       an `agent:pr-open` issue whose agent PR MERGED goes to `agent:done-pending-deploy`;
 #             one whose agent PR was CLOSED unmerged goes to `agent:blocked` (a person closed it).
 #             While any agent PR for it is open, nothing changes.
@@ -122,7 +123,8 @@ write_sweep_row() {
        model: $model, turns: null, duration_ms: null, cost_usd: null,
        started_at: (if $started == "" then $ended else $started end), ended_at: $ended}')"
   bash "${SCRIPT_DIR}/agent-ledger.sh" append "${row}" >/dev/null || agent_log "sweep: ledger append failed"
-  tripped="$(bash "${SCRIPT_DIR}/agent-ledger.sh" breaker-record "${role}" "${outcome}" "${run}")" \
+  tripped="$(bash "${SCRIPT_DIR}/agent-ledger.sh" breaker-record "${role}" "${outcome}" "${run}" \
+    "sweep:${run}:${ra}:$(jq -r .ended_at <<<"${row}")")" \
     || agent_log "sweep: breaker update failed"
   if [[ "${tripped}" == tripped ]]; then
     file_request breaker "${issue}" "circuit breaker tripped" \
@@ -294,7 +296,30 @@ sweep_claims() {
       echo "#${n}: a claim naming no run, older than ${ttl} minutes, released"
     fi
   done <<<"${issues}"
+  sweep_grace_refs || rc=1
   return "${rc}"
+}
+
+# sweep_grace_refs: delete the infra grace units (agent-lib.sh take_infra_grace) of days before today.
+sweep_grace_refs() {
+  local refs ref day today err
+  err="$(mktemp)"
+  if ! refs="$(gh api --paginate "repos/${GH_REPO}/git/matching-refs/agent-locks/grace/" --jq '.[].ref' 2>"${err}")"; then
+    # None at all, as claimed_issues reads it.
+    if grep -q 'HTTP 404' "${err}"; then rm -f "${err}"; return 0; fi
+    agent_log "sweep: could not list grace refs: $(head -c 200 "${err}")"
+    rm -f "${err}"
+    return 1
+  fi
+  rm -f "${err}"
+  today="$(jq -rn --argjson e "$(agent_now_epoch)" '$e | strftime("%Y-%m-%d")')"
+  while IFS= read -r ref; do
+    [[ "${ref}" =~ ^refs/agent-locks/grace/[a-z]+/([0-9]{4}-[0-9]{2}-[0-9]{2})/[0-9]+$ ]] || continue
+    day="${BASH_REMATCH[1]}"
+    [[ "${day}" < "${today}" ]] || continue
+    gh api -X DELETE "repos/${GH_REPO}/git/${ref}" >/dev/null 2>&1 \
+      || { agent_log "sweep: could not delete ${ref}"; continue; }
+  done <<<"${refs}"
 }
 
 # --- fix locks ---------------------------------------------------------------------------------------

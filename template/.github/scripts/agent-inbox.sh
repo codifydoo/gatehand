@@ -137,14 +137,19 @@ requeue() {  # requeue <issue> <extra-label-or-empty>
 }
 
 # dispatch <role> <issue>: on the runner ref, never the default branch (agent-state.sh ref_state).
-# A coder run with roles.coder.parallelism > 1 takes a free slot (coder_pick_slot).
+# A coder run with roles.coder.parallelism > 1 takes a free slot (coder_pick_slot). One comment can
+# hold several commands, and a run just dispatched is not in the runs list yet, so the slots this
+# script dispatched into (CODER_SLOTS_USED) count as taken.
+CODER_SLOTS_USED=()
 dispatch() {
   local slot=() k
   if [[ "$1" == coder ]]; then
-    k="$(coder_pick_slot)" || agent_log "dispatch: coder runs unreadable; the run takes the default slot"
+    k="$(coder_pick_slot ${CODER_SLOTS_USED[@]+"${CODER_SLOTS_USED[@]}"})" \
+      || agent_log "dispatch: coder runs unreadable; the run takes the default slot"
     [[ -z "${k}" ]] || slot=(-f slot="${k}")
   fi
-  gh workflow run "agent-$1.yml" --ref "$(policy '.runnerRef')" -f issue="$2" ${slot[@]+"${slot[@]}"} >/dev/null
+  gh workflow run "agent-$1.yml" --ref "$(policy '.runnerRef')" -f issue="$2" ${slot[@]+"${slot[@]}"} >/dev/null || return 1
+  [[ -z "${k:-}" ]] || CODER_SLOTS_USED+=("${k}")
 }
 
 # builtin_kind <kind>: the request kinds this script handles itself; a repo hook never overrides them.

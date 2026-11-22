@@ -52,8 +52,9 @@
         <p>The job with the App token runs only the default branch's scripts. The App has no
           Workflows permission, so GitHub itself refuses any push that touches
           <code>.github/workflows/</code>. With several coder runs at once
-          (<code>roles.coder.parallelism</code>), preflight may also write one thing: the
-          <code>refs/agent-locks/issue-N</code> ref that claims an issue for one run.</p>
+          (<code>roles.coder.parallelism</code>), preflight's pick step alone gets a token that may
+          write one thing: the <code>refs/agent-locks/issue-N</code> ref that claims an issue for
+          one run.</p>
       </div>
       <div class="card">
         <h3>Protected paths</h3>

@@ -15,7 +15,9 @@
 #
 # Usage:
 #   agent-ledger.sh append <row-json>
-#   agent-ledger.sh breaker-record <role> <outcome> <run-id>   prints "tripped" when THIS call trips it
+#   agent-ledger.sh breaker-record <role> <outcome> <run-id> [key]
+#                                                               prints "tripped" when THIS call trips it;
+#                                                               [key] makes it idempotent (see _breaker_record)
 #   agent-ledger.sh breaker-trip <role> <reason>                 /pause <role>
 #   agent-ledger.sh breaker-reset <role>                         /resume <role>, /approve on a breaker
 #
@@ -110,23 +112,38 @@ _append_row() {
 _breaker_load() { if [[ -s state/breaker.json ]]; then cat state/breaker.json; else echo '{}'; fi; }
 _breaker_save() { mkdir -p state && jq -S . >state/breaker.json.new && mv state/breaker.json.new state/breaker.json; }
 
+# _breaker_record <role> <outcome> <run> [key]: with [key] (one per finalize, the same on every retry
+# of its write), a step whose key is among the role's recent_keys (its last 20) is not counted again:
+# the push of an earlier attempt landed though it reported an error, and other runs' steps may have
+# landed since. If that step tripped the breaker (tripped_key), it says "tripped" again, so the
+# caller still files the inbox request.
 _breaker_record() {
-  local role="$1" outcome="$2" run="$3" threshold now state
+  local role="$1" outcome="$2" run="$3" key="${4:-}" threshold now state
   threshold="$(policy ".roles[\"${role}\"].breakerThreshold // 3")"
   now="$(agent_iso)"
+  if [[ -n "${key}" ]]; then
+    if [[ "$(_breaker_load | jq -r --arg r "${role}" '.[$r].tripped_key // ""')" == "${key}" ]]; then
+      printf 'tripped\n' >"${LEDGER_RESULT}"
+      return 0
+    fi
+    _breaker_load | jq -e --arg r "${role}" --arg k "${key}" '(.[$r].recent_keys // []) | index($k) != null' >/dev/null && return 0
+  fi
   if breaker_is_success "${outcome}"; then
     state="$(_breaker_load | jq --arg r "${role}" --arg o "${outcome}" --arg run "${run}" --arg now "${now}" \
-      '.[$r] = ((.[$r] // {}) + {consecutive: 0, last_run: $run, last_outcome: $o, updated_at: $now})')"
+      '.[$r] = ((.[$r] // {}) + {consecutive: 0, last_run: $run, last_outcome: $o, updated_at: $now})
+       | if $k == "" then . else .[$r].recent_keys = (((.[$r].recent_keys // []) + [$k]) | .[-20:]) end' --arg k "${key}")"
     printf '%s\n' "${state}" | _breaker_save
     return 0
   fi
   state="$(_breaker_load | jq --arg r "${role}" --arg o "${outcome}" --arg run "${run}" --arg now "${now}" \
-    --argjson t "${threshold}" '
+    --argjson t "${threshold}" --arg k "${key}" '
       (.[$r] // {consecutive: 0, tripped_at: null}) as $b
       | ($b.consecutive + 1) as $n
       | .[$r] = ($b + {consecutive: $n, last_run: $run, last_outcome: $o, updated_at: $now})
+      | if $k == "" then . else .[$r].recent_keys = (((.[$r].recent_keys // []) + [$k]) | .[-20:]) end
       | if $n >= $t and ($b.tripped_at // null) == null
         then .[$r].tripped_at = $now
+             | (if $k == "" then . else .[$r].tripped_key = $k end)
              | .[$r].reason = "\($n) runs in a row ended without a PR (last: \($o))"
              | .[$r].newly_tripped = true
         else .[$r].newly_tripped = false end')"
@@ -161,8 +178,8 @@ main() {
       ledger_mutate "ledger: $(jq -r '"\(.role // "?") \(.outcome // "?") run \(.run_id // "?")"' <<<"${row}")" _append_row "${row}"
       ;;
     breaker-record)
-      [[ $# -eq 3 ]] || { agent_log "usage: breaker-record <role> <outcome> <run-id>"; return 2; }
-      ledger_mutate "breaker: $1 $2" _breaker_record "$1" "$2" "$3"
+      [[ $# -eq 3 || $# -eq 4 ]] || { agent_log "usage: breaker-record <role> <outcome> <run-id> [key]"; return 2; }
+      ledger_mutate "breaker: $1 $2" _breaker_record "$@"
       ;;
     breaker-trip)
       [[ $# -eq 2 ]] || { agent_log "usage: breaker-trip <role> <reason>"; return 2; }

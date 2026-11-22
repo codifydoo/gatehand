@@ -21,7 +21,10 @@
 #   7. The sweep deletes the claim of an ended run, keeps one whose run is going, deletes a claim
 #      naming no run only once it is older than lockTtlMinutes, and leaves an agent:in-progress issue
 #      alone while its claim's run is going.
-#   8. End to end with the real ledger script: three runs finalizing at once each land one row,
+#   8. Review fixes: the kick counts only issues the pick would not skip; two inbox dispatches in
+#      one comment take different slots; of three runs taking a one-unit infra grace at once,
+#      exactly one gets it, and the sweep deletes only past days' grace refs.
+#   9. End to end with the real ledger script: three runs finalizing at once each land one row,
 #      none lost or doubled, and the day's count is three.
 set -uo pipefail
 
@@ -81,6 +84,9 @@ case "$*" in
     rm -rf "${S}/refs/${name}.gone"
     mv "${S}/refs/${name}" "${S}/refs/${name}.gone" 2>/dev/null || { echo "gh: Reference does not exist (HTTP 422)" >&2; exit 1; }
     rm -rf "${S}/refs/${name}.gone" ;;
+  "api --paginate repos/o/r/git/matching-refs/agent-locks/grace/ --jq "*)
+    (cd "${S}/refs" && for d in agent-locks%grace%*; do [[ -d "${d}" && "${d}" != *.gone ]] && printf 'refs/%s\n' "${d//%//}"; done) \
+      | jq -R '{ref: .}' | jq -s . | out ;;
   "api --paginate repos/o/r/git/matching-refs/agent-locks/issue- --jq "*)
     (cd "${S}/refs" && for d in agent-locks%issue-*; do [[ -d "${d}" && "${d}" != *.gone ]] && printf 'refs/%s\n' "${d//%//}"; done) \
       | jq -R '{ref: .}' | jq -s . | out ;;
@@ -274,7 +280,28 @@ expect "sweep: a claim naming no run, an hour old, waits for lockTtlMinutes" "$(
 AGENT_NOW_EPOCH=$((AGENT_NOW_EPOCH + 3 * 3600)) sweep_claims >/dev/null 2>&1
 expect "sweep: and is deleted past it" "$(claims)" ""
 
-# --- 8. three runs finalize at once -----------------------------------------------------------------
+# --- 8. review fixes ----------------------------------------------------------------------------------
+reset_fake 0 0 1 2 3
+jq '(.[] | select(.number != 1) | .body) = "no acceptance section"' "${FAKE}/issues.json" >"${FAKE}/i" && mv "${FAKE}/i" "${FAKE}/issues.json"
+cmd_kick >/dev/null 2>&1
+expect "kick: issues the pick would skip start no runs (1 of 3 takeable)" "$(grep -c . "${FAKE}/dispatches")" 1
+reset_fake 0 0 7 8
+(
+  AGENT_INBOX_NO_MAIN=1 source "${REPO_ROOT}/.github/scripts/agent-inbox.sh"
+  dispatch coder 7 && dispatch coder 8
+) >/dev/null 2>&1
+expect "inbox: two /approve in one comment take two different free slots" "$(grep -oE 'slot=[0-9]+' "${FAKE}/dispatches" | paste -sd' ' -)" "slot=1 slot=2"
+reset_fake 0 0
+jq '.roles.coder.infraGracePerDay = 1' "${TMP}/policy.json" >"${TMP}/policy-g.json"
+for r in g1 g2 g3; do (AGENT_POLICY="${TMP}/policy-g.json" take_infra_grace coder 2026-11-05 2>/dev/null; echo $? >"${TMP}/grace.${r}") & done
+wait
+expect "infra grace of 1: of three runs at once exactly one takes it" "$(cat "${TMP}"/grace.g? | sort | paste -sd' ' -)" "0 2 2"
+mkdir -p "${FAKE}/refs/agent-locks%grace%coder%2026-11-04%1"
+sweep_grace_refs 2>/dev/null
+expect "sweep: past days' grace refs are deleted, today's stay" \
+  "$(cd "${FAKE}/refs" && ls -d agent-locks%grace%* | paste -sd' ' -)" "agent-locks%grace%coder%2026-11-05%1"
+
+# --- 9. three runs finalize at once -----------------------------------------------------------------
 git init -q --bare "${TMP}/ledger.git"
 for r in 801 802 803; do
   (LEDGER_REMOTE="${TMP}/ledger.git" AGENT_LEDGER_BACKOFF=0 bash "${REPO_ROOT}/.github/scripts/agent-ledger.sh" append \

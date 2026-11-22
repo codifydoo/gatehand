@@ -205,7 +205,7 @@ CODER_PARALLELISM="$(want roles.coder.parallelism "$(p '.roles.coder.parallelism
 # shellcheck disable=SC2016
 if [[ "${CODER_PARALLELISM}" == 1 ]]; then
   CODER_RUN_NAME_SLOT='' CODER_SLOT_INPUT='' CODER_CONCURRENCY_NOTE='' CODER_KICK_PERMISSIONS=''
-  CODER_PREFLIGHT_TOKEN_NOTE='' CODER_GROUP="'agent-coder'" CODER_PREFLIGHT_CONTENTS='read'
+  CODER_CLAIM_TOKEN='' CODER_GROUP="'agent-coder'" CODER_PICK_TOKEN_STEP='app'
 else
   CODER_RUN_NAME_SLOT="\${{ inputs.slot != '' && format(' (slot {0})', inputs.slot) || '' }}"
   CODER_SLOT_INPUT="      slot:
@@ -225,11 +225,23 @@ else
           permission-issues: read
           permission-pull-requests: read
 "
-  CODER_PREFLIGHT_TOKEN_NOTE="      # contents: WRITE with parallelism > 1, for the claim alone: a commit object reachable from no
-      # branch and the ref refs/agent-locks/issue-N (agent-state.sh claim_issue). This job runs no
-      # model and only main's scripts; the code job's token stays read-only.
-"
-  CODER_PREFLIGHT_CONTENTS='write'
+  # shellcheck disable=SC2016
+  CODER_CLAIM_TOKEN='      # parallelism > 1: the pick claims its issue (agent-state.sh claims), which writes a commit
+      # reachable from no branch and the ref refs/agent-locks/issue-N. This token, with contents
+      # WRITE, is in the pick step alone; every other step keeps the read-only one above. This job
+      # runs no model and only main'"'"'s scripts.
+      - name: agent App token for the claim (contents write, issues and PRs read)
+        id: claim
+        if: steps.gate.outputs.go == '"'"'true'"'"'
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.AGENT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: read
+          permission-pull-requests: read
+'
+  CODER_PICK_TOKEN_STEP='claim'
   max_open="$(p '.roles.coder.maxOpenPrs')"
   if [[ "${max_open}" =~ ^[0-9]+$ && "${max_open}" -lt "${CODER_PARALLELISM}" ]]; then
     printf 'render: warning: roles.coder.parallelism (%s) is above roles.coder.maxOpenPrs (%s), so no more than %s coder runs can start at once\n' \
@@ -240,10 +252,10 @@ fi
 PLACEHOLDERS=(RUNS_ON_AGENT RUNS_ON_CI RUNS_ON_REVIEW BOT_SLUG REVIEW_BOT_LOGIN BASE_BRANCH CLAUDE_AUTH
   CLAUDE_AGENT_AUTH   CI_WORKFLOW_NAME CODER_MODEL CODER_MAX_TURNS CODER_TIMEOUT FIXER_MODEL FIXER_MAX_TURNS FIXER_TIMEOUT
   REVIEW_MODEL CRON_CODER CRON_SWEEP CRON_MERGE CRON_TRIAGE CRON_DIGEST AGENT_ALLOWED_TOOLS
-  AGENT_ALLOWED_TOOLS_FM AGENT_DISALLOWED_TOOLS CODER_GROUP CODER_PREFLIGHT_CONTENTS)
+  AGENT_ALLOWED_TOOLS_FM AGENT_DISALLOWED_TOOLS CODER_GROUP CODER_PICK_TOKEN_STEP)
 # Placeholders whose value may be empty: with parallelism 1 they render to nothing.
 OPTIONAL_PLACEHOLDERS=(CODER_RUN_NAME_SLOT CODER_SLOT_INPUT CODER_CONCURRENCY_NOTE CODER_KICK_PERMISSIONS
-  CODER_PREFLIGHT_TOKEN_NOTE)
+  CODER_CLAIM_TOKEN)
 declare -A V=()
 for k in "${PLACEHOLDERS[@]}"; do
   [[ -n "${!k}" ]] || die "internal: no value for ${k}"

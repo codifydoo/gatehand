@@ -603,7 +603,7 @@ cmd_pick() {
 #   N = 1   one run, unless a coder run is already queued or running.
 #   N > 1   one run per free slot (coder_free_slots), and no more than the room left: N minus the
 #           runs going (a run without a slot holds a runner but no slot), the agent:ready issues
-#           nothing holds, maxOpenPrs minus open agent PRs and runs going, and runsPerDay minus
+#           the pick would not skip, maxOpenPrs minus open agent PRs and runs going, and runsPerDay minus
 #           today's runs and runs going. The slots are read once: a run just dispatched is not in
 #           the runs list yet. Each run's gate and claim check again; this only keeps the kick from
 #           starting runs that would find nothing to do.
@@ -631,9 +631,14 @@ kick_slots() {
   budget=$((n - active))
   [[ "${#free[@]}" -lt "${budget}" ]] && budget="${#free[@]}"
   if [[ "${budget}" -le 0 ]]; then echo "every coder slot is busy (${active} runs going, ${n} slots); no kick"; return 0; fi
-  ready="$(gh issue list --state open --label agent:ready --limit 100 --json labels \
-    --jq '[.[] | select([.labels[].name] | (index("agent:hold") or index("agent:in-progress") or index("agent:pr-open")) | not)] | length')" \
+  # The issues the pick could take: its own skip rules (held or locked, no acceptance section,
+  # attempts used up, …), so a queue of issues it would skip starts no runs. The trust and merged-PR
+  # checks need more calls per issue and stay the pick's.
+  ready="$(gh issue list --state open --label agent:ready --limit 100 \
+    --json number,state,title,body,labels,createdAt,comments)" \
     || { agent_log "kick: could not list agent:ready issues"; return 1; }
+  ready="$(jq -r --argjson max "$(policy '.roles.coder.maxAttemptsPerIssue')" "${JQ_ISSUE_DEFS}"'
+    [.[] | select(skip_reason($max) == null)] | length' <<<"${ready}")"
   open="$(gh pr list --state open --label agent:pr --limit 100 --json number --jq 'length')" \
     || { agent_log "kick: could not list open agent PRs"; return 1; }
   month="$(jq -rn --argjson e "$(agent_now_epoch)" '$e | strftime("%Y-%m")')"
@@ -1349,7 +1354,9 @@ cmd_finalize() {
   if [[ "${counted}" == false ]]; then
     agent_log "finalize: the run never reached the model; no breaker step"
   else
-    tripped="$(bash "${SCRIPT_DIR}/agent-ledger.sh" breaker-record "${ROLE}" "${outcome}" "${RUN_ID:-local}")" \
+    # The key is this finalize's (its row's ended_at), the same on every retry of the write.
+    tripped="$(bash "${SCRIPT_DIR}/agent-ledger.sh" breaker-record "${ROLE}" "${outcome}" "${RUN_ID:-local}" \
+      "${RUN_ID:-local}:${ra}:$(jq -r .ended_at <<<"${row}")")" \
       || agent_log "finalize: breaker update failed"
   fi
   if [[ "${tripped}" == "tripped" ]]; then

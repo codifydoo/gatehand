@@ -9,9 +9,9 @@
 #      render with the package defaults.
 #   5. roles.coder.parallelism: 1 (or unset, as in a policy.json older than the key) renders the
 #      coder workflow with one concurrency group and no slot, as before slots existed; N > 1 renders
-#      a `slot` choice of 1..N, one group per slot, a run name that says the slot, contents: write
-#      for preflight's claim only (the model's job stays read-only), and read-only extras for the
-#      kick. Anything but 1..20 renders nothing; N above maxOpenPrs warns.
+#      a `slot` choice of 1..N, one group per slot, a run name that says the slot, a second App
+#      token with contents: write held by the pick step alone (preflight's own token and the model's
+#      job stay read-only), and read-only extras for the kick. Anything but 1..20 renders nothing; N above maxOpenPrs warns.
 set -uo pipefail
 PKG="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 R="${PKG}/bin/render.sh"
@@ -184,7 +184,11 @@ check "  a slot choice of 1..3, default 1" bash -c "grep -A3 '^      slot:\$' '$
 check "  one group per slot" grep -qxF "  group: \${{ github.event_name == 'schedule' && 'agent-coder-kick' || format('agent-coder-slot-{0}', inputs.slot || '1') }}" "${C}"
 check "  the run name says the slot" grep -qF "\${{ inputs.slot != '' && format(' (slot {0})', inputs.slot) || '' }}\"" "${C}"
 job() { awk -v j="  $1:" '$0 == j {on = 1; next} on && /^  [a-z]+:$/ {exit} on' "${C}"; }
-check "  preflight's App token may write contents (the claim)" bash -c "grep -qxF '          permission-contents: write' <<<\"\$(awk '/^  preflight:\$/ {on=1; next} on && /^  [a-z]+:\$/ {exit} on' '${C}')\""
+pre="$(job preflight)"
+step_of() { awk -v n="$1" '$0 == "      - name: " n {on = 1; print; next} on && /^      - / {exit} on' <<<"${pre}"; }
+check "  the claim's own token may write contents" bash -c "grep -qxF '          permission-contents: write' <<<\"\$1\"" _ "$(step_of 'agent App token for the claim (contents write, issues and PRs read)')"
+check "  preflight's job token stays read-only for contents" bash -c "grep -qxF '          permission-contents: read' <<<\"\$1\"" _ "$(step_of 'agent App token (issues write, everything else read)')"
+check "  only the pick step holds the claim's token" bash -c "[[ \$(grep -c 'steps.claim.outputs.token' <<<\"\$1\") == 1 ]] && grep -qF 'steps.claim.outputs.token' <<<\"\$2\"" _ "${pre}" "$(step_of 'pick an issue')"
 check "  the code job's token stays read-only" bash -c "[[ \"\$(awk '/^  code:\$/ {on=1; next} on && /^  [a-z]+:\$/ {exit} on' '${C}' | grep -cE '^      [a-z-]+: write')\" == 0 ]]"
 kick_perms="$(job kick | grep -v '^ *#' | grep -oE 'permission-[a-z-]+: (read|write)' | sort | paste -sd' ' -)"
 if [[ "${kick_perms}" == "permission-actions: write permission-contents: read permission-issues: read permission-pull-requests: read" ]]; then

@@ -14,12 +14,16 @@
   run at all. The doctor warns when a self-hosted agent pool has fewer runners online than slots,
   the dashboard shows the busy slots, and the digest says how many runs may go at once. More runs at
   once means more PRs in the same files, so more merge conflicts: see "Several coder runs at once"
-  in the runbook. **With N above 1 the coder's preflight token gets `contents: write`**, for the
-  claim alone. With N = 1 the rendered workflows are unchanged. With N above 1, re-run a coder run
+  in the runbook. **With N above 1, preflight mints a second App token with `contents: write`**,
+  held by the pick step alone, for the claim; preflight's own token stays read-only. The day's
+  infra grace is taken through a ref too, so one outage failing every run at once spends no more
+  than `infraGracePerDay`; the kick counts only issues the pick would not skip; several inbox
+  commands in one comment dispatch into different slots. With N = 1 the rendered workflows are unchanged. With N above 1, re-run a coder run
   with "Re-run all jobs", not "Re-run failed jobs": the latter reuses the pick without a new claim.
 - Ledger: concurrent writes retry up to eight times with a growing, jittered wait; a row already on
   the ledger branch (a push that landed but reported an error) is not written twice, and an attempt
-  that tripped the breaker but lost the race no longer reports the trip.
+  that tripped the breaker but lost the race no longer reports the trip. A breaker step whose push
+  landed but reported an error is not counted twice, and still reports the trip it made.
 - Coder and fixer: the prompts now say that the session ends with the agent's turn and that a
   background command never reports back, so the agent must not end its turn to wait for one; checks
   run in the foreground with a timeout, and once it has committed the agent writes its outbox files
