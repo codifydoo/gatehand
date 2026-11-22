@@ -64,12 +64,15 @@ case "$*" in
     sha="c$$${RANDOM}"
     body="$(cat)"
     printf '%s\n' "${body}" >"${S}/last-commit-body"
-    printf '%s\n' "${body}" | jq -c --arg d "${FAKE_DATE:-2026-11-05T11:59:00Z}" '{message, committer: {date: $d}}' >"${S}/commits/${sha}"
+    # Written whole, then renamed: a reader never sees half a file.
+    printf '%s\n' "${body}" | jq -c --arg d "${FAKE_DATE:-2026-11-05T11:59:00Z}" '{message, committer: {date: $d}}' >"${S}/commits/.${sha}"
+    mv "${S}/commits/.${sha}" "${S}/commits/${sha}"
     echo "{\"sha\":\"${sha}\"}" | out ;;
   "api -X POST repos/o/r/git/refs --input -")
     [[ -z "${FAKE_REFS_403:-}" ]] || { echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; }
     body="$(cat)"; name="$(jq -r '.ref | sub("^refs/"; "") | gsub("/"; "%")' <<<"${body}")"
-    if mkdir "${S}/refs/${name}" 2>/dev/null; then jq -r .sha <<<"${body}" >"${S}/refs/${name}/sha"; echo '{}'
+    if mkdir "${S}/refs/${name}" 2>/dev/null; then
+      jq -r .sha <<<"${body}" >"${S}/refs/${name}/.sha.$$" && mv "${S}/refs/${name}/.sha.$$" "${S}/refs/${name}/sha"; echo '{}'
     else echo "gh: Reference already exists (HTTP 422)" >&2; exit 1; fi ;;
   "api repos/o/r/git/ref/"*)
     name="$(sed 's#^api repos/o/r/git/ref/##; s# .*##; s#/#%#g' <<<"$*")"
@@ -151,17 +154,17 @@ pick_as() {
 # --- 1. one claim, two runs -----------------------------------------------------------------------
 reset_fake 0 0 5
 wins=0 losses=0 other=0
-for round in 1 2 3 4 5 6 7 8; do
+for round in $(seq 1 "${CLAIM_ROUNDS:-8}"); do
   rm -rf "${FAKE}/refs" && mkdir -p "${FAKE}/refs"
   (RUN_ID="a${round}" claim_issue 5 2>/dev/null; echo $? >"${TMP}/rc.a") &
   (RUN_ID="b${round}" claim_issue 5 2>/dev/null; echo $? >"${TMP}/rc.b") &
   wait
   case "$(cat "${TMP}/rc.a")$(cat "${TMP}/rc.b")" in
     01 | 10) wins=$((wins + 1)) ;;
-    *) other=$((other + 1)) ;;
+    *) other=$((other + 1)); printf 'round %s: rc %s\n' "${round}" "$(cat "${TMP}/rc.a")$(cat "${TMP}/rc.b")" >&2 ;;
   esac
 done
-expect "claim race: in every round exactly one of two runs wins and the other is told taken" "${wins}/${other}" "8/0"
+expect "claim race: in every round exactly one of two runs wins and the other is told taken" "${wins}/${other}" "${CLAIM_ROUNDS:-8}/0"
 rm -rf "${FAKE}/refs" && mkdir -p "${FAKE}/refs"
 RUN_ID=77 claim_issue 5 2>/dev/null
 RUN_ID=77 claim_issue 5 2>/dev/null

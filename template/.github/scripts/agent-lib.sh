@@ -984,7 +984,8 @@ coder_pick_slot() {
   [[ "${n}" -gt 1 ]] || return 0
   runs="$(coder_active_runs)" || return 1
   for s in "$@"; do runs+=$'\n'"${s} queued"; done
-  k="$(coder_free_slots "${runs}" | head -1)"
+  k="$(coder_free_slots "${runs}")"
+  k="${k%%$'\n'*}"
   if [[ -z "${k}" ]]; then
     for ((k = 1; k <= n; k++)); do
       grep -qE "^${k} (queued|pending|waiting|requested)$" <<<"${runs}" || break
