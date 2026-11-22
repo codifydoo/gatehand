@@ -1,14 +1,34 @@
 # Changelog
 
-## Unreleased
+## 0.12.0 (2026-11-22)
 
+- Coder: `roles.coder.parallelism` (new in `policy.json`, default `1`) lets up to N coder runs go at
+  once. With 54 issues queued and runs of up to 45 minutes, one run at a time left most of the
+  queue waiting however often the kick ran. With N above 1, `agent-coder.yml` gets a `slot` input and one
+  concurrency group per slot; the scheduled kick starts one run per free slot (bounded by the queue,
+  `maxOpenPrs` and `runsPerDay`), and the inbox and the dashboard dispatch into a free slot. Each run
+  claims its issue with the ref `refs/agent-locks/issue-<n>` before locking it, so two runs never
+  take the same one, and re-checks `maxOpenPrs` and `runsPerDay` after the claim, counting the other
+  runs in flight. Finalize releases the claim; the hourly sweep deletes a claim whose run has ended,
+  and with N above 1 it checks each `agent:in-progress` issue's claim instead of waiting for no coder
+  run at all. The doctor warns when a self-hosted agent pool has fewer runners online than slots,
+  the dashboard shows the busy slots, and the digest says how many runs may go at once. More runs at
+  once means more PRs in the same files, so more merge conflicts: see "Several coder runs at once"
+  in the runbook. **With N above 1 the coder's preflight token gets `contents: write`**, for the
+  claim alone. With N = 1 the rendered workflows are unchanged.
+- Ledger: concurrent writes retry up to eight times with a growing, jittered wait; a row already on
+  the ledger branch (a push that landed but reported an error) is not written twice, and an attempt
+  that tripped the breaker but lost the race no longer reports the trip.
 - Coder and fixer: the prompts now say that the session ends with the agent's turn and that a
   background command never reports back, so the agent must not end its turn to wait for one; checks
   run in the foreground with a timeout, and once it has committed the agent writes its outbox files
   before running anything long again. On 2026-11-20, four tabulark coder runs ended `success`
   without `pr-body.md` and `summary.md` (two after committing), and the one transcript kept that day
   showed background `pnpm build` / `pnpm test:changed` runs whose completion notice never arrived.
-  Installed repositories need an update to get this.
+
+Installed repositories need an update (`/gatehand:update`, or `bin/render.sh`) to get any of this; to
+turn on parallel runs, set `roles.coder.parallelism`, re-render, commit, and fast-forward
+`agent-runner`.
 
 ## 0.11.0 (2026-11-20)
 

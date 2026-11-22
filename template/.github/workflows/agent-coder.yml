@@ -1,7 +1,7 @@
 name: Agent coder
 # Quoted on purpose: an unquoted ` #` would start a YAML comment and drop the expression
 # (see the same note at the top of claude-code-review.yml).
-run-name: "Agent coder: ${{ github.event_name == 'schedule' && 'schedule kick' || (inputs.issue != '' && format('issue {0}', inputs.issue) || 'auto pick') }}"
+run-name: "Agent coder: ${{ github.event_name == 'schedule' && 'schedule kick' || (inputs.issue != '' && format('issue {0}', inputs.issue) || 'auto pick') }}@@CODER_RUN_NAME_SLOT@@"
 
 # The autonomous coder: takes ONE issue labelled `agent:ready` (or the one named), implements it on
 # a branch, and opens a PR that says `Refs #N`. Design and runbook (setup, kill switch, inbox,
@@ -42,15 +42,15 @@ on:
         type: string
         required: false
         default: ""
-
+@@CODER_SLOT_INPUT@@
 permissions:
   contents: read
 
 # One coder at a time. NOTE GitHub's rule: a group holds one running and ONE pending run; a third
 # queued dispatch cancels the pending one. So the scheduled run has its own group, and its kick
 # dispatches only when no coder run is queued or running (agent-state.sh kick).
-concurrency:
-  group: ${{ github.event_name == 'schedule' && 'agent-coder-kick' || 'agent-coder' }}
+@@CODER_CONCURRENCY_NOTE@@concurrency:
+  group: ${{ github.event_name == 'schedule' && 'agent-coder-kick' || @@CODER_GROUP@@ }}
   cancel-in-progress: false
 
 jobs:
@@ -74,7 +74,7 @@ jobs:
           client-id: ${{ vars.AGENT_APP_CLIENT_ID }}
           private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
           permission-actions: write
-      - name: gh auth status
+@@CODER_KICK_PERMISSIONS@@      - name: gh auth status
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
         run: gh auth status
@@ -111,13 +111,13 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
       - uses: ./.github/actions/install-gh
-      - name: agent App token (issues write, everything else read)
+@@CODER_PREFLIGHT_TOKEN_NOTE@@      - name: agent App token (issues write, everything else read)
         id: app
         uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ vars.AGENT_APP_CLIENT_ID }}
           private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
-          permission-contents: read
+          permission-contents: @@CODER_PREFLIGHT_CONTENTS@@
           permission-issues: write
           permission-pull-requests: read
       - name: gh auth status

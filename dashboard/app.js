@@ -2460,6 +2460,9 @@ function agentsTab(repo, d) {
         fig("Today", s ? ofCap(s.today, limit(d, role, "runsPerDay")) : "?"),
         fig("Failures in a row", known ? ofCap(b.consecutive || 0, limit(d, role, "breakerThreshold")) : "?"),
         maxPrs !== null ? fig("Open PRs", d.prs ? ofCap(d.prs.length, maxPrs) : "?") : null,
+        // roles.coder.parallelism > 1: the slots the dispatched coder runs going hold.
+        role === "coder" && d.coder_slots && d.coder_slots.parallelism > 1
+          ? fig("Slots busy", ofCap(d.coder_slots.busy.length, d.coder_slots.parallelism)) : null,
         next ? fig("Next", next) : null),
       openItem(row),
       known && !stopped && inPolicy ? spotActs(r, [inboxAct(r, { id: "pause", text: "Pause…", title: `Pause the ${role} in ${short(repo)}?`,

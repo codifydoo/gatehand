@@ -164,4 +164,34 @@ else
   warn "cannot read ${DEFAULT}'s branch rules (for example a private repo on GitHub Free, which has none); the merge gate still checks 'agent pr guard' itself"
 fi
 
+# --- coder parallelism --------------------------------------------------------------------------------
+# Each coder run holds one agent runner at a time (its jobs run one after another), so N slots want N
+# runners online for the agent pool, besides what the fixer and the other agent jobs use. GitHub-hosted
+# labels get a fresh VM per job; only a self-hosted pool can be too small.
+par="$(p '.roles.coder.parallelism // 1')"
+if [[ "${par}" =~ ^[0-9]+$ && "${par}" -gt 1 ]]; then
+  max_open="$(p '.roles.coder.maxOpenPrs')"
+  [[ "${max_open}" =~ ^[0-9]+$ && "${max_open}" -lt "${par}" ]] \
+    && warn "roles.coder.parallelism is ${par} but maxOpenPrs is ${max_open}: no more than ${max_open} coder runs can start at once"
+  labels="$(jq -c '.runners.agent // "ubuntu-latest" | if type == "array" then . else [.] end' "${POLICY}")"
+  if jq -e 'all(.[]; test("^(ubuntu|windows|macos)-"))' <<<"${labels}" >/dev/null; then
+    ok "roles.coder.parallelism is ${par}; runners.agent is GitHub-hosted, a fresh VM per job"
+  else
+    # Repository runners, then the organisation's (both need admin; a personal repo has no org).
+    runners="$(gh api --paginate "repos/${NWO}/actions/runners" --jq '.runners[]' 2>/dev/null)" || runners=""
+    org_runners="$(gh api --paginate "orgs/${NWO%%/*}/actions/runners" --jq '.runners[]' 2>/dev/null)" || org_runners=""
+    if [[ -z "${runners}${org_runners}" ]]; then
+      warn "roles.coder.parallelism is ${par}, and the self-hosted runners for runners.agent cannot be listed (needs admin): make sure ${par} are online"
+    else
+      online="$(printf '%s\n%s\n' "${runners}" "${org_runners}" | jq -s --argjson want "${labels}" \
+        '[.[] | select(type == "object" and .status == "online") | select([.labels[]?.name] as $l | all($want[]; . as $w | $l | index($w)))] | unique_by(.id) | length')"
+      if [[ "${online}" =~ ^[0-9]+$ && "${online}" -ge "${par}" ]]; then
+        ok "roles.coder.parallelism is ${par}; ${online} runners with runners.agent's labels are online"
+      else
+        warn "roles.coder.parallelism is ${par}, but only ${online:-?} runners with runners.agent's labels $(jq -r 'join(", ")' <<<"${labels}") are online: the other coder runs wait for a runner"
+      fi
+    fi
+  fi
+fi
+
 exit "${rc}"

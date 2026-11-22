@@ -24,8 +24,13 @@
 #      AGENT_LEDGER_NO_MAIN=1    load the functions without running (tests)
 #
 # CONCURRENCY: writers do not share a concurrency group, on purpose (see agent-lib.sh,
-# inbox_add_line). Each write is a fresh shallow fetch, an edit and a push; a push that loses a race
-# is rejected as non-fast-forward and the whole edit is redone on the new tip, up to five times.
+# inbox_add_line), and with roles.coder.parallelism > 1 several coder runs finalize at once. Each
+# write is a fresh shallow fetch, an edit and a push; a push that loses a race is rejected as
+# non-fast-forward and the whole edit is redone on the new tip, up to LEDGER_ATTEMPTS times with a
+# growing, jittered wait. Nothing is ever force-pushed, so no other writer's row is lost. An edit is
+# a function of the tip it runs on: a breaker step re-reads the count, so two failures at once both
+# count and the trip lands once; a row already on the tip (a push that landed but reported an error)
+# is not appended twice.
 set -uo pipefail
 
 # shellcheck source=/dev/null
@@ -46,12 +51,16 @@ breaker_is_success() { [[ "$1" == "pr-opened" || "$1" == "fix-pushed" ]]; }
 # ledger_mutate <commit-message> <function> [args…]: run <function> inside a checkout of the ledger
 # branch, then commit and push what it changed. Retries the whole edit when the push loses a race.
 # The function may write a result to "${LEDGER_RESULT}", which survives the checkout's removal.
+LEDGER_ATTEMPTS=8
 ledger_mutate() {
   local msg="$1" attempt dir remote branch
   shift
   remote="$(ledger_remote)"
   branch="$(policy '.ledgerBranch')"
-  for attempt in 1 2 3 4 5; do
+  for ((attempt = 1; attempt <= LEDGER_ATTEMPTS; attempt++)); do
+    # A result belongs to the edit that was pushed: an attempt that tripped the breaker and then lost
+    # the race must not report a trip the winning edit did not make.
+    [[ -z "${LEDGER_RESULT:-}" ]] || : >"${LEDGER_RESULT}"
     dir="$(mktemp -d)"
     git -C "${dir}" init -q
     git -C "${dir}" config user.name "$(policy '.botLogin')"
@@ -81,9 +90,9 @@ ledger_mutate() {
     fi
     rm -rf "${dir}"
     agent_log "ledger push lost a race (attempt ${attempt}); redoing the edit on the new tip"
-    sleep "${AGENT_LEDGER_BACKOFF:-${attempt}}"
+    sleep "${AGENT_LEDGER_BACKOFF:-$((attempt + RANDOM % (attempt + 1)))}"
   done
-  agent_log "ledger: gave up after 5 attempts"
+  agent_log "ledger: gave up after ${LEDGER_ATTEMPTS} attempts"
   return 1
 }
 
@@ -93,6 +102,8 @@ _append_row() {
   local row="$1" month
   month="$(jq -rn --argjson e "$(agent_now_epoch)" '$e | strftime("%Y-%m")')"
   mkdir -p runs
+  # The exact row already there: an earlier attempt's push landed though it reported an error.
+  if [[ -f "runs/${month}.jsonl" ]] && grep -Fxq -- "${row}" "runs/${month}.jsonl"; then return 0; fi
   printf '%s\n' "${row}" >>"runs/${month}.jsonl"
 }
 

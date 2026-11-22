@@ -894,6 +894,59 @@ infra_failure() {
   echo "step|${step}"
 }
 
+# --- coder slots (roles.coder.parallelism) ------------------------------------------------------------
+#
+# With roles.coder.parallelism N > 1, agent-coder.yml has a `slot` input (1..N) and one concurrency
+# group per slot, and its run-name ends in ` (slot k)`. GitHub keeps one running and one pending run
+# per group and cancels the older pending run for a newer one, so whoever dispatches a coder run
+# picks a slot with nothing in it. With N = 1 there is no slot: one group, as before.
+
+# coder_parallelism: roles.coder.parallelism, 1 when unset or not a positive number.
+coder_parallelism() {
+  local n
+  n="$(policy '.roles.coder.parallelism // 1')"
+  [[ "${n}" =~ ^[1-9][0-9]*$ ]] || n=1
+  printf '%s\n' "${n}"
+}
+
+# coder_active_runs: one line per dispatched coder run that has not completed, "<slot> <status>",
+# where <slot> is read from the run's title and is `?` for a title without one (a run started before
+# the workflow had slots, which holds a runner but no slot's group). Exit 1 when the runs are
+# unreadable.
+coder_active_runs() {
+  gh api "repos/${GH_REPO}/actions/workflows/agent-coder.yml/runs?event=workflow_dispatch&per_page=100" \
+    --jq '.workflow_runs[] | select(.status != "completed")
+      | "\((.display_title // "") | (capture(" \\(slot (?<s>[0-9]+)\\)$") | .s) // "?") \(.status)"'
+}
+
+# coder_free_slots <active-runs>: pure. The slots 1..N that no active run holds, in order.
+coder_free_slots() {
+  local n k
+  n="$(coder_parallelism)"
+  for ((k = 1; k <= n; k++)); do
+    grep -qE "^${k} " <<<"$1" || printf '%s\n' "${k}"
+  done
+}
+
+# coder_pick_slot: the slot a dispatch should take, for `-f slot=<k>`; nothing with N = 1. The first
+# free slot; failing that, the first one with a run going but none waiting (the new run waits behind
+# it and cancels nothing); failing that, nothing (the workflow's default, slot 1). Exit 1 when the
+# runs are unreadable.
+coder_pick_slot() {
+  local n runs k
+  n="$(coder_parallelism)"
+  [[ "${n}" -gt 1 ]] || return 0
+  runs="$(coder_active_runs)" || return 1
+  k="$(coder_free_slots "${runs}" | head -1)"
+  if [[ -z "${k}" ]]; then
+    for ((k = 1; k <= n; k++)); do
+      grep -qE "^${k} (queued|pending|waiting|requested)$" <<<"${runs}" || break
+    done
+    [[ "${k}" -le "${n}" ]] || k=""
+  fi
+  [[ -z "${k}" ]] || printf '%s\n' "${k}"
+}
+
 # --- repo-local extensions ----------------------------------------------------------------------------
 #
 # .github/agents/hooks/lib.sh, when present, is sourced last. It is the adopter's file, never the

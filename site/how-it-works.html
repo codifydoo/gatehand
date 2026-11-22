@@ -51,7 +51,9 @@
         <p>Stops unless the agents are enabled, the run is on the <code>agent-runner</code> ref, the
           breaker is closed, and today's runs and open agent PRs are under their caps. Then it picks
           the highest-priority, oldest eligible issue, locks it, and reads it once: title, body, and
-          only comments by people with write access, framed as untrusted data.</p>
+          only comments by people with write access, framed as untrusted data. With
+          <code>roles.coder.parallelism</code> above 1, up to that many runs go at once, each first
+          claiming its issue so no two take the same one.</p>
       </li>
       <li>
         <h3>Code <span class="pill attn">the model</span></h3>

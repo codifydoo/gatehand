@@ -6,6 +6,10 @@
 #   3. The breaker trips at the policy threshold, says so exactly ONCE (that is what files the inbox
 #      request, so saying it twice files two), resets on a PR and on /resume, and /pause trips it.
 #   4. A push that loses a race is redone on the new tip: no row is lost, nothing is forced.
+#   5. Writers racing for real (roles.coder.parallelism > 1 finalizes at once): every row lands once;
+#      concurrent failures all count and the breaker announces its trip exactly once; an attempt that
+#      tripped it but lost the race does not report the trip; a row already on the tip is not
+#      written twice.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,6 +83,41 @@ export TMP MONTH
 AGENT_LEDGER_TEST_RACE=race bash "${LEDGER}" append '{"role":"coder","outcome":"failed","run_id":"3"}' >/dev/null 2>&1
 expect "after a lost race both writes are on the branch" \
   "$(show "runs/${MONTH}.jsonl" | jq -rs 'map(.run_id) | join(",")')" "1,2,racer,3"
+
+# --- 5. real concurrency ---------------------------------------------------------------------------
+for r in c1 c2 c3 c4 c5; do
+  (bash "${LEDGER}" append "{\"role\":\"coder\",\"outcome\":\"failed\",\"run_id\":\"${r}\"}" >/dev/null 2>&1) &
+done
+wait
+expect "five appends at once: each row lands exactly once" \
+  "$(show "runs/${MONTH}.jsonl" | jq -rs '[.[] | select(.run_id | startswith("c"))] | map(.run_id) | sort | join(",")')" "c1,c2,c3,c4,c5"
+bash "${LEDGER}" breaker-reset coder >/dev/null
+for r in b1 b2 b3; do (bash "${LEDGER}" breaker-record coder failed "${r}" >"${TMP}/trip.${r}" 2>/dev/null) & done
+wait
+expect "three failures at once all count" "$(show state/breaker.json | jq -r .coder.consecutive)" 3
+expect "and the trip is announced exactly once" "$(cat "${TMP}"/trip.b? | grep -c tripped)" 1
+bash "${LEDGER}" breaker-reset coder >/dev/null
+bash "${LEDGER}" breaker-record coder failed s1 >/dev/null
+bash "${LEDGER}" breaker-record coder failed s2 >/dev/null
+# The racer lands the third failure first, so this call's first attempt trips it and loses the push;
+# redone on the new tip, the breaker is already open and this call must not say "tripped".
+trip_racer() {
+  local d
+  d="$(mktemp -d)"
+  git clone -q --branch agent-ledger "${TMP}/remote.git" "${d}" 2>/dev/null
+  jq '.coder.consecutive = 3 | .coder.tripped_at = "2026-11-05T11:59:00Z"' "${d}/state/breaker.json" >"${d}/b" && mv "${d}/b" "${d}/state/breaker.json"
+  git -C "${d}" commit -qam "racer trips"
+  git -C "${d}" push -q origin agent-ledger
+  rm -rf "${d}"
+}
+export -f trip_racer
+out="$(AGENT_LEDGER_TEST_RACE=trip_racer bash "${LEDGER}" breaker-record coder failed s3 2>/dev/null)"
+expect "an attempt that tripped it but lost the race does not report the trip" "${out}" ""
+expect "and the winning edit counted it on top" "$(show state/breaker.json | jq -r .coder.consecutive)" 4
+row='{"role":"coder","outcome":"pr-opened","run_id":"dup"}'
+bash "${LEDGER}" append "${row}" >/dev/null
+bash "${LEDGER}" append "${row}" >/dev/null
+expect "the exact row already on the tip is not written twice" "$(show "runs/${MONTH}.jsonl" | grep -c '"run_id":"dup"')" 1
 
 printf '\n[agents-ledger] %d passed, %d failed\n' "${pass}" "${fail}"
 [[ "${fail}" -eq 0 ]]

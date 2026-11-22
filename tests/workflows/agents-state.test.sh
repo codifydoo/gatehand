@@ -479,6 +479,9 @@ finalize_with() { # finalize_with <outcome> <attempt> [reason]
   if [[ -n "${FIN_EXTRA:-}" ]]; then "${FIN_EXTRA}"; fi
   if [[ -n "${JOBS_FAIL:-}" ]]; then stub_gh_on 'api repos/o/r/actions/runs/*/jobs*' '' 1 'gh: HTTP 502'; fi
   if [[ -n "${JOBS:-}" ]]; then stub_gh_json 'api repos/o/r/actions/runs/*/jobs*' "${JOBS}"; fi
+  # One second per finalize: two finalizes at the same instant would write the same row, which the
+  # ledger then keeps once (agent-ledger.sh _append_row), and ledger_rows reads the newest.
+  AGENT_NOW_EPOCH=$((AGENT_NOW_EPOCH + 1))
   OUTCOME="$1" ATTEMPT="$2" REASON="${3:-}" ISSUE=7 RUN_ID=555 FINAL_DIR="${TMP}/final" \
     PR_URL=https://github.com/o/r/pull/42 PR_NUMBER=42 cmd_finalize >/dev/null 2>&1
 }

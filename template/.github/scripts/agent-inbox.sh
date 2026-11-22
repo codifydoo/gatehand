@@ -137,8 +137,14 @@ requeue() {  # requeue <issue> <extra-label-or-empty>
 }
 
 # dispatch <role> <issue>: on the runner ref, never the default branch (agent-state.sh ref_state).
+# A coder run with roles.coder.parallelism > 1 takes a free slot (coder_pick_slot).
 dispatch() {
-  gh workflow run "agent-$1.yml" --ref "$(policy '.runnerRef')" -f issue="$2" >/dev/null
+  local slot=() k
+  if [[ "$1" == coder ]]; then
+    k="$(coder_pick_slot)" || agent_log "dispatch: coder runs unreadable; the run takes the default slot"
+    [[ -z "${k}" ]] || slot=(-f slot="${k}")
+  fi
+  gh workflow run "agent-$1.yml" --ref "$(policy '.runnerRef')" -f issue="$2" ${slot[@]+"${slot[@]}"} >/dev/null
 }
 
 # builtin_kind <kind>: the request kinds this script handles itself; a repo hook never overrides them.

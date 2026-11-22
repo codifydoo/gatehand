@@ -1,5 +1,5 @@
 {
-  "$comment": "The agents' configuration (.github/agents/README.md). The scripts read it at run time; bin/render.sh reads it to render the workflows and commands, so after changing runners, schedules, models, turns, timeouts, tools, claude or ci, re-render (the update skill, or bin/render.sh) and commit the result. Everything else takes effect on the next run.",
+  "$comment": "The agents' configuration (.github/agents/README.md). The scripts read it at run time; bin/render.sh reads it to render the workflows and commands, so after changing runners, schedules, models, turns, timeouts, tools, claude, ci or roles.coder.parallelism, re-render (the update skill, or bin/render.sh) and commit the result. Everything else takes effect on the next run.",
   "botLogin": "gatehand[bot]",
   "baseBranch": "main",
   "ledgerBranch": "agent-ledger",
@@ -47,6 +47,7 @@
   "roles": {
     "coder": {
       "maxFollowups": 2,
+      "parallelism": 1,
       "model": "claude-opus-5-5",
       "maxTurns": 500,
       "timeoutMinutes": 45,

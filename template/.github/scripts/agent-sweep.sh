@@ -12,6 +12,10 @@
 #             breaker. Nothing is swept while a coder run is in progress: it may be between
 #             adding `agent:in-progress` and posting its lock, when the newest lock is still the
 #             previous attempt's.
+#   claims    a coder claim (refs/agent-locks/issue-N, roles.coder.parallelism > 1) whose run has
+#             ended is deleted; so is one naming no run that is older than lockTtlMinutes. With
+#             parallelism > 1 the locks part leaves alone an issue whose claim's run is still going,
+#             instead of waiting for no coder run at all.
 #   prs       an `agent:pr-open` issue whose agent PR MERGED goes to `agent:done-pending-deploy`;
 #             one whose agent PR was CLOSED unmerged goes to `agent:blocked` (a person closed it).
 #             While any agent PR for it is open, nothing changes.
@@ -32,7 +36,7 @@
 # touched. Each part runs even when another failed; the exit code is 1 when any part failed, so a
 # broken sweep shows red.
 #
-# Usage: agent-sweep.sh run | locks | fixes | prs | breaker
+# Usage: agent-sweep.sh run | locks | claims | fixes | prs | breaker
 # Env:   GH_TOKEN, GH_REPO, AGENT_BOT_EMAIL, AGENT_INBOX_ISSUE, AGENT_OWNER_LOGIN;
 #        AGENT_SWEEP_NO_MAIN=1 loads the functions only (Gatehand's tests/workflows/agents-sweep.test.sh).
 #
@@ -219,18 +223,76 @@ open_issues() {
 }
 
 sweep_locks() {
-  local issues n active rc=0
+  local issues n active rc=0 parallel=0
   # A coder run in progress may be between adding agent:in-progress and posting its lock comment,
-  # when its issue's newest bot lock is still the previous attempt's, expired and ended. Locks wait
-  # for a sweep with no coder run going (a queued run has not locked anything yet).
-  active="$(gh api "repos/${GH_REPO}/actions/workflows/agent-coder.yml/runs?status=in_progress&per_page=1" --jq '.total_count')" \
-    || { agent_log "sweep: could not list coder runs"; return 1; }
-  [[ "${active}" =~ ^[0-9]+$ ]] || { agent_log "sweep: unexpected coder run count '${active}'"; return 1; }
-  if [[ "${active}" != 0 ]]; then echo "a coder run is in progress; locks wait for the next sweep"; return 0; fi
+  # when its issue's newest bot lock is still the previous attempt's, expired and ended. With one
+  # coder at a time, locks wait for a sweep with no coder run going (a queued run has not locked
+  # anything yet). With roles.coder.parallelism > 1 some run is nearly always going, so the test is
+  # per issue instead: every run claims its issue before it adds agent:in-progress and releases the
+  # claim after its last relabel, so an issue whose claim belongs to a run still going is left alone.
+  if [[ "$(coder_parallelism)" -gt 1 ]]; then
+    parallel=1
+  else
+    active="$(gh api "repos/${GH_REPO}/actions/workflows/agent-coder.yml/runs?status=in_progress&per_page=1" --jq '.total_count')" \
+      || { agent_log "sweep: could not list coder runs"; return 1; }
+    [[ "${active}" =~ ^[0-9]+$ ]] || { agent_log "sweep: unexpected coder run count '${active}'"; return 1; }
+    if [[ "${active}" != 0 ]]; then echo "a coder run is in progress; locks wait for the next sweep"; return 0; fi
+  fi
   issues="$(open_issues agent:in-progress)" || { agent_log "sweep: could not list agent:in-progress issues"; return 1; }
   while IFS= read -r n; do
     [[ -n "${n}" ]] || continue
+    if [[ "${parallel}" == 1 ]]; then
+      claim_run_going "${n}"
+      case $? in
+        0) echo "#${n}: claimed by a coder run still going, left alone"; continue ;;
+        2) echo "#${n}: claim unreadable, left alone"; rc=1; continue ;;
+      esac
+    fi
     sweep_one_lock "${n}" || rc=1
+  done <<<"${issues}"
+  return "${rc}"
+}
+
+# claim_run_going <issue>: exit 0 when <issue> has a claim (agent-state.sh claims) whose run has not
+# completed, 1 when it has none or its run ended, 2 when that cannot be read.
+claim_run_going() {
+  local owner run status
+  owner="$(claim_owner "$1")" || return 2
+  [[ -n "${owner}" ]] || return 1
+  read -r run _ _ <<<"${owner}"
+  [[ "${run}" =~ ^[0-9]+$ ]] || return 1
+  read -r status _ <<<"$(run_state "${run}")" || return 2
+  [[ -n "${status}" ]] || return 2
+  [[ "${status}" != completed && "${status}" != gone ]]
+}
+
+# --- claims ------------------------------------------------------------------------------------------
+
+# sweep_claims: delete every claim (agent-state.sh claims) whose run has ended, or, when its message
+# names no run, that is older than roles.coder.lockTtlMinutes. Read from the refs themselves, not
+# from the labels: a preflight cancelled right after its claim never reaches finalize and leaves
+# a claim on an issue still labelled agent:ready, which no run could take again.
+sweep_claims() {
+  local issues n owner run at status ttl age rc=0
+  issues="$(claimed_issues)" || { agent_log "sweep: could not list claims"; return 1; }
+  ttl="$(policy '.roles.coder.lockTtlMinutes // 120')"
+  while IFS= read -r n; do
+    [[ -n "${n}" ]] || continue
+    owner="$(claim_owner "${n}")" || { echo "#${n}: claim unreadable, left alone"; rc=1; continue; }
+    [[ -n "${owner}" ]] || continue
+    read -r run _ at <<<"${owner}"
+    if [[ "${run}" =~ ^[0-9]+$ ]]; then
+      read -r status _ <<<"$(run_state "${run}")"
+      if [[ -z "${status}" ]]; then echo "#${n}: run ${run} of its claim unreadable, left alone"; rc=1; continue; fi
+      if [[ "${status}" != completed && "${status}" != gone ]]; then continue; fi
+      release_claim "${n}" "${run}" || { echo "#${n}: could not release the claim of run ${run}"; rc=1; continue; }
+      echo "#${n}: claim of run ${run} released (the run is ${status})"
+    else
+      age=$(($(agent_now_epoch) - $(jq -rn --arg t "${at}" '$t | fromdateiso8601? // 0')))
+      if [[ "${age}" -lt $((ttl * 60)) ]]; then continue; fi
+      release_claim "${n}" || { echo "#${n}: could not release a claim naming no run"; rc=1; continue; }
+      echo "#${n}: a claim naming no run, older than ${ttl} minutes, released"
+    fi
   done <<<"${issues}"
   return "${rc}"
 }
@@ -387,7 +449,7 @@ sweep_breaker() {
 
 cmd_run() {
   local rc=0 part out
-  for part in locks fixes prs breaker; do
+  for part in locks claims fixes prs breaker; do
     out="$("sweep_${part}")" || { rc=1; printf '::warning title=agent sweep::the %s part failed (see the log)\n' "${part}"; }
     printf '%s\n' "${out}"
     if [[ -n "${GITHUB_STEP_SUMMARY:-}" && -n "${out}" ]]; then
@@ -400,8 +462,8 @@ cmd_run() {
 main() {
   case "${1:-}" in
     run) cmd_run ;;
-    locks | fixes | prs | breaker) "sweep_$1" ;;
-    *) agent_log "usage: agent-sweep.sh run|locks|fixes|prs|breaker"; return 2 ;;
+    locks | claims | fixes | prs | breaker) "sweep_$1" ;;
+    *) agent_log "usage: agent-sweep.sh run|locks|claims|fixes|prs|breaker"; return 2 ;;
   esac
 }
 

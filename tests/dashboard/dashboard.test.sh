@@ -35,6 +35,8 @@
 #      scripts' own regexes accept, on the ref each workflow needs. A verdict, posted, reads as meant
 #      through the real review_verdict (both readers, GitHub's render recorded), and a note cannot
 #      move it. Only Gatehand's runs are cancelled; only AGENTS_ENABLED and AGENT_AUTO_MERGE are set.
+#      With roles.coder.parallelism > 1 the coder is started in a free slot (agent-lib.sh
+#      coder_pick_slot), and only runs in that slot's group are named as holding it up.
 #      Starting the fixer counts review fixes as agent-fixup.sh fix_locks does: a bot's no-attempt
 #      marker voids only the lock of its own run and run attempt (a re-run's lock still counts).
 #   9. Limits and schedules: a role limit policy.json does not set is null, never a default. The
@@ -1012,6 +1014,23 @@ expect "a coder run that started waiting since the preview: refused" "$(pcode "$
 expect "and the dispatch was not made" "$(stub_gh_calls | grep -c 'agent-coder.yml/dispatches')" "${before}"
 expect "the preview says GitHub would cancel the waiting run" "$(preview "${C43}" | jq -r '.warnings[1]')" \
   "Agent coder: issue 42 is already waiting to start: GitHub cancels it and keeps this one instead"
+# roles.coder.parallelism > 1: the run goes into a free slot (agent-lib.sh coder_pick_slot), and only
+# runs in that slot's group could make it wait or be cancelled.
+Q1_SAVE="${POLICY}"; POLICY="$(jq -c '.roles.coder.parallelism = 3' <<<"${POLICY}")"
+CODER_RUNS='{"workflow_runs":[{"id":1,"status":"in_progress","display_title":"Agent coder: issue 43 (slot 1)"},{"id":12,"status":"pending","display_title":"Agent coder: auto pick (slot 1)"}]}'; xrules
+stub_gh_on "api repos/o/r/actions/workflows/agent-coder.yml/runs?event=workflow_dispatch&per_page=100" "${CODER_RUNS}"
+p="$(preview "${C43}")"
+expect "coder, 3 slots: the call names the first free slot" "$(jq -r '.calls[0]' <<<"${p}")" \
+  "POST repos/o/r/actions/workflows/agent-coder.yml/dispatches {\"inputs\": {\"slot\": \"2\"}, \"ref\": \"${RUNNER}\"}"
+expect "coder, 3 slots: slot 1's runs do not hold this one up" "$(jq -c '.warnings' <<<"${p}")" "[]"
+o="$(post "$(jq -c --arg t "$(jq -r .confirm <<<"${p}")" '. + {confirm: $t}' <<<"${C43}")")"
+expect "coder, 3 slots: dispatched into slot 2" "$(last_dispatch agent-coder.yml)" "{\"ref\":\"${RUNNER}\",\"inputs\":{\"slot\":\"2\"}}"
+CODER_RUNS='{"workflow_runs":[{"id":1,"status":"in_progress","display_title":"x (slot 1)"},{"id":2,"status":"in_progress","display_title":"x (slot 2)"},{"id":3,"status":"pending","display_title":"x (slot 3)"}]}'; xrules
+stub_gh_on "api repos/o/r/actions/workflows/agent-coder.yml/runs?event=workflow_dispatch&per_page=100" "${CODER_RUNS}"
+p="$(preview "${C43}")"
+expect "coder, every slot busy: the first with nothing waiting, and its run is named" \
+  "$(jq -c '[(.calls[0] | test("\"slot\": \"1\"")), .warnings[0]]' <<<"${p}")" '[true,"x (slot 1) is running: this run waits for it to finish"]'
+POLICY="${Q1_SAVE}"
 CODER_RUNS='{"workflow_runs":[]}'; xrules
 expect "a workflow that is not one of the page's: refused" "$(vcode '{"repo":"o/r","type":"dispatch","workflow":"sweep"}')" 400
 VARS_OUT='{"variables":[{"name":"AGENTS_ENABLED","value":"false"},{"name":"AGENT_OWNER_LOGIN","value":"owner-login"}]}'; xrules
