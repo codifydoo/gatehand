@@ -41,3 +41,11 @@ and caps, so a doubled run is harmless.
 
 The calendars in `agent-kick.sh` are the policy's default schedules. If you change
 `schedules.*` in `policy.json`, change `job_calendar` to match and re-run `install`.
+
+With `roles.coder.parallelism` above 1, add `AGENT_KICK_CODER_SLOTS=<N>` (the same number) to the
+`install` line, and re-run `install` whenever you change it. The coder timer then dispatches one run
+into each free slot, read from the titles of the coder runs going. Its token cannot read issues or
+the policy, so unlike the workflow's own kick it does not hold back for a short queue or the caps:
+a run with nothing to do stops at its gate. Left at `1`, it starts one run at a time whatever the
+policy says. Set above it, GitHub refuses (HTTP 422) each dispatch into a slot the workflow does
+not have, and with the policy at `1`, every dispatch.
