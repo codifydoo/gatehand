@@ -69,6 +69,9 @@ up to N go at once; re-render after changing it, and fast-forward `agent-runner`
   account. Nothing keeps two runs off issues that touch the same files. Set `maxOpenPrs` to at
   least N (render warns otherwise), and on a self-hosted pool keep at least N agent runners online
   besides what the fixer uses (the doctor warns when fewer are).
+- **Re-run all jobs, never only the failed ones.** "Re-run failed jobs" reuses preflight's pick
+  without claiming the issue again, after finalize released it; with N above 1 another run can
+  take the same issue meanwhile. "Re-run all jobs" claims afresh.
 
 ## Security model
 

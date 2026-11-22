@@ -438,7 +438,7 @@ release_claim() {
 claimed_issues() {
   local out err
   err="$(mktemp)"
-  if ! out="$(gh api "repos/${GH_REPO}/git/matching-refs/agent-locks/issue-" --jq '.[].ref' 2>"${err}")"; then
+  if ! out="$(gh api --paginate "repos/${GH_REPO}/git/matching-refs/agent-locks/issue-" --jq '.[].ref' 2>"${err}")"; then
     if grep -q 'HTTP 404' "${err}"; then rm -f "${err}"; return 0; fi
     rm -f "${err}"
     return 1

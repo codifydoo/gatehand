@@ -81,7 +81,7 @@ case "$*" in
     rm -rf "${S}/refs/${name}.gone"
     mv "${S}/refs/${name}" "${S}/refs/${name}.gone" 2>/dev/null || { echo "gh: Reference does not exist (HTTP 422)" >&2; exit 1; }
     rm -rf "${S}/refs/${name}.gone" ;;
-  "api repos/o/r/git/matching-refs/agent-locks/issue- --jq "*)
+  "api --paginate repos/o/r/git/matching-refs/agent-locks/issue- --jq "*)
     (cd "${S}/refs" && for d in agent-locks%issue-*; do [[ -d "${d}" && "${d}" != *.gone ]] && printf 'refs/%s\n' "${d//%//}"; done) \
       | jq -R '{ref: .}' | jq -s . | out ;;
   "issue list --state open --label agent:ready "*)
