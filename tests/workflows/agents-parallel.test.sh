@@ -61,12 +61,16 @@ printf '%s\n' "$*" >>"${S}/calls"
 case "$*" in
   "api repos/o/r/commits/main --jq "*) echo '{"sha":"base1","commit":{"tree":{"sha":"tree1"}}}' | out ;;
   "api -X POST repos/o/r/git/commits --input - --jq "*)
-    sha="c$$${RANDOM}"
+    # A unique sha from mktemp: "c<pid><random>" could repeat across processes (pid 12 with 345,
+    # pid 123 with 45), and a second commit under one sha made the run that lost read its own run id
+    # as the claim's owner.
+    tmp="$(mktemp "${S}/commits/.cXXXXXXXXXX")"
+    sha="${tmp##*/.}"
     body="$(cat)"
     printf '%s\n' "${body}" >"${S}/last-commit-body"
     # Written whole, then renamed: a reader never sees half a file.
-    printf '%s\n' "${body}" | jq -c --arg d "${FAKE_DATE:-2026-11-05T11:59:00Z}" '{message, committer: {date: $d}}' >"${S}/commits/.${sha}"
-    mv "${S}/commits/.${sha}" "${S}/commits/${sha}"
+    printf '%s\n' "${body}" | jq -c --arg d "${FAKE_DATE:-2026-11-05T11:59:00Z}" '{message, committer: {date: $d}}' >"${tmp}"
+    mv "${tmp}" "${S}/commits/${sha}"
     echo "{\"sha\":\"${sha}\"}" | out ;;
   "api -X POST repos/o/r/git/refs --input -")
     [[ -z "${FAKE_REFS_403:-}" ]] || { echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; }
@@ -153,7 +157,7 @@ pick_as() {
 
 # --- 1. one claim, two runs -----------------------------------------------------------------------
 reset_fake 0 0 5
-wins=0 losses=0 other=0
+wins=0 losses=0 other=0 bad=""
 for round in $(seq 1 "${CLAIM_ROUNDS:-8}"); do
   rm -rf "${FAKE}/refs" && mkdir -p "${FAKE}/refs"
   (RUN_ID="a${round}" claim_issue 5 2>/dev/null; echo $? >"${TMP}/rc.a") &
@@ -161,10 +165,10 @@ for round in $(seq 1 "${CLAIM_ROUNDS:-8}"); do
   wait
   case "$(cat "${TMP}/rc.a")$(cat "${TMP}/rc.b")" in
     01 | 10) wins=$((wins + 1)) ;;
-    *) other=$((other + 1)); printf 'round %s: rc %s\n' "${round}" "$(cat "${TMP}/rc.a")$(cat "${TMP}/rc.b")" >&2 ;;
+    *) other=$((other + 1)); bad+=" (round ${round}: rc $(cat "${TMP}/rc.a")$(cat "${TMP}/rc.b"))" ;;
   esac
 done
-expect "claim race: in every round exactly one of two runs wins and the other is told taken" "${wins}/${other}" "${CLAIM_ROUNDS:-8}/0"
+expect "claim race: in every round exactly one of two runs wins and the other is told taken" "${wins}/${other}${bad}" "${CLAIM_ROUNDS:-8}/0"
 rm -rf "${FAKE}/refs" && mkdir -p "${FAKE}/refs"
 RUN_ID=77 claim_issue 5 2>/dev/null
 RUN_ID=77 claim_issue 5 2>/dev/null
