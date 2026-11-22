@@ -54,7 +54,8 @@ up to N go at once; re-render after changing it, and fast-forward `agent-runner`
   cancels the older waiting one, so the schedule's kick, the inbox's `/approve` and `/rerun` and the
   dashboard each put a run into a free slot. The kick starts one run per free slot, no more than the
   `agent:ready` issues nothing holds, and no more than `maxOpenPrs` and `runsPerDay` leave room for
-  once the runs already going are counted.
+  once the runs already going are counted. The hardened-runner add-on's `agent-kick.sh` cannot read
+  the policy: install it with `AGENT_KICK_CODER_SLOTS=<N>`, or it keeps starting one run at a time.
 - **A claim per issue.** Before it locks an issue, a run creates the ref
   `refs/agent-locks/issue-<n>`, which GitHub creates for one caller only; a run that loses moves on
   to the next issue. The claim is released last in finalize, after the labels and the ledger row, and

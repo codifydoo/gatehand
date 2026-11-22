@@ -22,11 +22,16 @@
 #
 # The calendars below are the DEFAULT schedules of .github/agents/policy.json. If you change a
 # schedule there, change job_calendar here to the same time and re-run install.
+#
+# AGENT_KICK_CODER_SLOTS is policy.json's roles.coder.parallelism (default 1). The token cannot read
+# the policy, so install takes it as a setting: change it whenever you change the policy's, and
+# re-run install.
 set -euo pipefail
 
 REPO="${AGENT_KICK_REPO:-}"
 RUNNER_REF="${AGENT_KICK_RUNNER_REF:-agent-runner}"
 BASE_REF="${AGENT_KICK_BASE_REF:-main}"
+CODER_SLOTS="${AGENT_KICK_CODER_SLOTS:-1}"
 API=https://api.github.com
 # Tests point ROOT at a temp dir; the paths written INTO the units never carry it.
 ROOT="${AGENT_KICK_ROOT:-}"
@@ -101,6 +106,46 @@ print(sum(1 for r in runs if r.get("status") != "completed"))' "${BODY}" \
     || die "could not read the coder run list"
 }
 
+# With N > 1 slots: the free slots to dispatch into, space-separated. A slot is busy while a
+# dispatched coder run that has not completed has "(slot k)" at the end of its title; a run without
+# one (started before the workflow had slots) holds a runner but no slot. No more than N minus the
+# runs going. The queue and the caps are not checked here, because the token cannot read issues or
+# the policy: each run's gate and claim check them and stop early when there is nothing to do.
+coder_free_slots() {
+  local code wf="$1"
+  code="$(api GET "/repos/${REPO}/actions/workflows/${wf}/runs?event=workflow_dispatch&per_page=100")" \
+    || die "could not list ${wf} runs"
+  [[ "${code}" == 200 ]] || die "could not list ${wf} runs: HTTP ${code}: $(api_message)"
+  python3 -I -c 'import json,re,sys
+n = int(sys.argv[2])
+runs = [r for r in json.load(open(sys.argv[1]))["workflow_runs"] if r.get("status") != "completed"]
+held = set()
+for r in runs:
+    m = re.search(r" \(slot ([0-9]+)\)$", r.get("display_title") or "")
+    if m: held.add(int(m.group(1)))
+free = [k for k in range(1, n + 1) if k not in held][:max(0, n - len(runs))]
+print(" ".join(map(str, free)))' "${BODY}" "${CODER_SLOTS}" \
+    || die "could not read the coder run list"
+}
+
+# kick_coder_slots <workflow> <ref>: one dispatch per free slot, each with its slot input.
+kick_coder_slots() {
+  local wf="$1" ref="$2" free k code started=0
+  free="$(coder_free_slots "${wf}")"
+  [[ "${free}" =~ ^[0-9\ ]*$ ]] || die "unexpected free slots '${free}'"
+  if [[ -z "${free}" ]]; then log "every coder slot is busy (${CODER_SLOTS} slots); no kick"; return 0; fi
+  for k in ${free}; do
+    if code="$(api POST "/repos/${REPO}/actions/workflows/${wf}/dispatches" "{\"ref\":\"${ref}\",\"inputs\":{\"slot\":\"${k}\"}}")" \
+      && [[ "${code}" == 200 || "${code}" == 204 ]]; then
+      started=$((started + 1))
+    else
+      printf 'agent-kick: dispatch of %s on %s into slot %s failed: HTTP %s: %s\n' "${wf}" "${ref}" "${k}" "${code:-none}" "$(api_message)" >&2
+    fi
+  done
+  [[ "${started}" -gt 0 ]] || die "every dispatch of ${wf} on ${ref} failed"
+  log "dispatched ${started} ${wf} run(s) on ${ref} into free slots (${free})"
+}
+
 cmd_run() {
   local job="${1:-}" wf ref code busy
   wf="$(job_workflow "${job}")" || { printf 'agent-kick: unknown job %q (want: %s)\n' "${job}" "${JOBS[*]}" >&2; exit 2; }
@@ -115,6 +160,11 @@ cmd_run() {
   BODY="$(mktemp)"
   trap 'rm -f "${BODY}"' EXIT
 
+  if [[ "${job}" == coder && "${CODER_SLOTS}" != 1 ]]; then
+    [[ "${CODER_SLOTS}" =~ ^([1-9]|1[0-9]|20)$ ]] || die "AGENT_KICK_CODER_SLOTS must be a number from 1 to 20"
+    kick_coder_slots "${wf}" "${ref}"
+    return
+  fi
   if [[ "${job}" == coder ]]; then
     busy="$(coder_busy "${wf}")"
     [[ "${busy}" =~ ^[0-9]+$ ]] || die "unexpected ${job} run count '${busy}'"
@@ -142,7 +192,7 @@ After=network-online.target
 [Service]
 Type=oneshot
 ExecStart=${BIN} run %i
-Environment=AGENT_KICK_REPO=${REPO} AGENT_KICK_RUNNER_REF=${RUNNER_REF} AGENT_KICK_BASE_REF=${BASE_REF} AGENT_KICK_TRIAGE=${TRIAGE}
+Environment=AGENT_KICK_REPO=${REPO} AGENT_KICK_RUNNER_REF=${RUNNER_REF} AGENT_KICK_BASE_REF=${BASE_REF} AGENT_KICK_TRIAGE=${TRIAGE} AGENT_KICK_CODER_SLOTS=${CODER_SLOTS}
 # The token reaches the service only as a credential; the dynamic user cannot read the file.
 LoadCredential=token:${TOKEN_FILE}
 DynamicUser=yes
@@ -159,8 +209,8 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=yes
 LockPersonality=yes
 SystemCallArchitectures=native
-# Two API calls at most; --retry-max-time 90 keeps each under about 2 min, Retry-After included.
-TimeoutStartSec=5min
+# 1 + N API calls at most (N coder slots); --retry-max-time 90 keeps each under about 2 min, Retry-After included.
+TimeoutStartSec=$((2 * (1 + CODER_SLOTS) + 1))min
 EOF
 }
 
@@ -196,6 +246,7 @@ cmd_install() {
   [[ "${REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "set AGENT_KICK_REPO=<owner>/<repo>"
   [[ "${RUNNER_REF}" =~ ^[A-Za-z0-9._/-]+$ && "${BASE_REF}" =~ ^[A-Za-z0-9._/-]+$ ]] || die "bad ref name"
   [[ "${TRIAGE}" == true || "${TRIAGE}" == false ]] || die "AGENT_KICK_TRIAGE must be true or false"
+  [[ "${CODER_SLOTS}" =~ ^([1-9]|1[0-9]|20)$ ]] || die "AGENT_KICK_CODER_SLOTS must be a number from 1 to 20"
   check_token_file
   command -v curl >/dev/null || die "curl is missing"
   command -v python3 >/dev/null || die "python3 is missing"

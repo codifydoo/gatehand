@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- `addons/hardened-runner`: `agent-kick.sh` fills free coder slots. With
+  `AGENT_KICK_CODER_SLOTS=<N>` (new, default `1`), the coder timer dispatches one run per free
+  slot, each with its `slot` input, instead of one run whenever no coder run was going; 0.12.0's
+  `roles.coder.parallelism` had no effect on a repository kicked this way. Installed repositories
+  need no update for this (re-rendering only refreshes one paragraph of their
+  `.github/agents/README.md`); on the kick box, re-run `install` with `AGENT_KICK_CODER_SLOTS` set
+  to the policy's `parallelism`.
+
 ## 0.12.0 (2026-11-22)
 
 - Coder: `roles.coder.parallelism` (new in `policy.json`, default `1`) lets up to N coder runs go at
