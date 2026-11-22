@@ -317,6 +317,17 @@ section_queue() {
       | sort_by({"critical": 0, "high": 1, "medium": 2, "low": 3}[.p] // 4)
       | map("\(.n) \(.p)") | join(", ")' <<<"${ISSUES}")" \
     "${per}" "$(((n + per - 1) / per))"
+  # roles.coder.parallelism > 1: the slots (agent-coder.yml), and the runs going in them now.
+  local par runs
+  par="$(coder_parallelism)"
+  if [[ "${par}" -gt 1 ]]; then
+    if runs="$(coder_active_runs)"; then
+      printf 'Up to %s coder runs go at once (roles.coder.parallelism); %s slot(s) busy now.\n\n' \
+        "${par}" "$((par - $(coder_free_slots "${runs}" | grep -c . || true)))"
+    else
+      printf 'Up to %s coder runs go at once (roles.coder.parallelism); the runs going now could not be read.\n\n' "${par}"
+    fi
+  fi
 }
 
 render() {

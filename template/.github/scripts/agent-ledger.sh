@@ -15,7 +15,9 @@
 #
 # Usage:
 #   agent-ledger.sh append <row-json>
-#   agent-ledger.sh breaker-record <role> <outcome> <run-id>   prints "tripped" when THIS call trips it
+#   agent-ledger.sh breaker-record <role> <outcome> <run-id> [key]
+#                                                               prints "tripped" when THIS call trips it;
+#                                                               [key] makes it idempotent (see _breaker_record)
 #   agent-ledger.sh breaker-trip <role> <reason>                 /pause <role>
 #   agent-ledger.sh breaker-reset <role>                         /resume <role>, /approve on a breaker
 #
@@ -24,8 +26,13 @@
 #      AGENT_LEDGER_NO_MAIN=1    load the functions without running (tests)
 #
 # CONCURRENCY: writers do not share a concurrency group, on purpose (see agent-lib.sh,
-# inbox_add_line). Each write is a fresh shallow fetch, an edit and a push; a push that loses a race
-# is rejected as non-fast-forward and the whole edit is redone on the new tip, up to five times.
+# inbox_add_line), and with roles.coder.parallelism > 1 several coder runs finalize at once. Each
+# write is a fresh shallow fetch, an edit and a push; a push that loses a race is rejected as
+# non-fast-forward and the whole edit is redone on the new tip, up to LEDGER_ATTEMPTS times with a
+# growing, jittered wait. Nothing is ever force-pushed, so no other writer's row is lost. An edit is
+# a function of the tip it runs on: a breaker step re-reads the count, so two failures at once both
+# count and the trip lands once; a row already on the tip (a push that landed but reported an error)
+# is not appended twice.
 set -uo pipefail
 
 # shellcheck source=/dev/null
@@ -46,12 +53,16 @@ breaker_is_success() { [[ "$1" == "pr-opened" || "$1" == "fix-pushed" ]]; }
 # ledger_mutate <commit-message> <function> [args…]: run <function> inside a checkout of the ledger
 # branch, then commit and push what it changed. Retries the whole edit when the push loses a race.
 # The function may write a result to "${LEDGER_RESULT}", which survives the checkout's removal.
+LEDGER_ATTEMPTS=8
 ledger_mutate() {
   local msg="$1" attempt dir remote branch
   shift
   remote="$(ledger_remote)"
   branch="$(policy '.ledgerBranch')"
-  for attempt in 1 2 3 4 5; do
+  for ((attempt = 1; attempt <= LEDGER_ATTEMPTS; attempt++)); do
+    # A result belongs to the edit that was pushed: an attempt that tripped the breaker and then lost
+    # the race must not report a trip the winning edit did not make.
+    [[ -z "${LEDGER_RESULT:-}" ]] || : >"${LEDGER_RESULT}"
     dir="$(mktemp -d)"
     git -C "${dir}" init -q
     git -C "${dir}" config user.name "$(policy '.botLogin')"
@@ -81,9 +92,9 @@ ledger_mutate() {
     fi
     rm -rf "${dir}"
     agent_log "ledger push lost a race (attempt ${attempt}); redoing the edit on the new tip"
-    sleep "${AGENT_LEDGER_BACKOFF:-${attempt}}"
+    sleep "${AGENT_LEDGER_BACKOFF:-$((attempt + RANDOM % (attempt + 1)))}"
   done
-  agent_log "ledger: gave up after 5 attempts"
+  agent_log "ledger: gave up after ${LEDGER_ATTEMPTS} attempts"
   return 1
 }
 
@@ -93,29 +104,46 @@ _append_row() {
   local row="$1" month
   month="$(jq -rn --argjson e "$(agent_now_epoch)" '$e | strftime("%Y-%m")')"
   mkdir -p runs
+  # The exact row already there: an earlier attempt's push landed though it reported an error.
+  if [[ -f "runs/${month}.jsonl" ]] && grep -Fxq -- "${row}" "runs/${month}.jsonl"; then return 0; fi
   printf '%s\n' "${row}" >>"runs/${month}.jsonl"
 }
 
 _breaker_load() { if [[ -s state/breaker.json ]]; then cat state/breaker.json; else echo '{}'; fi; }
 _breaker_save() { mkdir -p state && jq -S . >state/breaker.json.new && mv state/breaker.json.new state/breaker.json; }
 
+# _breaker_record <role> <outcome> <run> [key]: with [key] (one per finalize, the same on every retry
+# of its write), a step whose key is among the role's recent_keys (its last 20) is not counted again:
+# the push of an earlier attempt landed though it reported an error, and other runs' steps may have
+# landed since. If that step tripped the breaker (tripped_key), it says "tripped" again, so the
+# caller still files the inbox request.
 _breaker_record() {
-  local role="$1" outcome="$2" run="$3" threshold now state
+  local role="$1" outcome="$2" run="$3" key="${4:-}" threshold now state
   threshold="$(policy ".roles[\"${role}\"].breakerThreshold // 3")"
   now="$(agent_iso)"
+  if [[ -n "${key}" ]]; then
+    if [[ "$(_breaker_load | jq -r --arg r "${role}" '.[$r].tripped_key // ""')" == "${key}" ]]; then
+      printf 'tripped\n' >"${LEDGER_RESULT}"
+      return 0
+    fi
+    _breaker_load | jq -e --arg r "${role}" --arg k "${key}" '(.[$r].recent_keys // []) | index($k) != null' >/dev/null && return 0
+  fi
   if breaker_is_success "${outcome}"; then
     state="$(_breaker_load | jq --arg r "${role}" --arg o "${outcome}" --arg run "${run}" --arg now "${now}" \
-      '.[$r] = ((.[$r] // {}) + {consecutive: 0, last_run: $run, last_outcome: $o, updated_at: $now})')"
+      '.[$r] = ((.[$r] // {}) + {consecutive: 0, last_run: $run, last_outcome: $o, updated_at: $now})
+       | if $k == "" then . else .[$r].recent_keys = (((.[$r].recent_keys // []) + [$k]) | .[-20:]) end' --arg k "${key}")"
     printf '%s\n' "${state}" | _breaker_save
     return 0
   fi
   state="$(_breaker_load | jq --arg r "${role}" --arg o "${outcome}" --arg run "${run}" --arg now "${now}" \
-    --argjson t "${threshold}" '
+    --argjson t "${threshold}" --arg k "${key}" '
       (.[$r] // {consecutive: 0, tripped_at: null}) as $b
       | ($b.consecutive + 1) as $n
       | .[$r] = ($b + {consecutive: $n, last_run: $run, last_outcome: $o, updated_at: $now})
+      | if $k == "" then . else .[$r].recent_keys = (((.[$r].recent_keys // []) + [$k]) | .[-20:]) end
       | if $n >= $t and ($b.tripped_at // null) == null
         then .[$r].tripped_at = $now
+             | (if $k == "" then . else .[$r].tripped_key = $k end)
              | .[$r].reason = "\($n) runs in a row ended without a PR (last: \($o))"
              | .[$r].newly_tripped = true
         else .[$r].newly_tripped = false end')"
@@ -150,8 +178,8 @@ main() {
       ledger_mutate "ledger: $(jq -r '"\(.role // "?") \(.outcome // "?") run \(.run_id // "?")"' <<<"${row}")" _append_row "${row}"
       ;;
     breaker-record)
-      [[ $# -eq 3 ]] || { agent_log "usage: breaker-record <role> <outcome> <run-id>"; return 2; }
-      ledger_mutate "breaker: $1 $2" _breaker_record "$1" "$2" "$3"
+      [[ $# -eq 3 || $# -eq 4 ]] || { agent_log "usage: breaker-record <role> <outcome> <run-id> [key]"; return 2; }
+      ledger_mutate "breaker: $1 $2" _breaker_record "$@"
       ;;
     breaker-trip)
       [[ $# -eq 2 ]] || { agent_log "usage: breaker-trip <role> <reason>"; return 2; }

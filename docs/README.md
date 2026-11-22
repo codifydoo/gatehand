@@ -44,6 +44,39 @@ the issue itself when the run can still vouch for its text (the same snapshot ru
 When its fix makes the PR's description untrue, it rewrites the description too (the coder's footer
 stays); a description that anyone but the agent bot last edited is left alone.
 
+### Several coder runs at once
+
+By default one coder run goes at a time. `roles.coder.parallelism` (default `1`, at most `20`) lets
+up to N go at once; re-render after changing it, and fast-forward `agent-runner`.
+
+- **Slots.** `agent-coder.yml` gets a `slot` input (`1`..N) and one concurrency group per slot,
+  and its runs are titled `… (slot k)`. GitHub keeps one running and one waiting run per group and
+  cancels the older waiting one, so the schedule's kick, the inbox's `/approve` and `/rerun` and the
+  dashboard each put a run into a free slot. The kick starts one run per free slot, no more than the
+  `agent:ready` issues nothing holds, and no more than `maxOpenPrs` and `runsPerDay` leave room for
+  once the runs already going are counted.
+- **A claim per issue.** Before it locks an issue, a run creates the ref
+  `refs/agent-locks/issue-<n>`, which GitHub creates for one caller only; a run that loses moves on
+  to the next issue. The claim is released last in finalize, after the labels and the ledger row, and
+  the hourly sweep deletes a claim whose run has ended. The lock comment still counts the attempts.
+- **The caps, again after the claim.** Each run re-reads `maxOpenPrs` and `runsPerDay` after it
+  claims, counting every other claim as a run in flight, and releases its claim and stops when that
+  is over a cap. Two runs can both stop for one free place; the next kick fills it.
+- **The ledger.** Concurrent writes to the ledger branch are retried on the new tip, never forced;
+  no row is lost or written twice, and two failures at once both count towards the breaker.
+- **The infra grace.** One outage can fail every run at once, before any of their ledger rows
+  land. So each of the day's `infraGracePerDay` units is also a ref,
+  `refs/agent-locks/grace/coder/<day>/<k>`, that only one run can create; the sweep deletes past
+  days' refs.
+- **The cost.** More runs at once means more agent PRs against the same files at once, so more
+  merge conflicts for the merge gate and the fixer to stall on, and more runs on your Claude
+  account. Nothing keeps two runs off issues that touch the same files. Set `maxOpenPrs` to at
+  least N (render warns otherwise), and on a self-hosted pool keep at least N agent runners online
+  besides what the fixer uses (the doctor warns when fewer are).
+- **Re-run all jobs, never only the failed ones.** "Re-run failed jobs" reuses preflight's pick
+  without claiming the issue again, after finalize released it; with N above 1 another run can
+  take the same issue meanwhile. "Re-run all jobs" claims afresh.
+
 ## Security model
 
 The model never shares a job with a write-capable token, and nothing it wrote is executed by one.
@@ -65,6 +98,11 @@ The model never shares a job with a write-capable token, and nothing it wrote is
   that is a floor no file can lower (`AGENT_NEVER_FLOOR` in `agent-lib.sh`): `.github/`, `.claude/`,
   every `CLAUDE.md`, `.mcp.json`. The outbox and the PR guard both enforce it, both from the default
   branch's copy.
+- **The claim is preflight's only write to contents.** With `roles.coder.parallelism` above 1,
+  preflight mints a second App token with `contents: write`, held by the pick step alone, for the
+  claim: a commit reachable from no branch and the ref `refs/agent-locks/issue-<n>`. Preflight's own
+  token stays read-only for contents, it runs no model and only the default branch's scripts, and
+  the model's job stays read-only.
 - **The `agent-runner` ref.** The model controls its own job, including the Actions runtime token
   later steps hold, so it could write cache entries. Runs are dispatched on `agent-runner`, whose
   cache scope the default branch and PRs never read, and the code job restores no caches.
@@ -265,7 +303,7 @@ the details.
 
 ## Changing the rules
 
-- **Numbers, models, schedules, runners, tools, Claude auth:** edit `policy.json`, then re-render
+- **Numbers, models, schedules, runners, tools, Claude auth, `roles.coder.parallelism`:** edit `policy.json`, then re-render
   (`/gatehand:update`, or `bin/render.sh .` from a checkout of the package) and commit both.
 - **Your project's rules and checks:** `project.md`. The coder and fixer read it on every run. Every
   check command must also be in `policy.json` `tools.allow`, as `Bash(<prefix>:*)`.

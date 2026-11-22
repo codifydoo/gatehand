@@ -197,15 +197,71 @@ AGENT_ALLOWED_TOOLS_FM="$(join_by ', ' "${ALLOW[@]}")"
 AGENT_DISALLOWED_TOOLS="$(join_by , "${DENY[@]}")"
 : "${CI_FILE}" # validated only: the scripts read ci.workflowFile from policy.json themselves
 
+# roles.coder.parallelism: how many coder runs may go at once, each in its own concurrency slot.
+# 1 renders agent-coder.yml exactly as before slots existed (every slot value below is then empty or
+# the old text). The values are literal GitHub expressions and YAML, written as they are.
+# A JSON number: the dashboard and the scripts read it as one.
+CODER_PARALLELISM="$(want roles.coder.parallelism "$(p '.roles.coder.parallelism // 1 | if type == "number" then . else "not a number" end')" '^([1-9]|1[0-9]|20)$')"
+# shellcheck disable=SC2016
+if [[ "${CODER_PARALLELISM}" == 1 ]]; then
+  CODER_RUN_NAME_SLOT='' CODER_SLOT_INPUT='' CODER_CONCURRENCY_NOTE='' CODER_KICK_PERMISSIONS=''
+  CODER_CLAIM_TOKEN='' CODER_GROUP="'agent-coder'" CODER_PICK_TOKEN_STEP='app'
+else
+  CODER_RUN_NAME_SLOT="\${{ inputs.slot != '' && format(' (slot {0})', inputs.slot) || '' }}"
+  CODER_SLOT_INPUT="      slot:
+        description: The concurrency slot this run takes (policy.json roles.coder.parallelism). The kick, the inbox and the dashboard pick a free one.
+        type: choice
+        options: $(jq -cn --argjson n "${CODER_PARALLELISM}" '[range(1; $n + 1) | tostring]' | sed 's/,/, /g')
+        default: \"1\"
+"
+  CODER_CONCURRENCY_NOTE="# roles.coder.parallelism is ${CODER_PARALLELISM}: one group PER SLOT, so up to ${CODER_PARALLELISM} coder runs go at once, and
+# the kick dispatches one run into each free slot (no run queued or running in it). Two runs never
+# take the same issue: each claims it first (refs/agent-locks/issue-N, agent-state.sh claims).
+"
+  CODER_GROUP="format('agent-coder-slot-{0}', inputs.slot || '1')"
+  CODER_KICK_PERMISSIONS="          # parallelism > 1: the kick reads the queue, the open agent PRs and the ledger, to start no
+          # more runs than there is room for. Read only; it still dispatches nothing but the coder.
+          permission-contents: read
+          permission-issues: read
+          permission-pull-requests: read
+"
+  # shellcheck disable=SC2016
+  CODER_CLAIM_TOKEN='      # parallelism > 1: the pick claims its issue (agent-state.sh claims), which writes a commit
+      # reachable from no branch and the ref refs/agent-locks/issue-N. This token, with contents
+      # WRITE, is in the pick step alone; every other step keeps the read-only one above. This job
+      # runs no model and only main'"'"'s scripts.
+      - name: agent App token for the claim (contents write, issues and PRs read)
+        id: claim
+        if: steps.gate.outputs.go == '"'"'true'"'"'
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.AGENT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: read
+          permission-pull-requests: read
+'
+  CODER_PICK_TOKEN_STEP='claim'
+  max_open="$(p '.roles.coder.maxOpenPrs')"
+  if [[ "${max_open}" =~ ^[0-9]+$ && "${max_open}" -lt "${CODER_PARALLELISM}" ]]; then
+    printf 'render: warning: roles.coder.parallelism (%s) is above roles.coder.maxOpenPrs (%s), so no more than %s coder runs can start at once\n' \
+      "${CODER_PARALLELISM}" "${max_open}" "${max_open}" >&2
+  fi
+fi
+
 PLACEHOLDERS=(RUNS_ON_AGENT RUNS_ON_CI RUNS_ON_REVIEW BOT_SLUG REVIEW_BOT_LOGIN BASE_BRANCH CLAUDE_AUTH
   CLAUDE_AGENT_AUTH   CI_WORKFLOW_NAME CODER_MODEL CODER_MAX_TURNS CODER_TIMEOUT FIXER_MODEL FIXER_MAX_TURNS FIXER_TIMEOUT
   REVIEW_MODEL CRON_CODER CRON_SWEEP CRON_MERGE CRON_TRIAGE CRON_DIGEST AGENT_ALLOWED_TOOLS
-  AGENT_ALLOWED_TOOLS_FM AGENT_DISALLOWED_TOOLS)
+  AGENT_ALLOWED_TOOLS_FM AGENT_DISALLOWED_TOOLS CODER_GROUP CODER_PICK_TOKEN_STEP)
+# Placeholders whose value may be empty: with parallelism 1 they render to nothing.
+OPTIONAL_PLACEHOLDERS=(CODER_RUN_NAME_SLOT CODER_SLOT_INPUT CODER_CONCURRENCY_NOTE CODER_KICK_PERMISSIONS
+  CODER_CLAIM_TOKEN)
 declare -A V=()
 for k in "${PLACEHOLDERS[@]}"; do
   [[ -n "${!k}" ]] || die "internal: no value for ${k}"
   V[${k}]="${!k}"
 done
+for k in "${OPTIONAL_PLACEHOLDERS[@]}"; do V[${k}]="${!k}"; done
 MAP="$(for k in "${!V[@]}"; do jq -n --arg k "$k" --arg v "${V[$k]}" '{($k): $v}'; done | jq -s add)"
 
 # --- the package's files: render into a staging tree -----------------------------------------------

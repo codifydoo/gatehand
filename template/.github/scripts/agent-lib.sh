@@ -861,6 +861,34 @@ infra_grace_left() {
   [[ "${grace}" =~ ^[0-9]+$ && "${used}" =~ ^[0-9]+$ && "${used}" -lt "${grace}" ]]
 }
 
+# take_infra_grace <role> <day>: exit 0 when this run took one of the day's infraGracePerDay units,
+# 2 when other runs took them all, 1 when that cannot be told. With several coder runs at once
+# (roles.coder.parallelism > 1) one outage can fail them all together, and each would read the
+# ledger before any of their rows landed and find the grace unused. So each unit is also a ref,
+# refs/agent-locks/grace/<role>/<day>/<k>, which GitHub creates for one caller only; it points at the
+# base branch's tip and changes nothing. The sweep deletes the refs of past days.
+take_infra_grace() {
+  local role="$1" day="$2" grace k sha err
+  grace="$(policy ".roles[\"${role}\"].infraGracePerDay // 0")"
+  [[ "${grace}" =~ ^[0-9]+$ && "${grace}" -gt 0 ]] || return 2
+  sha="$(gh api "repos/${GH_REPO}/commits/$(policy '.baseBranch')" --jq '.sha')" && [[ -n "${sha}" ]] || return 1
+  err="$(mktemp)"
+  for ((k = 1; k <= grace; k++)); do
+    if jq -n --arg r "refs/agent-locks/grace/${role}/${day}/${k}" --arg s "${sha}" '{ref: $r, sha: $s}' \
+      | gh api -X POST "repos/${GH_REPO}/git/refs" --input - >/dev/null 2>"${err}"; then
+      rm -f "${err}"
+      return 0
+    fi
+    if ! { grep -q 'HTTP 422' "${err}" && grep -qi 'already exists' "${err}"; }; then
+      agent_log "infra: could not take a grace unit: $(head -c 200 "${err}")"
+      rm -f "${err}"
+      return 1
+    fi
+  done
+  rm -f "${err}"
+  return 2
+}
+
 # infra_failure <role> <job-name> <agent-step> <allowed-ere>...: prints "<evidence>|<step>" and exits
 # 0 when this run (RUN_ID) failed before its model step and may go uncounted. Exits 2, printing
 # "grace-used|<step>", when it did but the role's grace for today is spent; 1 otherwise.
@@ -891,7 +919,80 @@ infra_failure() {
     echo "grace-used|${step}"
     return 2
   fi
+  # Several coder runs at once: the ledger alone cannot tell, so take a unit (take_infra_grace).
+  if [[ "${role}" == coder && "$(coder_parallelism)" -gt 1 ]]; then
+    take_infra_grace "${role}" "${day}"
+    case $? in
+      0) ;;
+      2)
+        agent_log "infra: '${step}' failed before the agent started, but other runs took today's grace for ${role}; counted"
+        echo "grace-used|${step}"
+        return 2
+        ;;
+      *)
+        # Fails closed: counted, as with an unreadable ledger, and said as such.
+        agent_log "infra: '${step}' failed before the agent started, and today's grace could not be checked; counted"
+        return 1
+        ;;
+    esac
+  fi
   echo "step|${step}"
+}
+
+# --- coder slots (roles.coder.parallelism) ------------------------------------------------------------
+#
+# With roles.coder.parallelism N > 1, agent-coder.yml has a `slot` input (1..N) and one concurrency
+# group per slot, and its run-name ends in ` (slot k)`. GitHub keeps one running and one pending run
+# per group and cancels the older pending run for a newer one, so whoever dispatches a coder run
+# picks a slot with nothing in it. With N = 1 there is no slot: one group, as before.
+
+# coder_parallelism: roles.coder.parallelism, 1 when unset or not a positive number.
+coder_parallelism() {
+  local n
+  n="$(policy '.roles.coder.parallelism // 1')"
+  [[ "${n}" =~ ^[1-9][0-9]*$ ]] || n=1
+  printf '%s\n' "${n}"
+}
+
+# coder_active_runs: one line per dispatched coder run that has not completed, "<slot> <status>",
+# where <slot> is read from the run's title and is `?` for a title without one (a run started before
+# the workflow had slots, which holds a runner but no slot's group). Exit 1 when the runs are
+# unreadable.
+coder_active_runs() {
+  gh api "repos/${GH_REPO}/actions/workflows/agent-coder.yml/runs?event=workflow_dispatch&per_page=100" \
+    --jq '.workflow_runs[] | select(.status != "completed")
+      | "\((.display_title // "") | (capture(" \\(slot (?<s>[0-9]+)\\)$") | .s) // "?") \(.status)"'
+}
+
+# coder_free_slots <active-runs>: pure. The slots 1..N that no active run holds, in order.
+coder_free_slots() {
+  local n k
+  n="$(coder_parallelism)"
+  for ((k = 1; k <= n; k++)); do
+    grep -qE "^${k} " <<<"$1" || printf '%s\n' "${k}"
+  done
+}
+
+# coder_pick_slot [slot]...: the slot a dispatch should take, for `-f slot=<k>`; nothing with N = 1.
+# The first free slot; failing that, the first one with a run going but none waiting (the new run
+# waits behind it and cancels nothing); failing that, nothing (the workflow's default, slot 1). The
+# [slot]s are runs this caller dispatched a moment ago, which the runs list may not show yet: each
+# counts as a run waiting in that slot. Exit 1 when the runs are unreadable.
+coder_pick_slot() {
+  local n runs k s
+  n="$(coder_parallelism)"
+  [[ "${n}" -gt 1 ]] || return 0
+  runs="$(coder_active_runs)" || return 1
+  for s in "$@"; do runs+=$'\n'"${s} queued"; done
+  k="$(coder_free_slots "${runs}")"
+  k="${k%%$'\n'*}"
+  if [[ -z "${k}" ]]; then
+    for ((k = 1; k <= n; k++)); do
+      grep -qE "^${k} (queued|pending|waiting|requested)$" <<<"${runs}" || break
+    done
+    [[ "${k}" -le "${n}" ]] || k=""
+  fi
+  [[ -z "${k}" ]] || printf '%s\n' "${k}"
 }
 
 # --- repo-local extensions ----------------------------------------------------------------------------

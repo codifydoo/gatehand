@@ -10,7 +10,8 @@
 #
 # Usage (all read GH_TOKEN, GH_REPO; outputs go to $GITHUB_OUTPUT):
 #   agent-state.sh gate <role>         go=true|false, reason=…
-#   agent-state.sh pick [<issue>]      issue=N, attempt=K  (empty issue = nothing eligible)
+#   agent-state.sh pick [<issue>]      issue=N, attempt=K  (empty issue = nothing eligible); with
+#                                      roles.coder.parallelism > 1 it claims the issue (see claims)
 #   agent-state.sh lock <issue> <attempt>                 reads RUN_ID, RUN_ATTEMPT, RUN_URL
 #   agent-state.sh snapshot <issue> <out> <since|label>   the task file, from one fetch, re-checked
 #   agent-state.sh finalize            reads OUTCOME, REASON, ISSUE, ATTEMPT, PR_NUMBER, PR_URL, RUN_ID,
@@ -93,6 +94,13 @@ ref_state() {
   if [[ "${a}" == "${b}" ]]; then echo ok; else echo stale; fi
 }
 
+# runs_on_day <runs-jsonl> <role> <day>: pure. The role's counted runs started on <day>. A run that
+# never reached the model (`counted: false`, infra_failure) is not a run for the cap.
+runs_on_day() {
+  printf '%s\n' "$1" | jq -s --arg d "$3" --arg r "$2" \
+    '[.[] | select(type == "object" and .role == $r and .counted != false and ((.started_at // "") | startswith($d)))] | length'
+}
+
 cmd_gate() {
   local role="${1:-${ROLE}}" breaker runs tripped day month count cap open max_open decision
   month="$(jq -rn --argjson e "$(agent_now_epoch)" '$e | strftime("%Y-%m")')"
@@ -102,9 +110,7 @@ cmd_gate() {
   else
     [[ -n "${breaker}" ]] || breaker='{}'
     tripped="$(jq -r --arg r "${role}" '.[$r].tripped_at // empty' <<<"${breaker}")"
-    # A run that never reached the model (`counted: false`, infra_failure) is not a run for the cap.
-    count="$(printf '%s\n' "${runs}" | jq -s --arg d "${day}" --arg r "${role}" \
-      '[.[] | select(type == "object" and .role == $r and .counted != false and ((.started_at // "") | startswith($d)))] | length')"
+    count="$(runs_on_day "${runs}" "${role}" "${day}")"
     cap="$(policy ".roles[\"${role}\"].runsPerDay")"
     max_open="$(policy ".roles[\"${role}\"].maxOpenPrs")"
     if ! open="$(gh pr list --state open --label agent:pr --limit 100 --json number --jq 'length')"; then
@@ -337,9 +343,178 @@ explicit_ok() {
   ' <<<"$1"
 }
 
-cmd_pick() {
-  local want="${1:-}" json why max n attempt
+# --- claims (roles.coder.parallelism > 1) --------------------------------------------------------------
+#
+# With more than one coder run at a time, two runs picking at once would choose the same issue: the
+# pick and the lock are separate API calls. So each run CLAIMS its issue first by creating the ref
+# refs/agent-locks/issue-<n>, which GitHub creates for exactly one caller (a second create fails
+# with 422 "Reference already exists"); the loser moves on to the next issue. The ref points at a
+# commit whose message records the run (`agent-claim issue=N run=R run_attempt=T at=ISO`),
+# a child of the base branch's tip with its tree unchanged, reachable from nothing else. Finalize deletes the run's own
+# claim, last; the sweep deletes a claim whose run has ended, and one older than lockTtlMinutes
+# whose message it cannot read. The lock comment stays: it is what counts attempts. With N = 1 runs
+# never overlap (one concurrency group) and nothing is claimed; finalize and the sweep clear claims
+# whatever N is, so lowering it with claims outstanding leaves none behind.
+
+claim_path() { printf 'agent-locks/issue-%s' "$1"; }
+
+# claim_owner <issue>: the claim's "run run_attempt committed-at" (run and run_attempt `-` when the
+# message does not name them). Nothing when there is no claim. Exit 1 when it is unreadable.
+claim_owner() {
+  local err sha info
+  err="$(mktemp)"
+  if ! sha="$(gh api "repos/${GH_REPO}/git/ref/$(claim_path "$1")" --jq '.object.sha' 2>"${err}")"; then
+    if grep -q 'HTTP 404' "${err}"; then rm -f "${err}"; return 0; fi
+    agent_log "claim of #$1 unreadable: $(head -c 200 "${err}")"
+    rm -f "${err}"
+    return 1
+  fi
+  rm -f "${err}"
+  [[ -n "${sha}" ]] || return 0
+  info="$(gh api "repos/${GH_REPO}/git/commits/${sha}" --jq '"\(.message)\n\(.committer.date // "")"')" || return 1
+  jq -rRs '
+    split("\n") as $l
+    | (($l[0] | capture(" run=(?<r>[0-9A-Za-z]+)") | .r) // "-") as $r
+    | (($l[0] | capture(" run_attempt=(?<t>[0-9]+)") | .t) // "-") as $t
+    | "\($r) \($t) \($l[1] // "")"' <<<"${info}"
+}
+
+# claim_issue <issue>: exit 0 when this run (RUN_ID or GITHUB_RUN_ID) holds the claim on <issue> now,
+# 1 when another run holds it, 2 on any other error. Only GitHub's "already exists" means taken: a
+# 403 (a preflight token without contents: write, because the workflow was not re-rendered after
+# parallelism changed) or a 5xx stops the pick, rather than walking the whole queue as "taken".
+claim_issue() {
+  local issue="$1" run="${RUN_ID:-${GITHUB_RUN_ID:-local}}" ra base tree parent commit err owner
+  ra="$(RUN_ATTEMPT="${RUN_ATTEMPT:-${GITHUB_RUN_ATTEMPT:-}}" agent_run_attempt)"
+  # A child of the base branch's tip with the SAME tree: it changes no file, so no workflow file
+  # either (the App has no Workflows permission, and a parentless commit would add every file).
+  base="$(gh api "repos/${GH_REPO}/commits/$(policy '.baseBranch')" --jq '"\(.sha) \(.commit.tree.sha)"')" \
+    || { agent_log "claim: the base branch is unreadable"; return 2; }
+  read -r parent tree <<<"${base}"
+  [[ -n "${parent}" && -n "${tree}" ]] || { agent_log "claim: the base branch is unreadable"; return 2; }
+  commit="$(jq -n --arg t "${tree}" --arg p "${parent}" \
+    --arg m "agent-claim issue=${issue} run=${run}${ra:+ run_attempt=${ra}} at=$(agent_iso)" \
+    '{message: $m, tree: $t, parents: [$p]}' \
+    | gh api -X POST "repos/${GH_REPO}/git/commits" --input - --jq '.sha')" \
+    && [[ -n "${commit}" ]] || { agent_log "claim: could not write the claim commit for #${issue}"; return 2; }
+  err="$(mktemp)"
+  if jq -n --arg r "refs/$(claim_path "${issue}")" --arg s "${commit}" '{ref: $r, sha: $s}' \
+    | gh api -X POST "repos/${GH_REPO}/git/refs" --input - >/dev/null 2>"${err}"; then
+    rm -f "${err}"
+    return 0
+  fi
+  if grep -q 'HTTP 422' "${err}" && grep -qi 'already exists' "${err}"; then
+    rm -f "${err}"
+    # "Re-run all jobs" keeps the run id: a claim this run's earlier attempt left is this run's.
+    owner="$(claim_owner "${issue}")" || return 2
+    [[ "${owner%% *}" == "${run}" ]] && return 0
+    return 1
+  fi
+  agent_log "claim of #${issue} failed: $(head -c 300 "${err}")"
+  rm -f "${err}"
+  return 2
+}
+
+# release_claim <issue> [run]: delete the claim on <issue>; with [run], only a claim that run holds.
+# A claim already gone is not an error.
+release_claim() {
+  local issue="$1" run="${2:-}" owner err
+  if [[ -n "${run}" ]]; then
+    owner="$(claim_owner "${issue}")" || return 1
+    [[ -n "${owner}" && "${owner%% *}" == "${run}" ]] || return 0
+  fi
+  err="$(mktemp)"
+  if gh api -X DELETE "repos/${GH_REPO}/git/refs/$(claim_path "${issue}")" >/dev/null 2>"${err}" \
+    || grep -qE 'HTTP (404|422)' "${err}"; then
+    rm -f "${err}"
+    return 0
+  fi
+  agent_log "could not release the claim on #${issue}: $(head -c 200 "${err}")"
+  rm -f "${err}"
+  return 1
+}
+
+# claimed_issues: every issue with a claim, one number a line. Exit 1 when unreadable.
+claimed_issues() {
+  local out err
+  err="$(mktemp)"
+  if ! out="$(gh api --paginate "repos/${GH_REPO}/git/matching-refs/agent-locks/issue-" --jq '.[].ref' 2>"${err}")"; then
+    if grep -q 'HTTP 404' "${err}"; then rm -f "${err}"; return 0; fi
+    rm -f "${err}"
+    return 1
+  fi
+  rm -f "${err}"
+  grep -oE '^refs/agent-locks/issue-[0-9]+$' <<<"${out}" | grep -oE '[0-9]+$' || true
+}
+
+# caps_after_claim <issue>: prints why this run must stop, or nothing when it may go on. The gate
+# read the caps before the pick; with N runs starting at once, each re-reads them after its claim and
+# counts every OTHER claim as a run in flight: towards maxOpenPrs (it will open a PR) and towards
+# runsPerDay (its ledger row comes at its finalize). Every run that goes on saw all claims made
+# before its own re-read, so starts never exceed either cap; two runs can both stop for one free
+# place, which the next kick fills. A claim whose run already opened its PR, or wrote its row,
+# counts twice until its finalize releases it: the error is always on the side of fewer runs.
+caps_after_claim() {
+  local issue="$1" all others open runs today month day cap max_open
+  all="$(claimed_issues)" || { echo "claims unreadable"; return 0; }
+  others="$(grep -vxF -- "${issue}" <<<"${all}" | grep -c . || true)"
+  if ! open="$(gh pr list --state open --label agent:pr --limit 100 --json number --jq 'length')" || ! [[ "${open}" =~ ^[0-9]+$ ]]; then
+    echo "open PRs unreadable"
+    return 0
+  fi
+  month="$(jq -rn --argjson e "$(agent_now_epoch)" '$e | strftime("%Y-%m")')"
+  day="$(jq -rn --argjson e "$(agent_now_epoch)" '$e | strftime("%Y-%m-%d")')"
+  runs="$(ledger_file "runs/${month}.jsonl")" || { echo "ledger unreadable"; return 0; }
+  today="$(runs_on_day "${runs}" "${ROLE}" "${day}")"
+  cap="$(policy ".roles[\"${ROLE}\"].runsPerDay")"
+  max_open="$(policy ".roles[\"${ROLE}\"].maxOpenPrs")"
+  if [[ $((open + others)) -ge "${max_open}" ]]; then
+    echo "open-pr-limit (${open} open agent PRs and ${others} other runs in flight, max ${max_open})"
+  elif [[ $((today + others)) -ge "${cap}" ]]; then
+    echo "daily-cap (${today} runs today and ${others} other runs in flight, of ${cap})"
+  fi
+}
+
+# claim_and_recheck <issue> <named|auto>: claim <issue>, read it again, and re-check the caps.
+# Prints the fresh issue JSON and exits 0 when this run may take it. Exit 1: taken by another run, or
+# no longer eligible (released again). Exit 3: over a cap (released; the run stops), printing why.
+# Exit 2: error.
+claim_and_recheck() {
+  local issue="$1" how="$2" rc json why max
+  claim_issue "${issue}"
+  rc=$?
+  [[ "${rc}" -eq 0 ]] || return "${rc}"
+  # The list the pick ranked is from before the claim: another run may have taken, finished and
+  # released this issue since. Read it again, and count its attempts from the fresh comments.
+  if ! json="$(gh issue view "${issue}" --json number,state,title,body,labels,createdAt,comments)"; then
+    release_claim "${issue}"
+    return 2
+  fi
   max="$(policy ".roles[\"${ROLE}\"].maxAttemptsPerIssue")"
+  if [[ "${how}" == named ]]; then
+    why="$(explicit_ok "${json}")"
+  else
+    why="$(jq -r --argjson max "${max}" "${JQ_ISSUE_DEFS}"'skip_reason($max) // ""' <<<"${json}")"
+  fi
+  if [[ -n "${why}" ]]; then
+    agent_log "skip #${issue}: ${why} (read again after the claim)"
+    release_claim "${issue}"
+    return 1
+  fi
+  why="$(caps_after_claim "${issue}")"
+  if [[ -n "${why}" ]]; then
+    agent_log "pick: #${issue} claimed, but ${why}; released"
+    release_claim "${issue}"
+    printf '%s\n' "${why}"
+    return 3
+  fi
+  printf '%s\n' "${json}"
+}
+
+cmd_pick() {
+  local want="${1:-}" json why max n attempt claiming=0 rc
+  max="$(policy ".roles[\"${ROLE}\"].maxAttemptsPerIssue")"
+  [[ "$(coder_parallelism)" -gt 1 && "${ROLE}" == coder ]] && claiming=1
   if [[ -n "${want}" ]]; then
     [[ "${want}" =~ ^[0-9]+$ ]] || { agent_log "pick: '${want}' is not an issue number"; output issue ""; return 0; }
     json="$(gh issue view "${want}" --json number,state,title,body,labels,createdAt,comments)" || return 1
@@ -349,6 +524,20 @@ cmd_pick() {
       printf '::notice title=agent coder::#%s not taken: %s\n' "${want}" "${why}"
       output issue ""
       return 0
+    fi
+    if [[ "${claiming}" == 1 ]]; then
+      json="$(claim_and_recheck "${want}" named)"
+      rc=$?
+      case "${rc}" in
+        0) ;;
+        2) output issue ""; return 1 ;;
+        3) printf '::notice title=agent coder skipped::%s\n' "${json}"; output issue ""; return 0 ;;
+        *)
+          printf '::notice title=agent coder::#%s not taken: another coder run holds it, or it changed\n' "${want}"
+          output issue ""
+          return 0
+          ;;
+      esac
     fi
     n="${want}"
   else
@@ -360,7 +549,7 @@ cmd_pick() {
     # names the issue still takes it.
     log_skips "${json}" "${max}"
     n=""
-    local cand merged stop
+    local cand merged stop fresh
     while IFS= read -r cand; do
       [[ -n "${cand}" ]] || continue
       if ! merged="$(merged_prs_referencing "${cand}")"; then
@@ -382,6 +571,16 @@ cmd_pick() {
         agent_log "skip #${cand}: $(paste -sd';' - <<<"${stop}" | sed 's/;/; /g')"
         continue
       fi
+      if [[ "${claiming}" == 1 ]]; then
+        fresh="$(claim_and_recheck "${cand}" auto)"
+        rc=$?
+        case "${rc}" in
+          0) json="$(jq -s '.' <<<"${fresh}")" ;;
+          1) agent_log "skip #${cand}: another coder run claimed it first"; continue ;;
+          3) printf '::notice title=agent coder skipped::%s\n' "${fresh}"; output issue ""; return 0 ;;
+          *) output issue ""; return 1 ;;
+        esac
+      fi
       n="${cand}"
       break
     done < <(pick_ranked "${json}" "${max}")
@@ -398,17 +597,72 @@ cmd_pick() {
 }
 
 # cmd_kick: the coder's schedule. A scheduled run is on the default branch, where the gate refuses to
-# run (ref_state), so it only dispatches an auto-pick run on the runner ref, unless a coder run is
-# already queued or running: GitHub keeps one pending run per concurrency group and cancels the
-# older, and a kick must never cancel a person's named dispatch. The day's cap is the gate's.
+# run (ref_state), so it only dispatches auto-pick runs on the runner ref. GitHub keeps one pending
+# run per concurrency group and cancels the older, and a kick must never cancel a person's named
+# dispatch, so:
+#   N = 1   one run, unless a coder run is already queued or running.
+#   N > 1   one run per free slot (coder_free_slots), and no more than the room left: N minus the
+#           runs going (a run without a slot holds a runner but no slot), the agent:ready issues
+#           the pick would not skip, maxOpenPrs minus open agent PRs and runs going, and runsPerDay minus
+#           today's runs and runs going. The slots are read once: a run just dispatched is not in
+#           the runs list yet. Each run's gate and claim check again; this only keeps the kick from
+#           starting runs that would find nothing to do.
 cmd_kick() {
-  local busy
+  local busy n
+  n="$(coder_parallelism)"
+  if [[ "${n}" -gt 1 ]]; then
+    kick_slots "${n}"
+    return
+  fi
   busy="$(gh api "repos/${GH_REPO}/actions/workflows/agent-coder.yml/runs?event=workflow_dispatch&per_page=30" \
     --jq '[.workflow_runs[] | select(.status != "completed")] | length')" || { agent_log "kick: could not list coder runs"; return 1; }
   [[ "${busy}" =~ ^[0-9]+$ ]] || { agent_log "kick: unexpected run count '${busy}'"; return 1; }
   if [[ "${busy}" != 0 ]]; then echo "a coder run is already queued or running; no kick"; return 0; fi
   gh workflow run agent-coder.yml --ref "$(policy '.runnerRef')" >/dev/null || { agent_log "kick: the dispatch failed"; return 1; }
   echo "dispatched an auto-pick coder run on $(policy '.runnerRef')"
+}
+
+# kick_slots <n>: the kick with N > 1 slots (cmd_kick).
+kick_slots() {
+  local n="$1" runs active free budget ready open month day rows today cap max_open k started=0 why
+  runs="$(coder_active_runs)" || { agent_log "kick: could not list coder runs"; return 1; }
+  active="$(grep -c . <<<"${runs}" || true)"
+  mapfile -t free < <(coder_free_slots "${runs}")
+  budget=$((n - active))
+  [[ "${#free[@]}" -lt "${budget}" ]] && budget="${#free[@]}"
+  if [[ "${budget}" -le 0 ]]; then echo "every coder slot is busy (${active} runs going, ${n} slots); no kick"; return 0; fi
+  # The issues the pick could take: its own skip rules (held or locked, no acceptance section,
+  # attempts used up, …), so a queue of issues it would skip starts no runs. The trust and merged-PR
+  # checks need more calls per issue and stay the pick's.
+  ready="$(gh issue list --state open --label agent:ready --limit 100 \
+    --json number,state,title,body,labels,createdAt,comments)" \
+    || { agent_log "kick: could not list agent:ready issues"; return 1; }
+  ready="$(jq -r --argjson max "$(policy '.roles.coder.maxAttemptsPerIssue')" "${JQ_ISSUE_DEFS}"'
+    [.[] | select(skip_reason($max) == null)] | length' <<<"${ready}")"
+  open="$(gh pr list --state open --label agent:pr --limit 100 --json number --jq 'length')" \
+    || { agent_log "kick: could not list open agent PRs"; return 1; }
+  month="$(jq -rn --argjson e "$(agent_now_epoch)" '$e | strftime("%Y-%m")')"
+  day="$(jq -rn --argjson e "$(agent_now_epoch)" '$e | strftime("%Y-%m-%d")')"
+  rows="$(ledger_file "runs/${month}.jsonl")" || { agent_log "kick: the ledger is unreadable"; return 1; }
+  today="$(runs_on_day "${rows}" coder "${day}")"
+  cap="$(policy '.roles.coder.runsPerDay')"
+  max_open="$(policy '.roles.coder.maxOpenPrs')"
+  [[ "${ready}" =~ ^[0-9]+$ && "${open}" =~ ^[0-9]+$ && "${today}" =~ ^[0-9]+$ ]] \
+    || { agent_log "kick: unexpected counts (ready '${ready}', open '${open}', today '${today}')"; return 1; }
+  why="${#free[@]} free slots"
+  if [[ "${ready}" -lt "${budget}" ]]; then budget="${ready}"; why="${ready} queued issues"; fi
+  if [[ $((max_open - open - active)) -lt "${budget}" ]]; then budget=$((max_open - open - active)); why="${open} open agent PRs of ${max_open}"; fi
+  if [[ $((cap - today - active)) -lt "${budget}" ]]; then budget=$((cap - today - active)); why="${today} runs today of ${cap}"; fi
+  if [[ "${budget}" -le 0 ]]; then echo "no room for another coder run (${why}, ${active} going); no kick"; return 0; fi
+  for k in "${free[@]:0:${budget}}"; do
+    if gh workflow run agent-coder.yml --ref "$(policy '.runnerRef')" -f slot="${k}" >/dev/null; then
+      started=$((started + 1))
+    else
+      agent_log "kick: the dispatch for slot ${k} failed"
+    fi
+  done
+  echo "dispatched ${started} auto-pick coder run(s) on $(policy '.runnerRef') (bounded by ${why}; ${active} already going)"
+  [[ "${started}" -gt 0 ]]
 }
 
 # --- labels ------------------------------------------------------------------------------------------
@@ -1100,7 +1354,9 @@ cmd_finalize() {
   if [[ "${counted}" == false ]]; then
     agent_log "finalize: the run never reached the model; no breaker step"
   else
-    tripped="$(bash "${SCRIPT_DIR}/agent-ledger.sh" breaker-record "${ROLE}" "${outcome}" "${RUN_ID:-local}")" \
+    # The key is this finalize's (its row's ended_at), the same on every retry of the write.
+    tripped="$(bash "${SCRIPT_DIR}/agent-ledger.sh" breaker-record "${ROLE}" "${outcome}" "${RUN_ID:-local}" \
+      "${RUN_ID:-local}:${ra}:$(jq -r .ended_at <<<"${row}")")" \
       || agent_log "finalize: breaker update failed"
   fi
   if [[ "${tripped}" == "tripped" ]]; then
@@ -1108,6 +1364,10 @@ cmd_finalize() {
       "$(policy ".roles[\"${ROLE}\"].breakerThreshold // 3") runs in a row ended without a PR (last: ${outcome})" /dev/null >/dev/null \
       || agent_log "finalize: breaker request failed"
   fi
+  # LAST, after the labels and the ledger row: until its row exists, the claim is what counts this
+  # run against the caps (caps_after_claim), so the count errs high, never low. Whatever
+  # roles.coder.parallelism is now: it may have been lowered while this run held a claim.
+  release_claim "${issue}" "${RUN_ID:-local}" || agent_log "finalize: could not release the claim on #${issue}; the sweep will"
 
   if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     {

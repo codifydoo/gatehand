@@ -7,6 +7,11 @@
 #   3. A package file edited in the repo is not overwritten without --force; --check sees drift.
 #   4. Optional workflows come and go with policy.json, and keys missing from an older policy.json
 #      render with the package defaults.
+#   5. roles.coder.parallelism: 1 (or unset, as in a policy.json older than the key) renders the
+#      coder workflow with one concurrency group and no slot, as before slots existed; N > 1 renders
+#      a `slot` choice of 1..N, one group per slot, a run name that says the slot, a second App
+#      token with contents: write held by the pick step alone (preflight's own token and the model's
+#      job stay read-only), and read-only extras for the kick. Anything but 1..20 renders nothing; N above maxOpenPrs warns.
 set -uo pipefail
 PKG="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 R="${PKG}/bin/render.sh"
@@ -162,6 +167,46 @@ fresh
 pol 'del(.schedules) | del(.review)'
 check "an older policy.json without newer keys still renders" "${R}" "${TMP}/r"
 check "  with the default schedule" grep -qF "    - cron: \"$(jq -r .schedules.coder "${PKG}/defaults/policy.json")\"" "${WF}/agent-coder.yml"
+
+# --- 5 -----------------------------------------------------------------------------------------------
+fresh
+"${R}" "${TMP}/r" >/dev/null
+cp "${WF}/agent-coder.yml" "${TMP}/coder-default.yml"
+pol 'del(.roles.coder.parallelism)'
+"${R}" "${TMP}/r" >/dev/null
+check "parallelism unset renders the same coder workflow as 1" cmp -s "${TMP}/coder-default.yml" "${WF}/agent-coder.yml"
+check "  one group for every coder run" grep -qxF "  group: \${{ github.event_name == 'schedule' && 'agent-coder-kick' || 'agent-coder' }}" "${WF}/agent-coder.yml"
+check "  and no slot anywhere" bash -c "! grep -q slot '${WF}/agent-coder.yml'"
+pol '.roles.coder.parallelism = 3 | .roles.coder.maxOpenPrs = 8'
+check "parallelism 3 renders" "${R}" "${TMP}/r"
+C="${WF}/agent-coder.yml"
+check "  a slot choice of 1..3, default 1" bash -c "grep -A3 '^      slot:\$' '${C}' | grep -qxF '        options: [\"1\", \"2\", \"3\"]' && grep -A4 '^      slot:\$' '${C}' | grep -qxF '        default: \"1\"'"
+check "  one group per slot" grep -qxF "  group: \${{ github.event_name == 'schedule' && 'agent-coder-kick' || format('agent-coder-slot-{0}', inputs.slot || '1') }}" "${C}"
+check "  the run name says the slot" grep -qF "\${{ inputs.slot != '' && format(' (slot {0})', inputs.slot) || '' }}\"" "${C}"
+job() { awk -v j="  $1:" '$0 == j {on = 1; next} on && /^  [a-z]+:$/ {exit} on' "${C}"; }
+pre="$(job preflight)"
+step_of() { awk -v n="$1" '$0 == "      - name: " n {on = 1; print; next} on && /^      - / {exit} on' <<<"${pre}"; }
+check "  the claim's own token may write contents" bash -c "grep -qxF '          permission-contents: write' <<<\"\$1\"" _ "$(step_of 'agent App token for the claim (contents write, issues and PRs read)')"
+check "  preflight's job token stays read-only for contents" bash -c "grep -qxF '          permission-contents: read' <<<\"\$1\"" _ "$(step_of 'agent App token (issues write, everything else read)')"
+check "  only the pick step holds the claim's token" bash -c "[[ \$(grep -c 'steps.claim.outputs.token' <<<\"\$1\") == 1 ]] && grep -qF 'steps.claim.outputs.token' <<<\"\$2\"" _ "${pre}" "$(step_of 'pick an issue')"
+check "  the code job's token stays read-only" bash -c "[[ \"\$(awk '/^  code:\$/ {on=1; next} on && /^  [a-z]+:\$/ {exit} on' '${C}' | grep -cE '^      [a-z-]+: write')\" == 0 ]]"
+kick_perms="$(job kick | grep -v '^ *#' | grep -oE 'permission-[a-z-]+: (read|write)' | sort | paste -sd' ' -)"
+if [[ "${kick_perms}" == "permission-actions: write permission-contents: read permission-issues: read permission-pull-requests: read" ]]; then
+  t_pass "  the kick's App token adds reads only"
+else t_fail "  the kick's App token: ${kick_perms}"; fi
+check "  nothing left unrendered" bash -c "! grep -qE '@@[A-Z_]+@@' '${C}'"
+if command -v actionlint >/dev/null; then
+  # As tests/run.sh lints: the config placed where actionlint looks, run from the repository.
+  cp "${PKG}/tests/lint/actionlint.yaml" "${TMP}/r/.github/actionlint.yaml"
+  check "  and actionlint accepts it" bash -c "cd '${TMP}/r' && actionlint .github/workflows/agent-coder.yml"
+  rm -f "${TMP}/r/.github/actionlint.yaml"
+fi
+for bad in 0 21 '"x"' '"3"' -1 1.5; do
+  pol ".roles.coder.parallelism = ${bad}"
+  refuses "parallelism ${bad} is refused" "${R}" "${TMP}/r"
+done
+pol '.roles.coder.parallelism = 4 | .roles.coder.maxOpenPrs = 2'
+check "parallelism above maxOpenPrs warns" bash -c "'${R}' '${TMP}/r' 2>&1 >/dev/null | grep -q 'above roles.coder.maxOpenPrs'"
 
 printf '\n[render] %d passed, %d failed\n' "${pass}" "${fail}"
 [[ "${fail}" -eq 0 ]]

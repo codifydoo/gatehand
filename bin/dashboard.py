@@ -70,7 +70,9 @@ SCHEDULED = {"coder": "agent-coder.yml", "merge": "agent-merge.yml", "sweep": "a
              "digest": "agent-digest.yml", "triage": "agent-triage.yml"}
 # The per-role limits the page shows beside the action that spends another run.
 ROLE_LIMITS = ("runsPerDay", "maxOpenPrs", "maxReviewFixes", "maxAttemptsPerIssue", "maxCiFixes",
-               "breakerThreshold", "timeoutMinutes")
+               "breakerThreshold", "timeoutMinutes", "parallelism")
+# A coder run's slot, from the end of its title (agent-coder.yml run-name with roles.coder.parallelism > 1).
+SLOT_RE = re.compile(r" \(slot ([0-9]+)\)$")
 VARIABLES = ("AGENTS_ENABLED", "AGENT_AUTO_MERGE", "AGENT_OWNER_LOGIN", "AGENT_INBOX_ISSUE")
 OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
@@ -842,6 +844,13 @@ def read_repo(repo):
     except GhError as e:
         fail("runs", "runs: %s" % e, e)
         d["active_runs"] = d["recent_runs"] = None
+    # The coder's slots: how many runs may go at once, and which slots the dispatched runs going hold
+    # (agent-lib.sh coder_active_runs). A run whose title names no slot holds a runner but no slot.
+    d["coder_slots"] = None
+    if d["active_runs"] is not None:
+        coder = [x for x in d["active_runs"] if x["agent"] == "coder" and x["event"] == "workflow_dispatch"]
+        held = sorted({int(m.group(1)) for m in (SLOT_RE.search(x["name"] or "") for x in coder) if m})
+        d["coder_slots"] = {"parallelism": coder_parallelism(d), "busy": held, "runs": len(coder)}
 
     d["waiting"] = waiting_items(d)
     return d
@@ -1317,6 +1326,28 @@ def pr_labels(pr):
     return {(l or {}).get("name") for l in pr.get("labels") or []}
 
 
+def coder_parallelism(d):
+    n = ((d.get("policy") or {}).get("roles") or {}).get("coder", {}).get("parallelism")
+    return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 1
+
+
+def pick_slot(n, runs):
+    """agent-lib.sh coder_pick_slot: the first slot no run holds, else the first with a run going but
+    none waiting, else None (the workflow's default, slot 1)."""
+    held = {}
+    for r in runs:
+        m = SLOT_RE.search(r.get("display_title") or "")
+        if m and r.get("status") != "completed":
+            held.setdefault(int(m.group(1)), set()).add(r.get("status"))
+    for k in range(1, n + 1):
+        if k not in held:
+            return k
+    for k in range(1, n + 1):
+        if not held[k] & set(WAITING_STATES):
+            return k
+    return None
+
+
 def plan_dispatch(repo, d, viewer, body):
     wf = body.get("workflow")
     if wf not in ("coder", "review", "merge"):
@@ -1334,8 +1365,15 @@ def plan_dispatch(repo, d, viewer, body):
         runner_ok(d, "The coder")
         # One waiting run per concurrency group: GitHub cancels the older waiting run for the newer
         # (agent-state.sh cmd_kick).
-        runs = (gh_json(["api", "repos/%s/actions/workflows/agent-coder.yml/runs?event=workflow_dispatch&per_page=30" % repo])
-                or {}).get("workflow_runs") or []
+        n = coder_parallelism(d)
+        runs = (gh_json(["api", "repos/%s/actions/workflows/agent-coder.yml/runs?event=workflow_dispatch&per_page=%d"
+                         % (repo, 100 if n > 1 else 30)]) or {}).get("workflow_runs") or []
+        inputs = {}
+        if n > 1:
+            # One group per slot: only a run in the slot this one takes can make it wait, or be cancelled.
+            slot = pick_slot(n, runs)
+            inputs = {"slot": str(slot or 1)}
+            runs = [r for r in runs if (SLOT_RE.search(r.get("display_title") or "") or [None, "1"])[1] == inputs["slot"]]
         for r in sorted(runs, key=lambda r: r.get("id") or 0):
             if r.get("status") == "in_progress":
                 warnings.append("%s is running: this run waits for it to finish" % r.get("display_title"))
@@ -1345,7 +1383,7 @@ def plan_dispatch(repo, d, viewer, body):
         return {"summary": "Start the coder on the next queued issue, on %s" % d["policy"]["runnerRef"],
                 "effect": "the coder picks the oldest highest-priority agent:ready issue a writer queued, with every check "
                           "of a scheduled run, if the gate allows a run (the day's cap, the breaker, open PRs)",
-                "warnings": warnings, "calls": [dispatch_call(repo, "coder", d["policy"]["runnerRef"], {})],
+                "warnings": warnings, "calls": [dispatch_call(repo, "coder", d["policy"]["runnerRef"], inputs)],
                 "done": "started the coder on the next queued issue"}
     default = d.get("default_branch") or "main"
     if wf == "review":
