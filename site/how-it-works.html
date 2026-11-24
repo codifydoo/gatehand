@@ -87,7 +87,8 @@
           fixed, and no one without write access lifted a hold, reopened it or re-added
           <code>agent:pr</code>; every required check and <code>agent pr guard</code> passed; the newest review
           verdict is Approve and newer than the head; no changed file is protected; and the head
-          contains the default branch's tip. It merges with a merge commit pinned to that head,
+          contains the default branch's tip (a branch the gate itself brought up to date merges on that
+          head's checks and review, even when the default branch has moved again). It merges with a merge commit pinned to that head,
           never <code>--admin</code>. With auto-merge off, it only reports what it would do.</p>
       </li>
       <li>

@@ -215,7 +215,10 @@ git fetch origin main && git push origin origin/main:agent-runner
   `agent:fixing`, `agent:allow-protected`; the latest removal of `agent:hold`, reopen and addition of
   `agent:pr` were each by the bot or a writer; every `requiredChecks` entry and `agent pr guard` passed;
   the newest review verdict (by `claude[bot]` or a writer) is Approve and newer than the head; no
-  changed file is protected or in `humanPaths`; and the head contains the default branch's tip. The
+  changed file is protected or in `humanPaths`; and the head contains the default branch's tip. A
+  branch that is only behind is updated by the gate once; the head that update made merges on its
+  own checks and review even when the default branch has moved again, so a busy default branch
+  cannot keep a PR in rounds of update, CI and review. The
   verdict is read twice, from the review's markdown and from GitHub's own render of it
   (`POST /markdown`, the token's rate limit, one call per review read), and the two must agree; a
   render that fails reads as no verdict, so the PR waits. It
