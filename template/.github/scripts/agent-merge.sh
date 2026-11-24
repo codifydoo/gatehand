@@ -23,7 +23,7 @@
 #     meets every other condition merges although main has moved again. The gate updates a branch
 #     once, never a second time on top of its own update: where main moves faster than CI and the
 #     review take, the strict rule never held, and each round cost a CI run and a review (15 rounds
-#     on one PR). Such a head was up to date when its checks and its review started;
+#     on one PR). Such a head was up to date when the update made it;
 #   - AGENT_AUTO_MERGE is `true`. Otherwise this is a dry run: everything is checked and reported,
 #     nothing is merged, updated, labelled or dispatched.
 # Then `gh pr merge --merge --match-head-commit <sha> --delete-branch` with the App token: never
@@ -195,13 +195,14 @@ VERDICT_RE='^the newest review says '
 
 # gate_updated_head <pr> <sha>: exit 0 when <sha> is a branch update the gate made or asked for: a
 # merge commit whose first parent is a head the gate recorded updating on this PR, or one it could
-# not update and asked a person to (what the needs-human request asks of them).
+# not update and asked a person to (what the needs-human request asks of them). 1 when it is not, 2
+# when that could not be read.
 gate_updated_head() {
   local bodies parent
-  bodies="$(pr_bot_comments "$1")" || return 1
+  bodies="$(pr_bot_comments "$1")" || return 2
   # A merge only (update-branch and `git merge main` both make one): a person's own commit on top of
   # a recorded head is theirs, not an update.
-  parent="$(gh api "repos/${GH_REPO}/commits/$2" --jq 'if (.parents | length) == 2 then .parents[0].sha else "" end')" || return 1
+  parent="$(gh api "repos/${GH_REPO}/commits/$2" --jq 'if (.parents | length) == 2 then .parents[0].sha else "" end')" || return 2
   [[ -n "${parent}" ]] || return 1
   grep -Fq -e "<!-- agent-merge-updated from=${parent} -->" -e "<!-- agent-merge-needs-human sha=${parent} -->" <<<"${bodies}"
 }
@@ -253,10 +254,16 @@ gate_one() {
   if [[ -z "${others}" ]] && grep -Eq "${BEHIND_RE}" <<<"${blockers}" \
     && ! grep -Eq "${STALE_RE}|${VERDICT_RE}" <<<"${blockers}"; then
     n="$(grep -E "${BEHIND_RE}" <<<"${blockers}" | grep -oE '[0-9]+ commits$' | cut -d' ' -f1)"
-    if ! grep -Eq "${CONFLICT_RE}" <<<"${blockers}" && gate_updated_head "${pr}" "${sha}"; then
-      printf 'merge %s %s\n' "${sha}" "${n}"
-    else
+    if grep -Eq "${CONFLICT_RE}" <<<"${blockers}"; then
       printf 'update %s %s\n' "${sha}" "${n}"
+    else
+      gate_updated_head "${pr}" "${sha}"
+      case $? in
+        0) printf 'merge %s %s\n' "${sha}" "${n}" ;;
+        1) printf 'update %s %s\n' "${sha}" "${n}" ;;
+        # Unreadable is not "no": an update here could be a second one on the gate's own.
+        *) printf 'wait: %s; could not tell whether the head is the gate'"'"'s own update\n' "${reasons}" ;;
+      esac
     fi
   elif [[ -z "${others}" ]] && grep -Eq "${STALE_RE}" <<<"${blockers}" && gate_updated_head "${pr}" "${sha}"; then
     if ! grep -Eq "${CONFLICT_RE}" <<<"${blockers}"; then

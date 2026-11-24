@@ -98,6 +98,7 @@ stub_pr() {
     '$f | split(",") | map({filename: .}) | if $p == "" then . else .[0].previous_filename = $p end')"
   if [[ -n "${COMPARE_FAIL:-}" ]]; then stub_gh_on "api repos/o/r/compare/main...${head} *" '' 1 'gh: HTTP 502'; fi
   stub_gh_json "api repos/o/r/compare/main...${head} *" "{\"behind_by\": ${BEHIND:-0}, \"ahead_by\": 1}"
+  if [[ -n "${COMMIT_FAIL:-}" ]]; then stub_gh_on "api repos/o/r/commits/${head} *" '' 1 'gh: HTTP 502'; fi
   stub_gh_json "api repos/o/r/commits/${head} *" "$(jq -cn --arg h "${head}" --arg p "${PARENT:-pppppppppppppppppppppppppppppppppppppppp}" \
     '{sha: $h, parents: ([{sha: $p}] + (if env.ONE_PARENT == "1" then [] else [{sha: "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"}] end))}')"
   stub_gh_on "api -X PUT repos/o/r/pulls/${pr}/update-branch *" '' "${UPDATE_RC:-0}" "${UPDATE_ERR:-}"
@@ -493,6 +494,10 @@ label="a commit on top of the gate's update is no update: not merged behind main
 label="it is updated, once"; check called "${UPDATE}"
 ( export BEHIND=4 PARENT=ffffffffffffffffffffffffffffffffffffffff; approved_update )
 label="a merge commit on a head the gate never updated: not merged behind main"; check_not merged
+( export BEHIND=4 COMMIT_FAIL=1; approved_update )
+label="a head whose parents cannot be read: not merged behind main"; check_not merged
+label="nor updated (it may be the gate's own update)"; check_not called "update-branch"
+label="and the report says so"; check grep -Fq "could not tell whether the head is the gate's own update" "${TMP}/run.out"
 ( export BEHIND=4 CHECK_OVERRIDE="test (unit)|completed|failure"; approved_update )
 label="the gate's update behind main with a red check: not merged"; check_not merged
 ( export BEHIND=4 REVIEW_BODY=$'<!-- verify-pr-review -->\n\n### Verdict\nRequest changes'; approved_update )
