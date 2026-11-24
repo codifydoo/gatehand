@@ -6,7 +6,9 @@ run-name: "Agent merge: ${{ github.event_name == 'workflow_dispatch' && inputs.p
 # that saw this head, no protected or human-only path, no breaker tripped, and main's current tip
 # in the head), with `gh pr merge --merge --match-head-commit`: a plain merge commit, never the
 # admin bypass and never GitHub's auto-merge. A PR whose only blocker is being behind main gets its
-# branch updated, and the new head a fresh review once its checks pass (agent-merge.sh says how).
+# branch updated, and the new head a fresh review once its checks pass; that head then merges even
+# when main has moved again, so a branch is never updated on top of the gate's own update
+# (agent-merge.sh says how).
 # Design: .github/agents/README.md. Runbook: .github/agents/README.md.
 #
 # DRY RUN UNTIL THE OWNER SAYS OTHERWISE: unless the repo variable AGENT_AUTO_MERGE is exactly

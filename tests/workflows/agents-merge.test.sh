@@ -14,7 +14,8 @@
 #     a review job that started after it, and no review may still be running;
 #   - no protected path and no policy.humanPaths path;
 #   - the head contains main's current tip, read live, so a second PR in one run is behind once the
-#     first has merged.
+#     first has merged; except a head the gate's own update made, which merges behind main (one
+#     update a head, never one on top of its own: on a busy main the rounds never ended).
 # Green: `gh pr merge <n> --merge --match-head-commit <sha> --delete-branch`, never --admin or --auto,
 # then the issue moves to agent:done-pending-deploy. Behind main as the only blocker: update-branch
 # (live runs only; a refusal asks a person, once per head), and on a head that update made, one
@@ -97,6 +98,7 @@ stub_pr() {
     '$f | split(",") | map({filename: .}) | if $p == "" then . else .[0].previous_filename = $p end')"
   if [[ -n "${COMPARE_FAIL:-}" ]]; then stub_gh_on "api repos/o/r/compare/main...${head} *" '' 1 'gh: HTTP 502'; fi
   stub_gh_json "api repos/o/r/compare/main...${head} *" "{\"behind_by\": ${BEHIND:-0}, \"ahead_by\": 1}"
+  if [[ -n "${COMMIT_FAIL:-}" ]]; then stub_gh_on "api repos/o/r/commits/${head} *" '' 1 'gh: HTTP 502'; fi
   stub_gh_json "api repos/o/r/commits/${head} *" "$(jq -cn --arg h "${head}" --arg p "${PARENT:-pppppppppppppppppppppppppppppppppppppppp}" \
     '{sha: $h, parents: ([{sha: $p}] + (if env.ONE_PARENT == "1" then [] else [{sha: "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"}] end))}')"
   stub_gh_on "api -X PUT repos/o/r/pulls/${pr}/update-branch *" '' "${UPDATE_RC:-0}" "${UPDATE_ERR:-}"
@@ -470,6 +472,38 @@ label="a conflict on the updated head: no review"; check_not called "${REVIEW_CA
 label="and, not behind (GitHub's mergeable can lag), nobody is asked yet"; check_not called "issue comment 99"
 ( export PARENT="${OLD}" BOT_COMMENTS="${UPDATED}" REVIEW_BODY=$'<!-- verify-pr-review -->\n\n### Verdict\nRequest changes'; green )
 label="a Request changes review of the updated head itself: no second review (the fixer's turn)"; check_not called "${REVIEW_CALL}"
+
+# The gate's own update, checked and approved, with main moved again: merged, not updated a second
+# time (tabulark #2079 went through 15 rounds of update, CI and review, each Approve met by a new main).
+approved_update() { export PARENT="${PARENT:-${OLD}}" BOT_COMMENTS="${UPDATED}"; green; }
+( export BEHIND=4; approved_update )
+label="the gate's update, approved, behind main again: merged"; check merged
+label="pinned to the head that was checked"; check called "pr merge 44 --merge --match-head-commit ${HEAD} --delete-branch"
+label="with no second update"; check_not called "update-branch"
+label="and the report says it merged behind main"; check grep -Fq "merged ${HEAD} (behind main by 4 since the gate's own update)" "${TMP}/run.out"
+( export BEHIND=4 AUTO=; approved_update )
+label="a dry run says it would merge it"; check grep -Fq "would merge ${HEAD} (behind main by 4 since the gate's own update)" "${TMP}/run.out"
+label="and merges nothing"; check_not merged
+( export BEHIND=4 PARENT="${OLD}" BOT_COMMENTS="[\"<!-- agent-merge-needs-human sha=${OLD} -->\"]"; green )
+label="main merged in by a person the gate asked, approved, behind again: merged too"; check merged
+( export BEHIND=4 MERGEABLE=CONFLICTING; approved_update )
+label="the gate's update, approved, behind and conflicting: not merged"; check_not merged
+label="the update is tried, which is what asks a person"; check called "${UPDATE}"
+( export BEHIND=4 ONE_PARENT=1; approved_update )
+label="a commit on top of the gate's update is no update: not merged behind main"; check_not merged
+label="it is updated, once"; check called "${UPDATE}"
+( export BEHIND=4 PARENT=ffffffffffffffffffffffffffffffffffffffff; approved_update )
+label="a merge commit on a head the gate never updated: not merged behind main"; check_not merged
+( export BEHIND=4 COMMIT_FAIL=1; approved_update )
+label="a head whose parents cannot be read: not merged behind main"; check_not merged
+label="nor updated (it may be the gate's own update)"; check_not called "update-branch"
+label="and the report says so"; check grep -Fq "could not tell whether the head is the gate's own update" "${TMP}/run.out"
+( export BEHIND=4 CHECK_OVERRIDE="test (unit)|completed|failure"; approved_update )
+label="the gate's update behind main with a red check: not merged"; check_not merged
+( export BEHIND=4 REVIEW_BODY=$'<!-- verify-pr-review -->\n\n### Verdict\nRequest changes'; approved_update )
+label="the gate's update behind main with a Request changes: not merged"; check_not merged
+( export BEHIND=4 LABELS=agent:pr,agent:hold; approved_update )
+label="the gate's update behind main under agent:hold: not merged"; check_not merged
 
 # An Approve older than review_runs' window reads as one no review job wrote: still stale.
 ( export REVIEW_AT=2026-11-03T09:50:00Z; after_update )

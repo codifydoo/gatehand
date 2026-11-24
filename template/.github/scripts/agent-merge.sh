@@ -18,7 +18,12 @@
 #   - the head contains main's CURRENT tip (the compare API's behind_by is 0), so the checks and the
 #     review saw what main will hold. Decided 2026-11-06 instead of a strict ruleset, which would
 #     hold human PRs to it too, and instead of one merge per run, which only narrows the gap: every
-#     gate_one reads live, so a second PR in the same run is behind once the first has merged;
+#     gate_one reads live, so a second PR in the same run is behind once the first has merged.
+#     One exception, decided 2026-11-24: a head the gate's own update made (gate_updated_head) that
+#     meets every other condition merges although main has moved again. The gate updates a branch
+#     once, never a second time on top of its own update: where main moves faster than CI and the
+#     review take, the strict rule never held, and each round cost a CI run and a review (15 rounds
+#     on one PR). Such a head was up to date when the update made it;
 #   - AGENT_AUTO_MERGE is `true`. Otherwise this is a dry run: everything is checked and reported,
 #     nothing is merged, updated, labelled or dispatched.
 # Then `gh pr merge --merge --match-head-commit <sha> --delete-branch` with the App token: never
@@ -29,7 +34,8 @@
 # Two things the gate does besides merging, in live runs only:
 #   - update: a PR whose ONLY blocker is being behind main (a mergeable of CONFLICTING counts as
 #     part of that) gets `PUT pulls/N/update-branch` pinned to its head, so GitHub merges main into
-#     it. Any other blocker, a stale review included, and the gate leaves the branch alone, so it
+#     it, unless that head is already the gate's own update and does not conflict: that one merges
+#     (above). Any other blocker, a stale review included, and the gate leaves the branch alone, so it
 #     never races the fixer. GitHub refuses when main's new commits change workflow files (the App
 #     has no Workflows permission) or when the merge conflicts: then the PR gets agent:needs-human
 #     and the inbox a `merger` request, once per head.
@@ -189,13 +195,14 @@ VERDICT_RE='^the newest review says '
 
 # gate_updated_head <pr> <sha>: exit 0 when <sha> is a branch update the gate made or asked for: a
 # merge commit whose first parent is a head the gate recorded updating on this PR, or one it could
-# not update and asked a person to (what the needs-human request asks of them).
+# not update and asked a person to (what the needs-human request asks of them). 1 when it is not, 2
+# when that could not be read.
 gate_updated_head() {
   local bodies parent
-  bodies="$(pr_bot_comments "$1")" || return 1
+  bodies="$(pr_bot_comments "$1")" || return 2
   # A merge only (update-branch and `git merge main` both make one): a person's own commit on top of
   # a recorded head is theirs, not an update.
-  parent="$(gh api "repos/${GH_REPO}/commits/$2" --jq 'if (.parents | length) == 2 then .parents[0].sha else "" end')" || return 1
+  parent="$(gh api "repos/${GH_REPO}/commits/$2" --jq 'if (.parents | length) == 2 then .parents[0].sha else "" end')" || return 2
   [[ -n "${parent}" ]] || return 1
   grep -Fq -e "<!-- agent-merge-updated from=${parent} -->" -e "<!-- agent-merge-needs-human sha=${parent} -->" <<<"${bodies}"
 }
@@ -210,6 +217,8 @@ review_requested_head() {
 
 # gate_one <pr>: prints one of
 #   merge <sha>                    every condition holds
+#   merge <sha> <n>                the same but for being behind main by <n>, on a head the gate's
+#                                  own update made, which does not conflict: updated once, not twice
 #   update <sha> <n>               behind main by <n> is the only blocker: update the branch
 #   review <sha> wait: <reasons>   the head is the gate's own update, and a review of it is all
 #                                  that is missing (being behind again too, so the two cannot wait
@@ -245,7 +254,17 @@ gate_one() {
   if [[ -z "${others}" ]] && grep -Eq "${BEHIND_RE}" <<<"${blockers}" \
     && ! grep -Eq "${STALE_RE}|${VERDICT_RE}" <<<"${blockers}"; then
     n="$(grep -E "${BEHIND_RE}" <<<"${blockers}" | grep -oE '[0-9]+ commits$' | cut -d' ' -f1)"
-    printf 'update %s %s\n' "${sha}" "${n}"
+    if grep -Eq "${CONFLICT_RE}" <<<"${blockers}"; then
+      printf 'update %s %s\n' "${sha}" "${n}"
+    else
+      gate_updated_head "${pr}" "${sha}"
+      case $? in
+        0) printf 'merge %s %s\n' "${sha}" "${n}" ;;
+        1) printf 'update %s %s\n' "${sha}" "${n}" ;;
+        # Unreadable is not "no": an update here could be a second one on the gate's own.
+        *) printf 'wait: %s; could not tell whether the head is the gate'"'"'s own update\n' "${reasons}" ;;
+      esac
+    fi
   elif [[ -z "${others}" ]] && grep -Eq "${STALE_RE}" <<<"${blockers}" && gate_updated_head "${pr}" "${sha}"; then
     if ! grep -Eq "${CONFLICT_RE}" <<<"${blockers}"; then
       printf 'review %s wait: %s\n' "${sha}" "${reasons}"
@@ -393,10 +412,14 @@ cmd_run() {
     verdict="$(gate_one "${pr}")"
     case "${verdict}" in
       merge\ *)
+        read -r _ sha n <<<"${verdict}"
+        # Behind main, on the gate's own update: said, so the report shows which merges took the exception.
+        rest=""
+        [[ -z "${n}" ]] || rest=" (behind $(policy '.baseBranch') by ${n} since the gate's own update)"
         if [[ "${live}" == 1 ]]; then
-          if merge_one "${pr}" "${verdict#merge }"; then echo "#${pr}: merged ${verdict#merge }"; else echo "#${pr}: the merge failed"; rc=1; fi
+          if merge_one "${pr}" "${sha}"; then echo "#${pr}: merged ${sha}${rest}"; else echo "#${pr}: the merge failed"; rc=1; fi
         else
-          echo "#${pr}: would merge ${verdict#merge } (dry run: AGENT_AUTO_MERGE is not true)"
+          echo "#${pr}: would merge ${sha}${rest} (dry run: AGENT_AUTO_MERGE is not true)"
         fi
         ;;
       update\ *)

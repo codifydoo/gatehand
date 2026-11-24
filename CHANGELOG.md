@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Merge gate: a branch is updated at most once per head, never on top of the gate's own update. The gate merged
+  only a head that contained the default branch's current tip, and updated a PR that was only
+  behind. Where the default branch moves faster than CI and the review take, that never held:
+  each Approve met a new tip, and the gate updated again (15 rounds of update, CI and review on
+  one PR in two days). A head the gate's own update made (or one a person merged the base into
+  when the gate asked) that passes every other condition and does not conflict now merges
+  although the base has moved again; the report says `(behind <base> by N since the gate's own
+  update)`. Every other head that is behind is still updated first. **This relaxes the 2026-11-06
+  rule**: such a head's checks and review saw the base as it was at the update, not as it is at
+  the merge. A ruleset with strict required status checks ("require branches to be up to date")
+  refuses such a merge, so the gate's run fails on it each time: keep that setting off. Installed
+  repositories need an update to get it.
 - `addons/hardened-runner`: `agent-kick.sh` fills free coder slots. With
   `AGENT_KICK_CODER_SLOTS=<N>` (new, default `1`), the coder timer dispatches one run per free
   slot, each with its `slot` input, instead of one run whenever no coder run was going; 0.12.0's
