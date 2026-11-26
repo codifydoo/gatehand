@@ -968,11 +968,16 @@ CODER_STRANDED_MINUTES=60
 # completed, {id, status, display_title, created_at, html_url, stranded}. Exit 1 when the runs are
 # unreadable.
 coder_unfinished_runs() {
-  local runs line id age jobs stranded
+  local runs list line id age jobs stranded
   runs="$(gh api "repos/${GH_REPO}/actions/workflows/agent-coder.yml/runs?event=workflow_dispatch&per_page=100" \
     --jq '.workflow_runs')" || return 1
+  # Into a variable, not a process substitution, whose exit status bash drops: a list jq stops
+  # reading halfway would lose the runs after the bad element and read as "fewer runs going".
+  list="$(jq -c '.[] | select(.status != "completed") | {id, status, display_title, created_at, html_url}' \
+    <<<"${runs}" 2>/dev/null)" || return 1
   jq -e 'type == "array"' >/dev/null 2>&1 <<<"${runs}" || return 1
   while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
     stranded=false
     IFS=$'\t' read -r id age < <(jq -r --argjson now "$(agent_now_epoch)" '[(.id // "" | tostring),
       (if .status == "queued" then (try ($now - (.created_at | fromdateiso8601)) catch (-1)) else -1 end | tostring)]
@@ -982,7 +987,7 @@ coder_unfinished_runs() {
       [[ "${jobs}" == 0 ]] && stranded=true
     fi
     jq -c --argjson s "${stranded}" '. + {stranded: $s}' <<<"${line}"
-  done < <(jq -c '.[] | select(.status != "completed") | {id, status, display_title, created_at, html_url}' <<<"${runs}")
+  done <<<"${list}"
 }
 
 # coder_live_runs: coder_unfinished_runs less the stranded ones, which are named in a ::warning::

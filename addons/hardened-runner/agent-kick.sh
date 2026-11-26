@@ -92,17 +92,53 @@ try: print(json.load(open(sys.argv[1])).get("message", "")[:200])
 except Exception: print(open(sys.argv[1], errors="replace").read(200))' "${BODY}" 2>/dev/null || true
 }
 
+# stranded_runs: the ids of the runs in the listing in ${BODY} that GitHub stranded, space-separated:
+# `queued` for 60 minutes or more with no jobs. GitHub can leave a dispatch so for good, and it
+# cannot be cancelled or deleted; it holds no runner and no concurrency group, but counting it as
+# busy stopped every kick while it stayed (17 hours on one repository). Same rule as agent-lib.sh's
+# coder_unfinished_runs: anything that cannot be read leaves the run counted, so a kick still never
+# cancels a person's waiting dispatch. Each stranded run is named in the journal. ${BODY} holds the
+# listing again on return.
+stranded_runs() {
+  local listing ids id code out=""
+  listing="$(mktemp)"
+  cp "${BODY}" "${listing}"
+  ids="$(python3 -I -c 'import datetime,json,sys
+now = datetime.datetime.now(datetime.timezone.utc)
+for r in json.load(open(sys.argv[1]))["workflow_runs"]:
+    try:
+        if r.get("status") != "queued" or type(r.get("id")) is not int: continue
+        t = datetime.datetime.strptime(r["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+        if (now - t).total_seconds() >= 3600: print(r["id"], r["created_at"])
+    except Exception: pass' "${listing}" 2>/dev/null)" || ids=""
+  while read -r id created; do
+    [[ "${id}" =~ ^[0-9]+$ ]] || continue
+    code="$(api GET "/repos/${REPO}/actions/runs/${id}/jobs?per_page=1")" || continue
+    [[ "${code}" == 200 ]] || continue
+    python3 -I -c 'import json,sys
+n = json.load(open(sys.argv[1])).get("total_count")
+sys.exit(0 if type(n) is int and n == 0 else 1)' "${BODY}" 2>/dev/null || continue
+    out+="${out:+ }${id}"
+    printf 'agent-kick: GitHub left coder run %s queued with no jobs since %s; it is not counted as a run going\n' "${id}" "${created}" >&2
+  done <<<"${ids}"
+  cp "${listing}" "${BODY}"
+  rm -f "${listing}"
+  printf '%s\n' "${out}"
+}
+
 # The coder's scheduled kick dispatches only when no coder dispatch is queued or running, because
 # GitHub keeps one pending run per concurrency group and cancels the older: a kick must never
 # cancel a person's named dispatch. Same rule as agent-state.sh's cmd_kick.
 coder_busy() {
-  local code wf="${1:-agent-coder.yml}"
+  local code skip wf="${1:-agent-coder.yml}"
   code="$(api GET "/repos/${REPO}/actions/workflows/${wf}/runs?event=workflow_dispatch&per_page=30")" \
     || die "could not list ${wf} runs"
   [[ "${code}" == 200 ]] || die "could not list ${wf} runs: HTTP ${code}: $(api_message)"
+  skip="$(stranded_runs)"
   python3 -I -c 'import json,sys
+skip = set(sys.argv[2].split())
 runs = json.load(open(sys.argv[1]))["workflow_runs"]
-print(sum(1 for r in runs if r.get("status") != "completed"))' "${BODY}" \
+print(sum(1 for r in runs if r.get("status") != "completed" and str(r.get("id")) not in skip))' "${BODY}" "${skip}" \
     || die "could not read the coder run list"
 }
 
@@ -112,19 +148,22 @@ print(sum(1 for r in runs if r.get("status") != "completed"))' "${BODY}" \
 # runs going. The queue and the caps are not checked here, because the token cannot read issues or
 # the policy: each run's gate and claim check them and stop early when there is nothing to do.
 coder_free_slots() {
-  local code wf="$1"
+  local code skip wf="$1"
   code="$(api GET "/repos/${REPO}/actions/workflows/${wf}/runs?event=workflow_dispatch&per_page=100")" \
     || die "could not list ${wf} runs"
   [[ "${code}" == 200 ]] || die "could not list ${wf} runs: HTTP ${code}: $(api_message)"
+  skip="$(stranded_runs)"
   python3 -I -c 'import json,re,sys
 n = int(sys.argv[2])
-runs = [r for r in json.load(open(sys.argv[1]))["workflow_runs"] if r.get("status") != "completed"]
+skip = set(sys.argv[3].split())
+runs = [r for r in json.load(open(sys.argv[1]))["workflow_runs"]
+        if r.get("status") != "completed" and str(r.get("id")) not in skip]
 held = set()
 for r in runs:
     m = re.search(r" \(slot ([0-9]+)\)$", r.get("display_title") or "")
     if m: held.add(int(m.group(1)))
 free = [k for k in range(1, n + 1) if k not in held][:max(0, n - len(runs))]
-print(" ".join(map(str, free)))' "${BODY}" "${CODER_SLOTS}" \
+print(" ".join(map(str, free)))' "${BODY}" "${CODER_SLOTS}" "${skip}" \
     || die "could not read the coder run list"
 }
 

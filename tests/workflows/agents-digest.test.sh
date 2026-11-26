@@ -210,7 +210,12 @@ setup "stub_gh_json 'api repos/o/r/actions/workflows/agent-coder.yml/runs*' '{\"
 sout="$(render)"
 has "queue: a stranded coder run is named" '- GitHub left coder run [71](https://github.com/o/r/actions/runs/71) queued with no jobs since 2026-11-08T06:30:00Z.' "${sout}"
 hasnt "queue: an old queued run with a job is not" 'coder run [72]' "${sout}"
-hasnt "queue: no stranded line when there are none" 'GitHub left coder run' "${out}"
+hasnt "queue: nothing said when the coder runs cannot be read" 'GitHub left coder run' "${out}"
+setup "stub_gh_json 'api repos/o/r/actions/workflows/agent-coder.yml/runs*' '{\"workflow_runs\":[{\"id\":73,\"status\":\"queued\",\"created_at\":\"2026-11-09T06:00:00Z\",\"html_url\":\"https://github.com/o/r/actions/runs/73\"}]}'" \
+  "stub_gh_json 'api repos/o/r/actions/runs/73/jobs*' '{\"total_count\":0}'"
+sout="$(render)"
+hasnt "queue: no stranded line for a run queued half an hour" 'GitHub left coder run' "${sout}"
+called "queue: the coder runs were read" 'agent-coder.yml/runs'
 
 # Section order: what needs the owner first.
 order="$(grep -E '^### ' <<<"${out}" | cut -c5-12 | paste -sd'|' -)"

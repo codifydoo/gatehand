@@ -748,6 +748,9 @@ kick_jobs_case "$(run_json 119 queued "${OLD}" | jq -c 'del(.id)')" "${NO_JOBS}"
 expect_no_call "kick: a queued run without an id is busy" "workflow run"
 kick_jobs_case "$(run_json 111 queued "${OLD}"; run_json 120 queued 2026-11-05T11:50:00Z)" "${NO_JOBS}"
 expect_no_call "kick: a stranded run next to a fresh queued one: still busy" "workflow run"
+kick_jobs_case "$(echo 1; run_json 121 in_progress "${OLD}")" "${NO_JOBS}"
+expect_no_call "kick: a run list with a non-object in it dispatches nothing" "workflow run"
+expect "kick: and fails" "$(cat "${TMP}/kick.rc")" 1
 
 # cmd_lock: the lock comment is what the sweep tells this run's lock from the last one's by, so a
 # comment that cannot be posted fails the lock (and with it preflight; finalize then releases it).

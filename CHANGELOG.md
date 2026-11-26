@@ -12,7 +12,9 @@
   its run, and the digest names it in its Queue section. A run that is fresh, running, `pending` on
   its group, has a job, or whose jobs cannot be read still counts, so a kick still never cancels a
   person's waiting dispatch. Installed repositories need an update to get it.
-  `addons/hardened-runner`'s `agent-kick.sh` still counts such a run.
+  `addons/hardened-runner`'s `agent-kick.sh` follows the same rule and names the run in the
+  journal; on the kick box, re-run its `install`. The dashboard's coder dispatch still counts such a run (it warns that the run would be cancelled,
+  and with `parallelism` above 1 avoids its slot), which errs on the safe side.
 - Merge gate: a branch is updated at most once per head, never on top of the gate's own update. The gate merged
   only a head that contained the default branch's current tip, and updated a PR that was only
   behind. Where the default branch moves faster than CI and the review take, that never held:

@@ -15,6 +15,9 @@
 #   5. install writes AGENT_KICK_CODER_SLOTS into the service, with a start timeout that covers
 #      1 + N API calls.
 #   6. The token reaches curl on stdin, never in its arguments.
+#   (1b) A run GitHub stranded (queued 60 minutes or more, no jobs) is not counted at either N, and
+#      is named in the journal; a fresh, running, job-holding or unreadable one still is (the same
+#      rule as agent-lib.sh coder_unfinished_runs).
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -50,7 +53,10 @@ hdr="$(cat)"
 [[ "${argv}" != *ghp_testtoken123* ]] || echo "token-in-argv" >>"${TMP_DIR}/calls"
 path="${url#https://api.github.com}"
 printf '%s %s %s\n' "${method}" "${path}" "${data}" >>"${TMP_DIR}/calls"
-if [[ "${method}" == GET ]]; then
+if [[ "${method}" == GET && "${path}" =~ ^/repos/o/r/actions/runs/([0-9]+)/jobs ]]; then
+  f="${TMP_DIR}/jobs-${BASH_REMATCH[1]}.json"
+  if [[ -f "${f}" ]]; then cp "${f}" "${out}"; printf 200; else printf '{"message":"Not Found"}' >"${out}"; printf 404; fi
+elif [[ "${method}" == GET ]]; then
   cp "${TMP_DIR}/runs.json" "${out}"; printf 200
 else
   code=204
@@ -98,6 +104,39 @@ runs "Agent coder: auto pick:in_progress"
 kick 1
 check "N=1, a run going: no dispatch" "$(dispatches)" 0
 check "N=1, a run going: exit 0" "${rc}" 0
+
+# 1b. A run GitHub stranded: queued an hour or more with no jobs. It is not counted, and is named;
+# fresh, in_progress, with a job, or with jobs that cannot be read, it still is.
+OLD=2020-01-01T00:00:00Z
+FRESH="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+runs_full() { jq -n --argjson r "$1" '{workflow_runs: $r}' >"${TMP}/runs.json"; }
+rm -f "${TMP}"/jobs-*.json
+echo '{"total_count":0,"jobs":[]}' >"${TMP}/jobs-41.json"
+echo '{"total_count":0,"jobs":[]}' >"${TMP}/jobs-42.json"
+echo '{"total_count":1}' >"${TMP}/jobs-43.json"
+runs_full "[{\"id\":41,\"status\":\"queued\",\"created_at\":\"${OLD}\",\"display_title\":\"Agent coder: auto pick (slot 2)\"}]"
+kick 1
+check "N=1, a run queued for years with no jobs: one dispatch" "$(dispatches)" 1
+check "N=1, the stranded run: its jobs were asked for" "$(grep -c '^GET /repos/o/r/actions/runs/41/jobs' <<<"${calls}")" 1
+if [[ "${out}" == *"GitHub left coder run 41 queued with no jobs since ${OLD}"* ]]; then t_pass "N=1, the stranded run is named"
+else t_fail "N=1, the stranded run is not named: output was [${out}]"; fi
+runs_full "[{\"id\":42,\"status\":\"queued\",\"created_at\":\"${FRESH}\"}]"
+kick 1
+check "N=1, a fresh queued run with no jobs: busy" "$(dispatches)" 0
+check "N=1, a fresh queued run: its jobs are not asked for" "$(grep -c '/jobs' <<<"${calls}")" 0
+runs_full "[{\"id\":43,\"status\":\"queued\",\"created_at\":\"${OLD}\"}]"
+kick 1
+check "N=1, an old queued run with a job: busy" "$(dispatches)" 0
+runs_full "[{\"id\":41,\"status\":\"in_progress\",\"created_at\":\"${OLD}\"}]"
+kick 1
+check "N=1, an old in_progress run: busy" "$(dispatches)" 0
+runs_full "[{\"id\":44,\"status\":\"queued\",\"created_at\":\"${OLD}\"}]"
+kick 1
+check "N=1, an old queued run whose jobs cannot be read (404): busy" "$(dispatches)" 0
+runs_full "[{\"id\":41,\"status\":\"queued\",\"created_at\":\"${OLD}\",\"display_title\":\"a (slot 2)\"},{\"id\":45,\"status\":\"in_progress\",\"display_title\":\"b (slot 1)\"}]"
+kick 3
+check "N=3, a stranded run in slot 2 holds no slot: dispatches into slots 2 and 3" "$(slots_sent)" "2,3"
+rm -f "${TMP}"/jobs-*.json
 
 # 2. N = 3.
 runs "Agent coder: auto pick (slot 1):in_progress"
