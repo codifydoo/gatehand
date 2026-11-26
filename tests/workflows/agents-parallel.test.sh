@@ -16,7 +16,8 @@
 #   5. Release: only the holder's claim is deleted when a run is named; a missing claim is fine.
 #   6. The kick with N = 3 and five eligible issues dispatches three runs, into slots 1, 2, 3; it
 #      skips busy slots, counts a run without a slot against the room, and stops at the queue and
-#      maxOpenPrs. coder_pick_slot prefers a free slot, then one with nothing waiting, and the
+#      maxOpenPrs; a run GitHub stranded (queued an hour or more, no jobs) holds no slot and no room.
+#      coder_pick_slot prefers a free slot, then one with nothing waiting, and the
 #      inbox's /approve and /rerun dispatch the coder into it (the fixer gets no slot).
 #   7. The sweep deletes the claim of an ended run, keeps one whose run is going, deletes a claim
 #      naming no run only once it is older than lockTtlMinutes, and leaves an agent:in-progress issue
@@ -108,6 +109,10 @@ case "$*" in
     cat "${S}/runs.jsonl" ;;
   "api repos/o/r/actions/workflows/agent-coder.yml/runs?event=workflow_dispatch&per_page=100 --jq "*) out <"${S}/workflow-runs.json" ;;
   "workflow run agent-coder.yml "*) printf '%s\n' "$*" >>"${S}/dispatches" ;;
+  "api repos/o/r/actions/runs/"*"/jobs?per_page=1 --jq "*)
+    id="$(sed 's#^api repos/o/r/actions/runs/##; s#/jobs.*##' <<<"$*")"
+    [[ -f "${S}/jobs-${id}.json" ]] || nf
+    out <"${S}/jobs-${id}.json" ;;
   "api repos/o/r/actions/runs/"*)
     id="$(sed 's#^api repos/o/r/actions/runs/##; s# .*##' <<<"$*")"
     [[ -f "${S}/run-${id}.json" ]] || nf
@@ -246,6 +251,19 @@ reset_fake 0 0 1 2 3 4 5
 runs_json '[{"status":"in_progress","display_title":"Agent coder: issue 9"}]'
 cmd_kick >/dev/null 2>&1
 expect "kick: a run without a slot holds no slot but counts against the room" "$(grep -c . "${FAKE}/dispatches")" 2
+stranded_slot2='[{"id":61,"status":"queued","created_at":"2026-11-05T10:00:00Z","display_title":"Agent coder: auto pick (slot 2)"}]'
+reset_fake 0 0 1 2 3 4 5
+runs_json "${stranded_slot2}"
+echo '{"total_count":0}' >"${FAKE}/jobs-61.json"
+cmd_kick >/dev/null 2>&1
+expect "kick: a run GitHub stranded in slot 2 (queued 2 h, no jobs) holds no slot and no room" \
+  "$(grep -oE 'slot=[0-9]+' "${FAKE}/dispatches" | paste -sd' ' -)" "slot=1 slot=2 slot=3"
+reset_fake 0 0 1 2 3 4 5
+runs_json "${stranded_slot2}"
+echo '{"total_count":1}' >"${FAKE}/jobs-61.json"
+cmd_kick >/dev/null 2>&1
+expect "kick: the same run with a job still holds slot 2" "$(grep -oE 'slot=[0-9]+' "${FAKE}/dispatches" | paste -sd' ' -)" "slot=1 slot=3"
+rm -f "${FAKE}/jobs-61.json"
 reset_fake 0 0 1
 cmd_kick >/dev/null 2>&1
 expect "kick: no more runs than queued issues" "$(grep -c . "${FAKE}/dispatches")" 1

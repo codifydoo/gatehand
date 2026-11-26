@@ -21,6 +21,10 @@
 #      only the lock of the same run attempt: "Re-run all jobs" keeps the run id, and a re-run that
 #      reached the model must count even when its first attempt's marker is on the issue. A lock or
 #      marker without run_attempt (older) matches every attempt of its run.
+#   (3c) The kick (N = 1) dispatches only when no coder run is queued or running, but a run GitHub
+#      stranded (queued an hour or more with no jobs) does not count and is named in a ::warning::.
+#      Fresh, in_progress, pending, with jobs, or unreadable (no id, no created_at, a failed jobs
+#      call) still counts: a wrong "stranded" could cancel a person's waiting dispatch.
 # AGENT_TRUST_CACHE is reset here and read by the sourced agent-state.sh.
 # shellcheck disable=SC2034
 set -uo pipefail
@@ -696,8 +700,53 @@ stub_gh_reset_calls
 stub_gh_reset_rules
 stub_gh_on 'api repos/o/r/actions/workflows/agent-coder.yml/runs*' ''
 cmd_kick >/dev/null 2>&1
-expect "kick: an answer that is not a count fails too" "$?" 1
+expect "kick: an answer that is not a run list fails too" "$?" 1
 expect_no_call "kick: and dispatches nothing" "workflow run"
+# A run GitHub stranded: queued for an hour or more with no jobs (sproobo-v6 run 45652338490 stayed
+# so 17 hours, and the kick dispatched nothing all that time). It is not counted, and is named in a
+# warning; a run that is fresh, running, pending on its group, has jobs or cannot be read still is.
+run_json() { # run_json <id> <status> <created_at>
+  jq -cn --argjson i "$1" --arg s "$2" --arg c "$3" \
+    '{id: $i, status: $s, created_at: $c, display_title: "Agent coder: auto pick", html_url: "https://github.com/o/r/actions/runs/\($i)"}'
+}
+kick_jobs_case() { # kick_jobs_case <runs> <jobs-json|fail>: <runs> are run_json lines
+  stub_gh_reset_calls
+  stub_gh_reset_rules
+  if [[ "$2" == fail ]]; then stub_gh_on 'api repos/o/r/actions/runs/*/jobs*' '' 1 'gh: HTTP 502'
+  else stub_gh_json 'api repos/o/r/actions/runs/*/jobs*' "$2"; fi
+  stub_gh_json 'api repos/o/r/actions/workflows/agent-coder.yml/runs*' "$(jq -sc '{workflow_runs: .}' <<<"$1")"
+  cmd_kick >/dev/null 2>"${TMP}/kick.err"
+  echo "$?" >"${TMP}/kick.rc"
+}
+OLD=2026-11-05T10:00:00Z # two hours before AGENT_NOW_EPOCH
+NO_JOBS='{"total_count":0,"jobs":[]}'
+kick_jobs_case "$(run_json 111 queued "${OLD}")" "${NO_JOBS}"
+expect_call "kick: a run queued two hours with no jobs is stranded: the kick dispatches" "workflow run agent-coder.yml --ref agent-runner"
+expect_call "kick: after asking GitHub for that run's jobs" "api repos/o/r/actions/runs/111/jobs"
+if grep -Fq '::warning title=stranded coder run::GitHub left coder run 111 (https://github.com/o/r/actions/runs/111) queued with no jobs since 2026-11-05T10:00:00Z' "${TMP}/kick.err"; then
+  t_pass "kick: the stranded run is named in a warning annotation"
+else t_fail "kick: no warning naming the stranded run in: $(cat "${TMP}/kick.err")"; fi
+expect "kick: and exits 0" "$(cat "${TMP}/kick.rc")" 0
+kick_jobs_case "$(run_json 112 queued 2026-11-05T11:01:00Z)" "${NO_JOBS}"
+expect_no_call "kick: a run queued 59 minutes with no jobs is busy" "workflow run"
+expect_no_call "kick: and its jobs are not asked for" "actions/runs/112/jobs"
+kick_jobs_case "$(run_json 113 queued 2026-11-05T11:00:00Z)" "${NO_JOBS}"
+expect_call "kick: one queued exactly 60 minutes with no jobs is stranded" "workflow run agent-coder.yml"
+kick_jobs_case "$(run_json 114 queued "${OLD}")" '{"total_count":1}'
+expect_no_call "kick: an old queued run that has a job (waiting for a runner) is busy" "workflow run"
+kick_jobs_case "$(run_json 115 in_progress "${OLD}")" "${NO_JOBS}"
+expect_no_call "kick: an old in_progress run is busy" "workflow run"
+expect_no_call "kick: and its jobs are not asked for" "actions/runs/115/jobs"
+kick_jobs_case "$(run_json 116 pending "${OLD}")" "${NO_JOBS}"
+expect_no_call "kick: an old run pending on its concurrency group is busy, jobs or not" "workflow run"
+kick_jobs_case "$(run_json 117 queued "${OLD}")" fail
+expect_no_call "kick: an old queued run whose jobs cannot be read is busy" "workflow run"
+kick_jobs_case "$(run_json 118 queued "${OLD}" | jq -c 'del(.created_at)')" "${NO_JOBS}"
+expect_no_call "kick: a queued run without created_at is busy" "workflow run"
+kick_jobs_case "$(run_json 119 queued "${OLD}" | jq -c 'del(.id)')" "${NO_JOBS}"
+expect_no_call "kick: a queued run without an id is busy" "workflow run"
+kick_jobs_case "$(run_json 111 queued "${OLD}"; run_json 120 queued 2026-11-05T11:50:00Z)" "${NO_JOBS}"
+expect_no_call "kick: a stranded run next to a fresh queued one: still busy" "workflow run"
 
 # cmd_lock: the lock comment is what the sweep tells this run's lock from the last one's by, so a
 # comment that cannot be posted fails the lock (and with it preflight; finalize then releases it).

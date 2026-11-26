@@ -5,7 +5,8 @@
 #   - each section from one fixture: waiting items (unticked inbox requests only, a tripped breaker,
 #     blocked issues, merged fixes to close, where only the bot's merge note counts), agent PRs
 #     (window, state, CI on the first push, the FIRST review by the review bot only, fix runs, the
-#     summary counts), runs per role (window, malformed lines, totals), the queue by priority, and
+#     summary counts), runs per role (window, malformed lines, totals), the queue by priority (and a
+#     coder run GitHub stranded, named), and
 #     the repo's own sections from agent_hook_digest_sections (.github/agents/hooks/lib.sh);
 #   - every read that fails says so in its section and makes render exit 1, while a 404 (a branch or
 #     file not there yet) is "nothing yet", never a failure;
@@ -201,6 +202,15 @@ has "queue: by priority, in order" "4 issue(s) queued for the coder: 1 high, 1 m
 
 has "repo sections: the hook's section renders" '### Releases' "${out}"
 has "repo sections: as written (sanitised only when posted)" '- v1.2 shipped; ask @someone' "${out}"
+
+# A coder run GitHub stranded (queued an hour or more with no jobs) is named in the queue section.
+setup "stub_gh_json 'api repos/o/r/actions/workflows/agent-coder.yml/runs*' '{\"workflow_runs\":[{\"id\":71,\"status\":\"queued\",\"created_at\":\"2026-11-08T06:30:00Z\",\"html_url\":\"https://github.com/o/r/actions/runs/71\"},{\"id\":72,\"status\":\"queued\",\"created_at\":\"2026-11-08T06:30:00Z\",\"html_url\":\"https://github.com/o/r/actions/runs/72\"}]}'" \
+  "stub_gh_json 'api repos/o/r/actions/runs/71/jobs*' '{\"total_count\":0}'" \
+  "stub_gh_json 'api repos/o/r/actions/runs/72/jobs*' '{\"total_count\":1}'"
+sout="$(render)"
+has "queue: a stranded coder run is named" '- GitHub left coder run [71](https://github.com/o/r/actions/runs/71) queued with no jobs since 2026-11-08T06:30:00Z.' "${sout}"
+hasnt "queue: an old queued run with a job is not" 'coder run [72]' "${sout}"
+hasnt "queue: no stranded line when there are none" 'GitHub left coder run' "${out}"
 
 # Section order: what needs the owner first.
 order="$(grep -E '^### ' <<<"${out}" | cut -c5-12 | paste -sd'|' -)"

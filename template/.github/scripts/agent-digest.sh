@@ -307,6 +307,12 @@ section_queue() {
   local n per
   printf '### Queue\n\n'
   if [[ "${ISSUES_OK}" != 1 ]]; then printf 'Could not list the open issues.\n\n'; return 1; fi
+  # A coder run GitHub stranded (agent-lib.sh coder_unfinished_runs) stays in the run list for good;
+  # the kick no longer counts it, and this names it. Nothing is said when the runs cannot be read.
+  local stranded
+  stranded="$(coder_unfinished_runs 2>/dev/null | jq -r 'select(.stranded)
+    | "- GitHub left coder run [\(.id)](\(.html_url // "")) queued with no jobs since \(.created_at). The kick does not count it as a run going; it cannot be cancelled or deleted, only ignored."')"
+  [[ -z "${stranded}" ]] || printf '%s\n\n' "${stranded}"
   n="$(jq '[.[] | select(.labels | index("agent:ready"))] | length' <<<"${ISSUES}")"
   if [[ "${n}" == 0 ]]; then printf 'Nothing is queued for the coder.\n\n'; return 0; fi
   per="$(policy '.roles.coder.runsPerDay')"
