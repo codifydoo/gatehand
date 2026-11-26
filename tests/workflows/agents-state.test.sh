@@ -715,10 +715,11 @@ kick_jobs_case() { # kick_jobs_case <runs> <jobs-json|fail>: <runs> are run_json
   if [[ "$2" == fail ]]; then stub_gh_on 'api repos/o/r/actions/runs/*/jobs*' '' 1 'gh: HTTP 502'
   else stub_gh_json 'api repos/o/r/actions/runs/*/jobs*' "$2"; fi
   stub_gh_json 'api repos/o/r/actions/workflows/agent-coder.yml/runs*' "$(jq -sc '{workflow_runs: .}' <<<"$1")"
-  cmd_kick >/dev/null 2>"${TMP}/kick.err"
+  # The clock as at the top: finalize_with moves it a second per call.
+  AGENT_NOW_EPOCH=1793880000 cmd_kick >/dev/null 2>"${TMP}/kick.err"
   echo "$?" >"${TMP}/kick.rc"
 }
-OLD=2026-11-05T10:00:00Z # two hours before AGENT_NOW_EPOCH
+OLD=2026-11-05T10:00:00Z # two hours before the pinned clock (12:00Z)
 NO_JOBS='{"total_count":0,"jobs":[]}'
 kick_jobs_case "$(run_json 111 queued "${OLD}")" "${NO_JOBS}"
 expect_call "kick: a run queued two hours with no jobs is stranded: the kick dispatches" "workflow run agent-coder.yml --ref agent-runner"
