@@ -151,6 +151,24 @@ check "N=1, a queued run without created_at: busy" "$(dispatches)" 0
 runs_full "[{\"id\":\"41\",\"status\":\"queued\",\"created_at\":\"${OLD}\"}]"
 kick 1
 check "N=1, a queued run whose id is not a number: busy" "$(dispatches)" 0
+# Age runs from run_started_at: a re-run keeps its old created_at but starts afresh.
+runs_full "[{\"id\":41,\"status\":\"queued\",\"created_at\":\"${OLD}\",\"run_started_at\":\"${FRESH}\"}]"
+kick 1
+check "N=1, a re-run of an old run, started just now: busy" "$(dispatches)" 0
+check "N=1, a fresh re-run: its jobs are not asked for" "$(grep -c '/jobs' <<<"${calls}")" 0
+runs_full "[{\"id\":41,\"status\":\"queued\",\"created_at\":\"2019-01-01T00:00:00Z\",\"run_started_at\":\"${OLD}\"}]"
+kick 1
+check "N=1, a re-run started long ago with no jobs: one dispatch" "$(dispatches)" 1
+if [[ "${out}" == *"GitHub left coder run 41 queued with no jobs since ${OLD}"* ]]; then t_pass "N=1, the re-run is named with the time it last started"
+else t_fail "N=1, the re-run is not named with run_started_at: output was [${out}]"; fi
+runs_full "[{\"id\":41,\"status\":\"queued\",\"created_at\":\"${OLD}\",\"run_started_at\":null}]"
+kick 1
+check "N=1, run_started_at null falls back to created_at: one dispatch" "$(dispatches)" 1
+for bad in '""' '"x"' 0 false; do
+  runs_full "[{\"id\":41,\"status\":\"queued\",\"created_at\":\"${OLD}\",\"run_started_at\":${bad}}]"
+  kick 1
+  check "N=1, run_started_at ${bad} (unreadable) does not fall back to an old created_at: busy" "$(dispatches)" 0
+done
 for i in 51 52 53 54; do echo '{"total_count":0}' >"${TMP}/jobs-${i}.json"; done
 runs_full "[$(for i in 51 52 53 54; do printf '{"id":%s,"status":"queued","created_at":"%s"},' "${i}" "${OLD}"; done | sed 's/,$//')]"
 kick 1

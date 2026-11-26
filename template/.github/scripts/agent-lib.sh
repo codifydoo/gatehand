@@ -959,13 +959,16 @@ coder_parallelism() {
 # (a dispatch next to it runs), but it never completes, so a kick that counted every unfinished run
 # as busy dispatched nothing for as long as it stayed (17 hours on one repository). A run is
 # stranded when it is `queued` (not `pending`, the state of a run waiting on its concurrency group),
-# was created CODER_STRANDED_MINUTES or more ago, and GitHub lists no jobs for it. Anything that
+# last started (run_started_at, else created_at when it is null; any other value it cannot read
+# keeps the run counted) CODER_STRANDED_MINUTES or more ago, and GitHub lists
+# no jobs for it. A re-run keeps its created_at but gets a fresh run_started_at, so a re-run of an
+# old run is not called stranded while it waits for its first job. Anything that
 # cannot be read counts as a live run: a run wrongly called stranded could let a kick start a run
 # that cancels a person's waiting dispatch.
 CODER_STRANDED_MINUTES=60
 
 # coder_unfinished_runs: one compact JSON object a line per dispatched coder run that has not
-# completed, {id, status, display_title, created_at, html_url, stranded}. Exit 1 when the runs are
+# completed, {id, status, display_title, created_at, run_started_at, html_url, stranded}. Exit 1 when the runs are
 # unreadable.
 coder_unfinished_runs() {
   local runs list line id age jobs stranded
@@ -973,14 +976,14 @@ coder_unfinished_runs() {
     --jq '.workflow_runs')" || return 1
   # Into a variable, not a process substitution, whose exit status bash drops: a list jq stops
   # reading halfway would lose the runs after the bad element and read as "fewer runs going".
-  list="$(jq -c '.[] | select(.status != "completed") | {id, status, display_title, created_at, html_url}' \
+  list="$(jq -c '.[] | select(.status != "completed") | {id, status, display_title, created_at, run_started_at, html_url}' \
     <<<"${runs}" 2>/dev/null)" || return 1
   jq -e 'type == "array"' >/dev/null 2>&1 <<<"${runs}" || return 1
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
     stranded=false
     IFS=$'\t' read -r id age < <(jq -r --argjson now "$(agent_now_epoch)" '[(.id // "" | tostring),
-      (if .status == "queued" then (try ($now - (.created_at | fromdateiso8601)) catch (-1)) else -1 end | tostring)]
+      (if .status == "queued" then (try ($now - ((if .run_started_at == null then .created_at else .run_started_at end) | fromdateiso8601)) catch (-1)) else -1 end | tostring)]
       | @tsv' <<<"${line}")
     if [[ "${id}" =~ ^[0-9]+$ && "${age}" =~ ^[0-9]+$ && "${age}" -ge $((CODER_STRANDED_MINUTES * 60)) ]]; then
       jobs="$(gh api "repos/${GH_REPO}/actions/runs/${id}/jobs?per_page=1" --jq '.total_count' 2>/dev/null)" || jobs=""
@@ -996,7 +999,7 @@ coder_unfinished_runs() {
 coder_live_runs() {
   local all
   all="$(coder_unfinished_runs)" || return 1
-  jq -r 'select(.stranded) | "::warning title=stranded coder run::GitHub left coder run \(.id) (\(.html_url // "no link")) queued with no jobs since \(.created_at); it is not counted as a run going. It cannot be cancelled or deleted, only ignored."' <<<"${all}" >&2
+  jq -r 'select(.stranded) | "::warning title=stranded coder run::GitHub left coder run \(.id) (\(.html_url // "no link")) queued with no jobs since \(.run_started_at // .created_at); it is not counted as a run going. It cannot be cancelled or deleted, only ignored."' <<<"${all}" >&2
   jq -c 'select(.stranded | not) | del(.stranded)' <<<"${all}"
 }
 
