@@ -97,10 +97,12 @@ except Exception: print(open(sys.argv[1], errors="replace").read(200))' "${BODY}
 # cannot be cancelled or deleted; it holds no runner and no concurrency group, but counting it as
 # busy stopped every kick while it stayed (17 hours on one repository). Same rule as agent-lib.sh's
 # coder_unfinished_runs: anything that cannot be read leaves the run counted, so a kick still never
-# cancels a person's waiting dispatch. Each stranded run is named in the journal. ${BODY} holds the
-# listing again on return.
+# cancels a person's waiting dispatch. Each stranded run is named in the journal. At most
+# STRANDED_LOOKUPS runs get a jobs call (the service's start timeout counts them); any further old
+# queued run still counts. ${BODY} holds the listing again on return.
+STRANDED_LOOKUPS=3
 stranded_runs() {
-  local listing ids id code out=""
+  local listing ids id created code out="" looked=0
   listing="$(mktemp)"
   cp "${BODY}" "${listing}"
   ids="$(python3 -I -c 'import datetime,json,sys
@@ -112,7 +114,8 @@ for r in json.load(open(sys.argv[1]))["workflow_runs"]:
         if (now - t).total_seconds() >= 3600: print(r["id"], r["created_at"])
     except Exception: pass' "${listing}" 2>/dev/null)" || ids=""
   while read -r id created; do
-    [[ "${id}" =~ ^[0-9]+$ ]] || continue
+    [[ "${id}" =~ ^[0-9]+$ && "${looked}" -lt "${STRANDED_LOOKUPS}" ]] || continue
+    looked=$((looked + 1))
     code="$(api GET "/repos/${REPO}/actions/runs/${id}/jobs?per_page=1")" || continue
     [[ "${code}" == 200 ]] || continue
     python3 -I -c 'import json,sys
@@ -248,8 +251,8 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=yes
 LockPersonality=yes
 SystemCallArchitectures=native
-# 1 + N API calls at most (N coder slots); --retry-max-time 90 keeps each under about 2 min, Retry-After included.
-TimeoutStartSec=$((2 * (1 + CODER_SLOTS) + 1))min
+# 1 + 3 + N API calls at most (the listing, STRANDED_LOOKUPS jobs calls, N coder slots); --retry-max-time 90 keeps each under about 2 min, Retry-After included.
+TimeoutStartSec=$((2 * (1 + STRANDED_LOOKUPS + CODER_SLOTS) + 1))min
 EOF
 }
 

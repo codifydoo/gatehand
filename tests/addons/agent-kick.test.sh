@@ -12,12 +12,14 @@
 #      this the kicker started one run at a time at any parallelism (tabulark, 2026-11-22).
 #   3. Every slot busy: no dispatch. One failed dispatch of several still exits 0; all failed exits 1.
 #   4. A bad AGENT_KICK_CODER_SLOTS stops the run before any API call, and stops install.
-#   5. install writes AGENT_KICK_CODER_SLOTS into the service, with a start timeout that covers
+#   5. install writes AGENT_KICK_CODER_SLOTS into the service, with a start timeout that covers the
+#      listing, up to 3 stranded-run jobs lookups and
 #      1 + N API calls.
 #   6. The token reaches curl on stdin, never in its arguments.
 #   (1b) A run GitHub stranded (queued 60 minutes or more, no jobs) is not counted at either N, and
 #      is named in the journal; a fresh, running, job-holding or unreadable one still is (the same
-#      rule as agent-lib.sh coder_unfinished_runs).
+#      rule as agent-lib.sh coder_unfinished_runs). At most 3 runs get a jobs lookup; past that an old
+#      queued run still counts, so the start timeout holds.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -55,7 +57,8 @@ path="${url#https://api.github.com}"
 printf '%s %s %s\n' "${method}" "${path}" "${data}" >>"${TMP_DIR}/calls"
 if [[ "${method}" == GET && "${path}" =~ ^/repos/o/r/actions/runs/([0-9]+)/jobs ]]; then
   f="${TMP_DIR}/jobs-${BASH_REMATCH[1]}.json"
-  if [[ -f "${f}" ]]; then cp "${f}" "${out}"; printf 200; else printf '{"message":"Not Found"}' >"${out}"; printf 404; fi
+  if [[ -f "${f}" ]]; then cp "${f}" "${out}"; cat "${TMP_DIR}/jobs-${BASH_REMATCH[1]}.code" 2>/dev/null || printf 200
+  else printf '{"message":"Not Found"}' >"${out}"; printf 404; fi
 elif [[ "${method}" == GET ]]; then
   cp "${TMP_DIR}/runs.json" "${out}"; printf 200
 else
@@ -133,10 +136,30 @@ check "N=1, an old in_progress run: busy" "$(dispatches)" 0
 runs_full "[{\"id\":44,\"status\":\"queued\",\"created_at\":\"${OLD}\"}]"
 kick 1
 check "N=1, an old queued run whose jobs cannot be read (404): busy" "$(dispatches)" 0
+echo '{}' >"${TMP}/jobs-46.json"
+runs_full "[{\"id\":46,\"status\":\"queued\",\"created_at\":\"${OLD}\"}]"
+kick 1
+check "N=1, an old queued run whose jobs answer has no total_count: busy" "$(dispatches)" 0
+echo '{"total_count":0}' >"${TMP}/jobs-47.json"
+printf 500 >"${TMP}/jobs-47.code"
+runs_full "[{\"id\":47,\"status\":\"queued\",\"created_at\":\"${OLD}\"}]"
+kick 1
+check "N=1, an old queued run whose jobs call fails (500, total_count 0 in the body): busy" "$(dispatches)" 0
+runs_full '[{"id":41,"status":"queued"}]'
+kick 1
+check "N=1, a queued run without created_at: busy" "$(dispatches)" 0
+runs_full "[{\"id\":\"41\",\"status\":\"queued\",\"created_at\":\"${OLD}\"}]"
+kick 1
+check "N=1, a queued run whose id is not a number: busy" "$(dispatches)" 0
+for i in 51 52 53 54; do echo '{"total_count":0}' >"${TMP}/jobs-${i}.json"; done
+runs_full "[$(for i in 51 52 53 54; do printf '{"id":%s,"status":"queued","created_at":"%s"},' "${i}" "${OLD}"; done | sed 's/,$//')]"
+kick 1
+check "N=1, four stranded runs: only three jobs lookups" "$(grep -c '/jobs' <<<"${calls}")" 3
+check "N=1, and the fourth still counts: busy" "$(dispatches)" 0
 runs_full "[{\"id\":41,\"status\":\"queued\",\"created_at\":\"${OLD}\",\"display_title\":\"a (slot 2)\"},{\"id\":45,\"status\":\"in_progress\",\"display_title\":\"b (slot 1)\"}]"
 kick 3
 check "N=3, a stranded run in slot 2 holds no slot: dispatches into slots 2 and 3" "$(slots_sent)" "2,3"
-rm -f "${TMP}"/jobs-*.json
+rm -f "${TMP}"/jobs-*.json "${TMP}"/jobs-*.code
 
 # 2. N = 3.
 runs "Agent coder: auto pick (slot 1):in_progress"
@@ -193,9 +216,9 @@ check "install with 3 slots: exit 0" "$?" 0
 svc="${ROOT_DIR}/etc/systemd/system/gatehand-kick@.service"
 if grep -q '^Environment=.* AGENT_KICK_CODER_SLOTS=3$' "${svc}"; then t_pass "install writes AGENT_KICK_CODER_SLOTS into the service"
 else t_fail "the service has no AGENT_KICK_CODER_SLOTS=3: $(grep Environment "${svc}")"; fi
-check "install with 3 slots: start timeout covers 4 calls" "$(grep '^TimeoutStartSec=' "${svc}")" "TimeoutStartSec=9min"
+check "install with 3 slots: start timeout covers 7 calls (listing, 3 jobs lookups, 3 dispatches)" "$(grep '^TimeoutStartSec=' "${svc}")" "TimeoutStartSec=15min"
 install_with 1
-check "install with 1 slot: start timeout unchanged" "$(grep '^TimeoutStartSec=' "${svc}")" "TimeoutStartSec=5min"
+check "install with 1 slot: start timeout covers 5 calls" "$(grep '^TimeoutStartSec=' "${svc}")" "TimeoutStartSec=11min"
 install_with 0
 check "install with 0 slots: exit 1" "$?" 1
 
