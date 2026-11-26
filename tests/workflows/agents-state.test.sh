@@ -705,9 +705,10 @@ expect_no_call "kick: and dispatches nothing" "workflow run"
 # A run GitHub stranded: queued for an hour or more with no jobs (sproobo-v6 run 45652338490 stayed
 # so 17 hours, and the kick dispatched nothing all that time). It is not counted, and is named in a
 # warning; a run that is fresh, running, pending on its group, has jobs or cannot be read still is.
-run_json() { # run_json <id> <status> <created_at>
-  jq -cn --argjson i "$1" --arg s "$2" --arg c "$3" \
-    '{id: $i, status: $s, created_at: $c, display_title: "Agent coder: auto pick", html_url: "https://github.com/o/r/actions/runs/\($i)"}'
+run_json() { # run_json <id> <status> <created_at> [run_started_at]
+  jq -cn --argjson i "$1" --arg s "$2" --arg c "$3" --arg r "${4:-}" \
+    '{id: $i, status: $s, created_at: $c, display_title: "Agent coder: auto pick", html_url: "https://github.com/o/r/actions/runs/\($i)"}
+     + (if $r == "" then {} else {run_started_at: $r} end)'
 }
 kick_jobs_case() { # kick_jobs_case <runs> <jobs-json|fail>: <runs> are run_json lines
   stub_gh_reset_calls
@@ -746,6 +747,17 @@ kick_jobs_case "$(run_json 118 queued "${OLD}" | jq -c 'del(.created_at)')" "${N
 expect_no_call "kick: a queued run without created_at is busy" "workflow run"
 kick_jobs_case "$(run_json 119 queued "${OLD}" | jq -c 'del(.id)')" "${NO_JOBS}"
 expect_no_call "kick: a queued run without an id is busy" "workflow run"
+# Age runs from run_started_at: a re-run keeps its old created_at but starts afresh.
+kick_jobs_case "$(run_json 122 queued 2026-11-04T10:00:00Z 2026-11-05T11:50:00Z)" "${NO_JOBS}"
+expect_no_call "kick: a re-run of an old run, started 10 minutes ago, is busy" "workflow run"
+expect_no_call "kick: and its jobs are not asked for" "actions/runs/122/jobs"
+kick_jobs_case "$(run_json 123 queued 2026-11-04T10:00:00Z 2026-11-05T10:30:00Z)" "${NO_JOBS}"
+expect_call "kick: a re-run started 90 minutes ago with no jobs is stranded" "workflow run agent-coder.yml"
+if grep -Fq 'GitHub left coder run 123 (https://github.com/o/r/actions/runs/123) queued with no jobs since 2026-11-05T10:30:00Z' "${TMP}/kick.err"; then
+  t_pass "kick: the warning gives the time it last started"
+else t_fail "kick: the warning does not give run_started_at in: $(cat "${TMP}/kick.err")"; fi
+kick_jobs_case "$(run_json 124 queued "${OLD}" | jq -c '. + {run_started_at: null}')" "${NO_JOBS}"
+expect_call "kick: run_started_at null falls back to created_at: stranded" "workflow run agent-coder.yml"
 kick_jobs_case "$(run_json 111 queued "${OLD}"; run_json 120 queued 2026-11-05T11:50:00Z)" "${NO_JOBS}"
 expect_no_call "kick: a stranded run next to a fresh queued one: still busy" "workflow run"
 kick_jobs_case "$(echo 1; run_json 121 in_progress "${OLD}")" "${NO_JOBS}"

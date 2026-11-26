@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Coder kick: a stranded run's hour now counts from when it last started (`run_started_at`, else
+  `created_at`), not from when it was created. A re-run keeps its old `created_at`, so a re-run of
+  an old run was past the hour at once, and only the jobs lookup stood between it and a dispatch
+  next to it in the moments before GitHub lists its jobs. The `::warning::`, the digest's Queue line and `addons/hardened-runner`'s journal line
+  give the same time. Installed repositories need an update to get it; on the kick box, re-run
+  `addons/hardened-runner`'s `install`.
+
 ## 0.12.1 (2026-11-26)
 
 - Coder kick: a run GitHub stranded no longer stops the schedule. GitHub can leave a dispatched

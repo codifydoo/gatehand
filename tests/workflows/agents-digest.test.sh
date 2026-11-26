@@ -204,7 +204,7 @@ has "repo sections: the hook's section renders" '### Releases' "${out}"
 has "repo sections: as written (sanitised only when posted)" '- v1.2 shipped; ask @someone' "${out}"
 
 # A coder run GitHub stranded (queued an hour or more with no jobs) is named in the queue section.
-setup "stub_gh_json 'api repos/o/r/actions/workflows/agent-coder.yml/runs*' '{\"workflow_runs\":[{\"id\":71,\"status\":\"queued\",\"created_at\":\"2026-11-08T06:30:00Z\",\"html_url\":\"https://github.com/o/r/actions/runs/71\"},{\"id\":72,\"status\":\"queued\",\"created_at\":\"2026-11-08T06:30:00Z\",\"html_url\":\"https://github.com/o/r/actions/runs/72\"}]}'" \
+setup "stub_gh_json 'api repos/o/r/actions/workflows/agent-coder.yml/runs*' '{\"workflow_runs\":[{\"id\":71,\"status\":\"queued\",\"created_at\":\"2026-11-07T06:30:00Z\",\"run_started_at\":\"2026-11-08T06:30:00Z\",\"html_url\":\"https://github.com/o/r/actions/runs/71\"},{\"id\":72,\"status\":\"queued\",\"created_at\":\"2026-11-08T06:30:00Z\",\"html_url\":\"https://github.com/o/r/actions/runs/72\"}]}'" \
   "stub_gh_json 'api repos/o/r/actions/runs/71/jobs*' '{\"total_count\":0}'" \
   "stub_gh_json 'api repos/o/r/actions/runs/72/jobs*' '{\"total_count\":1}'"
 sout="$(render)"
