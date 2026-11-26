@@ -93,8 +93,8 @@ except Exception: print(open(sys.argv[1], errors="replace").read(200))' "${BODY}
 }
 
 # stranded_runs: the ids of the runs in the listing in ${BODY} that GitHub stranded, space-separated:
-# `queued` 60 minutes or more after it last started (run_started_at, else created_at: a re-run keeps
-# its created_at) with no jobs. GitHub can leave a dispatch so for good, and it
+# `queued` 60 minutes or more after it last started (run_started_at, else created_at when it is null:
+# a re-run keeps its created_at) with no jobs. GitHub can leave a dispatch so for good, and it
 # cannot be cancelled or deleted; it holds no runner and no concurrency group, but counting it as
 # busy stopped every kick while it stayed (17 hours on one repository). Same rule as agent-lib.sh's
 # coder_unfinished_runs: anything that cannot be read leaves the run counted, so a kick still never
@@ -111,7 +111,7 @@ now = datetime.datetime.now(datetime.timezone.utc)
 for r in json.load(open(sys.argv[1]))["workflow_runs"]:
     try:
         if r.get("status") != "queued" or type(r.get("id")) is not int: continue
-        since = r.get("run_started_at") or r["created_at"]
+        since = r["created_at"] if r.get("run_started_at") is None else r["run_started_at"]
         t = datetime.datetime.strptime(since, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
         if (now - t).total_seconds() >= 3600: print(r["id"], since)
     except Exception: pass' "${listing}" 2>/dev/null)" || ids=""

@@ -164,6 +164,11 @@ else t_fail "N=1, the re-run is not named with run_started_at: output was [${out
 runs_full "[{\"id\":41,\"status\":\"queued\",\"created_at\":\"${OLD}\",\"run_started_at\":null}]"
 kick 1
 check "N=1, run_started_at null falls back to created_at: one dispatch" "$(dispatches)" 1
+for bad in '""' '"x"' 0 false; do
+  runs_full "[{\"id\":41,\"status\":\"queued\",\"created_at\":\"${OLD}\",\"run_started_at\":${bad}}]"
+  kick 1
+  check "N=1, run_started_at ${bad} (unreadable) does not fall back to an old created_at: busy" "$(dispatches)" 0
+done
 for i in 51 52 53 54; do echo '{"total_count":0}' >"${TMP}/jobs-${i}.json"; done
 runs_full "[$(for i in 51 52 53 54; do printf '{"id":%s,"status":"queued","created_at":"%s"},' "${i}" "${OLD}"; done | sed 's/,$//')]"
 kick 1

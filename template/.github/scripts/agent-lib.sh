@@ -959,7 +959,8 @@ coder_parallelism() {
 # (a dispatch next to it runs), but it never completes, so a kick that counted every unfinished run
 # as busy dispatched nothing for as long as it stayed (17 hours on one repository). A run is
 # stranded when it is `queued` (not `pending`, the state of a run waiting on its concurrency group),
-# last started (run_started_at, else created_at) CODER_STRANDED_MINUTES or more ago, and GitHub lists
+# last started (run_started_at, else created_at when it is null; any other value it cannot read
+# keeps the run counted) CODER_STRANDED_MINUTES or more ago, and GitHub lists
 # no jobs for it. A re-run keeps its created_at but gets a fresh run_started_at, so a re-run of an
 # old run is not called stranded while it waits for its first job. Anything that
 # cannot be read counts as a live run: a run wrongly called stranded could let a kick start a run
@@ -982,7 +983,7 @@ coder_unfinished_runs() {
     [[ -n "${line}" ]] || continue
     stranded=false
     IFS=$'\t' read -r id age < <(jq -r --argjson now "$(agent_now_epoch)" '[(.id // "" | tostring),
-      (if .status == "queued" then (try ($now - ((.run_started_at // .created_at) | fromdateiso8601)) catch (-1)) else -1 end | tostring)]
+      (if .status == "queued" then (try ($now - ((if .run_started_at == null then .created_at else .run_started_at end) | fromdateiso8601)) catch (-1)) else -1 end | tostring)]
       | @tsv' <<<"${line}")
     if [[ "${id}" =~ ^[0-9]+$ && "${age}" =~ ^[0-9]+$ && "${age}" -ge $((CODER_STRANDED_MINUTES * 60)) ]]; then
       jobs="$(gh api "repos/${GH_REPO}/actions/runs/${id}/jobs?per_page=1" --jq '.total_count' 2>/dev/null)" || jobs=""

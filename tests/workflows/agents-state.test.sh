@@ -758,6 +758,10 @@ if grep -Fq 'GitHub left coder run 123 (https://github.com/o/r/actions/runs/123)
 else t_fail "kick: the warning does not give run_started_at in: $(cat "${TMP}/kick.err")"; fi
 kick_jobs_case "$(run_json 124 queued "${OLD}" | jq -c '. + {run_started_at: null}')" "${NO_JOBS}"
 expect_call "kick: run_started_at null falls back to created_at: stranded" "workflow run agent-coder.yml"
+for bad in '""' '"x"' 0 false; do
+  kick_jobs_case "$(run_json 125 queued "${OLD}" | jq -c --argjson b "${bad}" '. + {run_started_at: $b}')" "${NO_JOBS}"
+  expect_no_call "kick: run_started_at ${bad} (unreadable) does not fall back to an old created_at: busy" "workflow run"
+done
 kick_jobs_case "$(run_json 111 queued "${OLD}"; run_json 120 queued 2026-11-05T11:50:00Z)" "${NO_JOBS}"
 expect_no_call "kick: a stranded run next to a fresh queued one: still busy" "workflow run"
 kick_jobs_case "$(echo 1; run_json 121 in_progress "${OLD}")" "${NO_JOBS}"
