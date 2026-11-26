@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.12.1 (2026-11-26)
 
 - Coder kick: a run GitHub stranded no longer stops the schedule. GitHub can leave a dispatched
   coder run `queued` with no jobs for good, and it cannot be cancelled, force-cancelled (409) or
