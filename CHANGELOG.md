@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.12.2 (2026-11-26)
 
 - Coder kick: a stranded run's hour now counts from when it last started (`run_started_at`, else
   `created_at`), not from when it was created. A re-run keeps its old `created_at`, so a re-run of
