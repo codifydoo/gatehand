@@ -601,6 +601,7 @@ cmd_pick() {
 # run per concurrency group and cancels the older, and a kick must never cancel a person's named
 # dispatch, so:
 #   N = 1   one run, unless a coder run is already queued or running.
+#   Neither counts a run GitHub stranded (coder_live_runs): queued an hour or more with no jobs.
 #   N > 1   one run per free slot (coder_free_slots), and no more than the room left: N minus the
 #           runs going (a run without a slot holds a runner but no slot), the agent:ready issues
 #           the pick would not skip, maxOpenPrs minus open agent PRs and runs going, and runsPerDay minus
@@ -614,10 +615,8 @@ cmd_kick() {
     kick_slots "${n}"
     return
   fi
-  busy="$(gh api "repos/${GH_REPO}/actions/workflows/agent-coder.yml/runs?event=workflow_dispatch&per_page=30" \
-    --jq '[.workflow_runs[] | select(.status != "completed")] | length')" || { agent_log "kick: could not list coder runs"; return 1; }
-  [[ "${busy}" =~ ^[0-9]+$ ]] || { agent_log "kick: unexpected run count '${busy}'"; return 1; }
-  if [[ "${busy}" != 0 ]]; then echo "a coder run is already queued or running; no kick"; return 0; fi
+  busy="$(coder_live_runs)" || { agent_log "kick: could not list coder runs"; return 1; }
+  if [[ -n "${busy}" ]]; then echo "a coder run is already queued or running; no kick"; return 0; fi
   gh workflow run agent-coder.yml --ref "$(policy '.runnerRef')" >/dev/null || { agent_log "kick: the dispatch failed"; return 1; }
   echo "dispatched an auto-pick coder run on $(policy '.runnerRef')"
 }

@@ -954,14 +954,60 @@ coder_parallelism() {
   printf '%s\n' "${n}"
 }
 
-# coder_active_runs: one line per dispatched coder run that has not completed, "<slot> <status>",
+# Stranded coder runs. GitHub can leave a dispatched run `queued` with no jobs for good: it cannot
+# be cancelled, force-cancelled (409) or deleted (403). It holds no runner and no concurrency group
+# (a dispatch next to it runs), but it never completes, so a kick that counted every unfinished run
+# as busy dispatched nothing for as long as it stayed (17 hours on one repository). A run is
+# stranded when it is `queued` (not `pending`, the state of a run waiting on its concurrency group),
+# was created CODER_STRANDED_MINUTES or more ago, and GitHub lists no jobs for it. Anything that
+# cannot be read counts as a live run: a run wrongly called stranded could let a kick start a run
+# that cancels a person's waiting dispatch.
+CODER_STRANDED_MINUTES=60
+
+# coder_unfinished_runs: one compact JSON object a line per dispatched coder run that has not
+# completed, {id, status, display_title, created_at, html_url, stranded}. Exit 1 when the runs are
+# unreadable.
+coder_unfinished_runs() {
+  local runs list line id age jobs stranded
+  runs="$(gh api "repos/${GH_REPO}/actions/workflows/agent-coder.yml/runs?event=workflow_dispatch&per_page=100" \
+    --jq '.workflow_runs')" || return 1
+  # Into a variable, not a process substitution, whose exit status bash drops: a list jq stops
+  # reading halfway would lose the runs after the bad element and read as "fewer runs going".
+  list="$(jq -c '.[] | select(.status != "completed") | {id, status, display_title, created_at, html_url}' \
+    <<<"${runs}" 2>/dev/null)" || return 1
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"${runs}" || return 1
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    stranded=false
+    IFS=$'\t' read -r id age < <(jq -r --argjson now "$(agent_now_epoch)" '[(.id // "" | tostring),
+      (if .status == "queued" then (try ($now - (.created_at | fromdateiso8601)) catch (-1)) else -1 end | tostring)]
+      | @tsv' <<<"${line}")
+    if [[ "${id}" =~ ^[0-9]+$ && "${age}" =~ ^[0-9]+$ && "${age}" -ge $((CODER_STRANDED_MINUTES * 60)) ]]; then
+      jobs="$(gh api "repos/${GH_REPO}/actions/runs/${id}/jobs?per_page=1" --jq '.total_count' 2>/dev/null)" || jobs=""
+      [[ "${jobs}" == 0 ]] && stranded=true
+    fi
+    jq -c --argjson s "${stranded}" '. + {stranded: $s}' <<<"${line}"
+  done <<<"${list}"
+}
+
+# coder_live_runs: coder_unfinished_runs less the stranded ones, which are named in a ::warning::
+# annotation on stderr (the runner reads workflow commands there too, and $(…) keeps stdout).
+# Exit 1 when the runs are unreadable.
+coder_live_runs() {
+  local all
+  all="$(coder_unfinished_runs)" || return 1
+  jq -r 'select(.stranded) | "::warning title=stranded coder run::GitHub left coder run \(.id) (\(.html_url // "no link")) queued with no jobs since \(.created_at); it is not counted as a run going. It cannot be cancelled or deleted, only ignored."' <<<"${all}" >&2
+  jq -c 'select(.stranded | not) | del(.stranded)' <<<"${all}"
+}
+
+# coder_active_runs: one line per live dispatched coder run (coder_live_runs), "<slot> <status>",
 # where <slot> is read from the run's title and is `?` for a title without one (a run started before
 # the workflow had slots, which holds a runner but no slot's group). Exit 1 when the runs are
 # unreadable.
 coder_active_runs() {
-  gh api "repos/${GH_REPO}/actions/workflows/agent-coder.yml/runs?event=workflow_dispatch&per_page=100" \
-    --jq '.workflow_runs[] | select(.status != "completed")
-      | "\((.display_title // "") | (capture(" \\(slot (?<s>[0-9]+)\\)$") | .s) // "?") \(.status)"'
+  local live
+  live="$(coder_live_runs)" || return 1
+  jq -r '"\((.display_title // "") | (capture(" \\(slot (?<s>[0-9]+)\\)$") | .s) // "?") \(.status)"' <<<"${live}"
 }
 
 # coder_free_slots <active-runs>: pure. The slots 1..N that no active run holds, in order.
