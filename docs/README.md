@@ -200,7 +200,10 @@ git fetch origin main && git push origin origin/main:agent-runner
 - **Queue work:** label an issue `agent:ready`, or file it with the "Agent task" template. It is taken
   only with an acceptance section (`Done when`, `Acceptance`, `Recommendation`, `Suggested fix` or
   `Expected`), not `size: L`, `agent:hold` or `question`, fewer than `maxAttemptsPerIssue` attempts,
-  and no merged PR that already names it.
+  no merged PR that already names it, and, for a Claude Security import, at least one path in its
+  `## Locations` list that the coder may change (not a `!` path in `protected-paths.txt`, nor a
+  protected one unless the issue has `agent:allow-protected`). Triage does not queue an import whose
+  every location is closed: it leaves one comment saying so. A dispatch by name takes it anyway.
 - **Start a run now:** `gh workflow run agent-coder.yml --ref agent-runner [-f issue=<n>]`.
 - **Keep an issue or an agent PR away from the agents:** `agent:hold`. If someone without write access
   removes it, the coder's auto-pick skips the issue and the merge gate does not merge the PR until a

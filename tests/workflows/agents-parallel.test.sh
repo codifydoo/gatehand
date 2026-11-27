@@ -22,7 +22,8 @@
 #   7. The sweep deletes the claim of an ended run, keeps one whose run is going, deletes a claim
 #      naming no run only once it is older than lockTtlMinutes, and leaves an agent:in-progress issue
 #      alone while its claim's run is going.
-#   8. Review fixes: the kick counts only issues the pick would not skip; two inbox dispatches in
+#   8. Review fixes: the kick counts only issues the pick would not skip (an import whose every
+#      location is closed to the coder included); two inbox dispatches in
 #      one comment take different slots; of three runs taking a one-unit infra grace at once,
 #      exactly one gets it, and the sweep deletes only past days' grace refs.
 #   9. End to end with the real ledger script: three runs finalizing at once each land one row,
@@ -310,6 +311,12 @@ reset_fake 0 0 1 2 3
 jq '(.[] | select(.number != 1) | .body) = "no acceptance section"' "${FAKE}/issues.json" >"${FAKE}/i" && mv "${FAKE}/i" "${FAKE}/issues.json"
 cmd_kick >/dev/null 2>&1
 expect "kick: issues the pick would skip start no runs (1 of 3 takeable)" "$(grep -c . "${FAKE}/dispatches")" 1
+# Nor issues whose every location is closed to the coder (agent-state.sh locations_closed).
+reset_fake 0 0 1 2 3
+jq '(.[] | select(.number != 1) | .body) = "> Imported from Claude Security.\n\n## Locations\n\n- [`.github/workflows/a.yml:1-2`](u)\n\n## Recommendation\n\nx"' \
+  "${FAKE}/issues.json" >"${FAKE}/i" && mv "${FAKE}/i" "${FAKE}/issues.json"
+cmd_kick >/dev/null 2>&1
+expect "kick: issues whose every location is closed start no runs (1 of 3 takeable)" "$(grep -c . "${FAKE}/dispatches")" 1
 reset_fake 0 0 7 8
 (
   AGENT_INBOX_NO_MAIN=1 source "${REPO_ROOT}/.github/scripts/agent-inbox.sh"
