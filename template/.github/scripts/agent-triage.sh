@@ -9,6 +9,12 @@
 #   a merged PR already names it    one `fixed-on-main` comment and no label: it is probably fixed
 #                                   and waiting for the owner's prod check (an issue was once
 #                                   picked after a merged PR had fixed it)
+#   every location is closed        one `closed-paths` comment and no label, at any severity: each
+#                                   path in its `## Locations` list is one the coder may not touch
+#                                   (protected-paths.txt), so a run could only end blocked (three
+#                                   in a row once did, and tripped the breaker). Same check as the
+#                                   pick's (agent-state.sh JQ_ISSUE_DEFS locations_closed); a
+#                                   location it cannot read counts as open.
 #   Low or Medium                   agent:ready + size: S, the fast track
 #   High or Critical                agent:candidate: a person decides
 #
@@ -67,7 +73,7 @@ triage_comment() { gh issue comment "$1" --body-file "$2" >/dev/null; }
 
 # triage_one <issue-json>: prints what it did, one line.
 triage_one() {
-  local json="$1" n sev author merged done_ body rc=0
+  local json="$1" n sev author merged done_ body closed rc=0
   n="$(jq -r .number <<<"${json}")"
   [[ "$(jq -r .state <<<"${json}")" == OPEN ]] || { echo "#${n}: not open"; return 0; }
   if jq -e '[.labels[]?.name | select(startswith("agent:"))] | length > 0' <<<"${json}" >/dev/null; then
@@ -91,6 +97,21 @@ triage_one() {
     printf '<!-- agent-triage:fixed-on-main -->\nMerged %s already names this finding, so triage did not queue it: it is probably fixed and waiting for a prod check. If it is not fixed, start the coder on it by name (the scheduled pick skips an issue a merged PR names, so `agent:ready` alone would never start it):\n\n```bash\ngh workflow run agent-coder.yml --repo %s --ref agent-runner -f issue=%s\n```\n' \
       "$(awk '{ printf "%s#%s", (NR > 1 ? ", " : ""), $0 }' <<<"${merged}")" "${GH_REPO}" "${n}" >"${body}"
     if triage_comment "${n}" "${body}"; then echo "#${n}: fixed on main ($(paste -sd' ' - <<<"${merged}"))"; else echo "#${n}: comment failed"; rc=1; fi
+    rm -f "${body}"
+    return "${rc}"
+  fi
+  # Backticked, and a path holds no backtick or space (location_paths), so none can mention or link.
+  closed="$(jq -r --argjson res "$(closed_path_res)" "${JQ_ISSUE_DEFS}"'
+    locations_closed($res) // [] | (.[:10] | map("`\(.)`") | join(", ")) + (if length > 10 then ", …" else "" end)
+  ' <<<"${json}")" \
+    || { rm -f "${body}"; echo "#${n}: could not check its locations"; return 1; }
+  if [[ -n "${closed}" ]]; then
+    # No label: agent:ready would sit in the queue for the pick to skip, and agent:candidate would ask
+    # a person to queue what the coder cannot change.
+    printf '<!-- agent-triage:closed-paths -->\nA %s-severity Claude Security finding whose every location is in a path an agent may not touch (`.github/agents/protected-paths.txt`): %s. Triage did not queue it, because a coder run could only end blocked. A person fixes it. If the fix belongs somewhere else, or a writer'"'"'s `agent:allow-protected` opens these paths, start the coder on it by name (the scheduled pick skips an issue whose every location is closed to it):\n\n```bash\ngh workflow run agent-coder.yml --repo %s --ref %s -f issue=%s\n```\n' \
+      "${sev}" "${closed}" \
+      "${GH_REPO}" "$(policy '.runnerRef')" "${n}" >"${body}"
+    if triage_comment "${n}" "${body}"; then echo "#${n}: every location closed (${closed})"; else echo "#${n}: comment failed"; rc=1; fi
     rm -f "${body}"
     return "${rc}"
   fi

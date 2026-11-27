@@ -140,6 +140,13 @@ cmd_gate() {
 # copy of that marker voids nothing. It voids only the lock of the same run and run attempt, so a
 # re-run ("Re-run all jobs" keeps the run id) is counted apart from its first attempt; a lock or
 # marker without `run_attempt` (written before it existed) matches every attempt of its run.
+#
+# locations_closed($res) reads a Claude Security import's `## Locations` list (bullets like
+# - [`path/to/file.yml:12-30`](https://…)) and gives the paths when there is at least one and the
+# coder could touch none of them: each matches a never glob, or a protected glob while the issue has
+# no `agent:allow-protected` (the outbox checks who put that label; a skip need not). $res is
+# agent-lib.sh closed_path_res. A bullet it cannot read as a path, or no list at all, gives null: an
+# unread location is not a closed one. agent-triage.sh asks the same question before it queues.
 JQ_ISSUE_DEFS='
   def names: [.labels[]?.name];
   def has($l): (names | index($l)) != null;
@@ -159,12 +166,34 @@ JQ_ISSUE_DEFS='
     if has("priority: critical") then 0 elif has("priority: high") then 1
     elif has("priority: medium") then 2 elif has("priority: low") then 3 else 4 end;
   def busy: has("agent:hold") or has("agent:in-progress") or has("agent:pr-open");
-  def skip_reason($max):
+  def location_paths:
+    (.body // "") | split("\n") | map(sub("\r$"; ""))
+    | foreach .[] as $l ({in: false, out: null};
+        if ($l | test("^#{1,2} ")) then {in: ($l | test("^## +Locations[ \t]*$")), out: null}
+        elif .in and ($l | test("^[-*] ")) then {in: true, out: $l}
+        else .out = null end;
+        .out)
+    | select(. != null)
+    | ((capture("^[-*] +\\[`(?<p>[^`]+)`\\]") | .p | sub(":[0-9]+(-[0-9]+)?$"; "")) // null)
+    | if . != null and test("^[^/\\s][^\\s]*$") and (test("(^|/)\\.\\.(/|$)") | not) then . else null end;
+  def closed_path($res; $allow):
+    . as $p
+    | ($res.never | any(. as $r | $p | test($r)))
+      or (($allow | not) and ($res.protected | any(. as $r | $p | test($r))));
+  def locations_closed($res):
+    has("agent:allow-protected") as $allow
+    | [location_paths] as $ps
+    | if ($ps | length) == 0 or ($ps | any(. == null)) then null
+      elif ($ps | all(closed_path($res; $allow))) then ($ps | unique)
+      else null end;
+  def skip_reason($max; $res):
     if (.state // "OPEN") != "OPEN" then "not open"
     elif busy then "held, locked or already has a PR"
     elif has("question") then "labelled question"
     elif has("size: L") then "size: L"
     elif (acceptance | not) then "no acceptance section (Done when / Acceptance / Recommendation / Suggested fix)"
+    elif locations_closed($res) != null then
+      "every location it names is in a path an agent may not touch (\(locations_closed($res) | .[:3] | join(", "))\(if (locations_closed($res) | length) > 3 then ", …" else "" end)); dispatch it by name to take it anyway"
     elif locks >= $max then "already attempted \(locks) times"
     else null end;
 '
@@ -175,8 +204,8 @@ log_skips() {
   local line
   while IFS= read -r line; do
     agent_log "${line}"
-  done < <(jq -r --argjson max "$2" "${JQ_ISSUE_DEFS}"'
-    .[] | skip_reason($max) as $why | select($why != null) | "skip #\(.number): \($why)"
+  done < <(jq -r --argjson max "$2" --argjson res "$(closed_path_res)" "${JQ_ISSUE_DEFS}"'
+    .[] | skip_reason($max; $res) as $why | select($why != null) | "skip #\(.number): \($why)"
   ' <<<"$1")
 }
 
@@ -189,8 +218,8 @@ pick_auto() {
 
 # pick_ranked <issues-json-array> <max-attempts>: every eligible issue number, in pick order.
 pick_ranked() {
-  jq -r --argjson max "$2" "${JQ_ISSUE_DEFS}"'
-    [.[] | select(skip_reason($max) == null)] | sort_by(prio, .createdAt) | .[].number
+  jq -r --argjson max "$2" --argjson res "$(closed_path_res)" "${JQ_ISSUE_DEFS}"'
+    [.[] | select(skip_reason($max; $res) == null)] | sort_by(prio, .createdAt) | .[].number
   ' <<<"$1"
 }
 
@@ -494,7 +523,7 @@ claim_and_recheck() {
   if [[ "${how}" == named ]]; then
     why="$(explicit_ok "${json}")"
   else
-    why="$(jq -r --argjson max "${max}" "${JQ_ISSUE_DEFS}"'skip_reason($max) // ""' <<<"${json}")"
+    why="$(jq -r --argjson max "${max}" --argjson res "$(closed_path_res)" "${JQ_ISSUE_DEFS}"'skip_reason($max; $res) // ""' <<<"${json}")"
   fi
   if [[ -n "${why}" ]]; then
     agent_log "skip #${issue}: ${why} (read again after the claim)"
@@ -631,13 +660,13 @@ kick_slots() {
   [[ "${#free[@]}" -lt "${budget}" ]] && budget="${#free[@]}"
   if [[ "${budget}" -le 0 ]]; then echo "every coder slot is busy (${active} runs going, ${n} slots); no kick"; return 0; fi
   # The issues the pick could take: its own skip rules (held or locked, no acceptance section,
-  # attempts used up, …), so a queue of issues it would skip starts no runs. The trust and merged-PR
+  # every location closed to an agent, attempts used up, …), so a queue of issues it would skip starts no runs. The trust and merged-PR
   # checks need more calls per issue and stay the pick's.
   ready="$(gh issue list --state open --label agent:ready --limit 100 \
     --json number,state,title,body,labels,createdAt,comments)" \
     || { agent_log "kick: could not list agent:ready issues"; return 1; }
-  ready="$(jq -r --argjson max "$(policy '.roles.coder.maxAttemptsPerIssue')" "${JQ_ISSUE_DEFS}"'
-    [.[] | select(skip_reason($max) == null)] | length' <<<"${ready}")"
+  ready="$(jq -r --argjson max "$(policy '.roles.coder.maxAttemptsPerIssue')" --argjson res "$(closed_path_res)" "${JQ_ISSUE_DEFS}"'
+    [.[] | select(skip_reason($max; $res) == null)] | length' <<<"${ready}")"
   open="$(gh pr list --state open --label agent:pr --limit 100 --json number --jq 'length')" \
     || { agent_log "kick: could not list open agent PRs"; return 1; }
   month="$(jq -rn --argjson e "$(agent_now_epoch)" '$e | strftime("%Y-%m")')"

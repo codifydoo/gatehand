@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Coder and triage: a Claude Security import whose every location is in a path the coder may not
+  touch is no longer worked. The coder could only end such a run `blocked`, and three in a row
+  tripped one repository's breaker. The signal is the import's own `## Locations` list: when every
+  path in it matches a `!` glob in `protected-paths.txt` (or the floor), or a protected glob while
+  the issue has no `agent:allow-protected`, triage leaves one `closed-paths` comment and no label
+  (at any severity), and the pick, the kick and the re-check after a claim skip it, with the paths in
+  the log line. A location it cannot read as a path, or no list at all, counts as open, so such an
+  issue is queued as before. A dispatch by name still takes it. Issues without a Locations list, and
+  fixes that need closed files the list does not name, are not caught. Installed repositories need
+  an update to get it.
+
 ## 0.12.2 (2026-11-26)
 
 - Coder kick: a stranded run's hour now counts from when it last started (`run_started_at`, else

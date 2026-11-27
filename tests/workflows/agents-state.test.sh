@@ -13,6 +13,10 @@
 #      be read): a writer's hold or close stands until a writer lifts it; agent:pr on an issue is no
 #      stop; stop_blockers refuses a kind it does not know. A named dispatch skips the rest.
 #   (1b) The gate refuses a run on the default branch, and one whose runner-ref workflow is stale.
+#   (2c) An import whose every  path the coder may not touch (a never glob, or a
+#      protected one without agent:allow-protected) is skipped by the pick; a location it cannot
+#      read, or none, counts as open; a dispatch by name still takes it. jq's copy of the globs
+#      agrees with is_never/is_protected.
 #   3. Finalize leaves exactly one state: a PR → agent:pr-open; a question or a protected path →
 #      agent:blocked + agent:needs-human with an inbox request; a failure with attempts left →
 #      back to agent:ready; the last failed attempt → blocked with a request. It never closes.
@@ -365,6 +369,68 @@ stub_gh_json 'api --paginate repos/o/r/issues/2/timeline*' "$(jq -s . <(xref 850
 : >"${TMP}/out"
 GITHUB_OUTPUT="${TMP}/out" cmd_pick 2 2>/dev/null
 expect "pick: a dispatch that names the issue still takes it" "$(grep '^issue=' "${TMP}/out")" "issue=2"
+# --- 2c. an import whose every location is closed to the coder --------------------------------------
+# A Claude Security import names its files in `## Locations`. When the coder may touch none of them,
+# a run can only end blocked: three in a row once did, and tripped the breaker. The pick (and the
+# kick, and the re-check after a claim) skips such an issue; a dispatch by name still takes it. The
+# fixture list has a non-floor `!` glob and a plain glob, so the file is read, not just the floor.
+printf '%s\n' 'CLAUDE.md' '!ops/**' 'deploy/**' >"${TMP}/closed-paths"
+saved_protected="${AGENT_PROTECTED_FILE}"
+AGENT_PROTECTED_FILE="${TMP}/closed-paths"
+locbody() { # locbody <bullet>...: an import-shaped body; a bullet starting `=` is used as written
+  local b=$'> Imported from Claude Security.\n\n## Description\n\nx\n\n## Locations\n\n' l
+  for l in "$@"; do
+    if [[ "${l}" == =* ]]; then b+="${l#=}"$'\n'; else b+="- [\`${l}:10-20\`](https://github.com/o/r/blob/abc/${l}#L10-L20)"$'\n'; fi
+  done
+  printf '%s\n## Recommendation\n\nFix it.\n' "${b}"
+}
+closed_of() { # closed_of <labels-csv> <bullet>... -> the closed paths, space-separated, or "open"
+  local labels="$1"
+  shift
+  jq -r --argjson res "$(closed_path_res)" "${JQ_ISSUE_DEFS}"'locations_closed($res) // ["open"] | join(" ")' \
+    <<<"$(issue 9 x "${labels}" "$(locbody "$@")")"
+}
+expect "closed: every location under .github/" "$(closed_of '' .github/workflows/a.yml .github/scripts/b.sh)" ".github/scripts/b.sh .github/workflows/a.yml"
+expect "closed: a never glob from the file counts (not just the floor)" "$(closed_of '' .github/a.yml ops/run.sh)" ".github/a.yml ops/run.sh"
+expect "closed: a protected glob counts while the issue has no agent:allow-protected" \
+  "$(closed_of '' .github/a.yml deploy/x.sh)" ".github/a.yml deploy/x.sh"
+expect "closed: with agent:allow-protected the protected one is open" "$(closed_of 'agent:allow-protected' .github/a.yml deploy/x.sh)" open
+expect "closed: but agent:allow-protected opens no never path" "$(closed_of 'agent:allow-protected' .github/a.yml ops/x.sh)" ".github/a.yml ops/x.sh"
+expect "closed: one location the coder may change makes it open" "$(closed_of '' .github/a.yml src/app.ts)" open
+expect "closed: a bullet it cannot read as a path counts as open" "$(closed_of '' .github/a.yml '=- somewhere in the workflows')" open
+expect "closed: a path with a space counts as open" "$(closed_of '' .github/a.yml 'src/my file.ts')" open
+expect "closed: an absolute path counts as open" "$(closed_of '' .github/a.yml /etc/passwd)" open
+expect "closed: a .. path counts as open" "$(closed_of '' .github/a.yml .github/../src/a.ts)" open
+expect "closed: no Locations section is open" \
+  "$(jq -r --argjson res "$(closed_path_res)" "${JQ_ISSUE_DEFS}"'locations_closed($res) // "open"' <<<"$(issue 9 x '' "${DONE}")")" open
+expect "closed: an empty Locations section is open" "$(closed_of '')" open
+expect "closed: bullets after the next ## heading are not locations" \
+  "$(closed_of '' .github/a.yml '=' '=## Notes' '=' '=- [`src/x.ts:1-2`](u)')" ".github/a.yml"
+expect "closed: a ### heading inside the section does not end it" \
+  "$(closed_of '' .github/a.yml '=### More' '=- [`src/b.ts:1`](u)')" open
+expect "closed: CRLF line ends are read" \
+  "$(jq -r --argjson res "$(closed_path_res)" "${JQ_ISSUE_DEFS}"'locations_closed($res) // ["open"] | join(" ")' \
+    <<<"$(jq -c '.body |= gsub("\n"; "\r\n")' <<<"$(issue 9 x '' "$(locbody .github/a.yml)")")")" ".github/a.yml"
+# One matcher, two engines: jq reads glob_to_ere's regexes the way bash's =~ does.
+agree=ok
+for p in .github/a.yml .github .githubx/a ops/a ops opsx/a deploy/a/b.sh deploy CLAUDE.md docs/CLAUDE.md a/.claude/x \
+  .mcp.json src/a.ts README.md .agents-main .agents-main/x 'src/a+b(c).ts' 'x.github/a'; do
+  want=open
+  if is_never "${p}" || is_protected "${p}"; then want=closed; fi
+  got="$(jq -rn --arg p "${p}" --argjson res "$(closed_path_res)" "${JQ_ISSUE_DEFS}"'if ($p | closed_path($res; false)) then "closed" else "open" end')"
+  [[ "${got}" == "${want}" ]] || { agree="${p}: bash ${want}, jq ${got}"; break; }
+done
+expect "closed: jq's check agrees with is_never/is_protected on every path tried" "${agree}" ok
+# The pick: the closed issue ranks first, so only the skip keeps it from being taken.
+closed_issues="$(jq -s . <(issue 1 2026-09-01T00:00:00Z 'agent:ready,priority: critical' "$(locbody .github/workflows/a.yml deploy/x.sh)") \
+  <(issue 2 2026-10-01T00:00:00Z 'agent:ready,priority: low' "$(locbody .github/workflows/a.yml src/app.ts)"))"
+expect "pick: an issue whose every location is closed is passed over" "$(pick_auto "${closed_issues}" 2 2>/dev/null)" 2
+expect "pick: and the log says why, naming the paths" \
+  "$(pick_auto "${closed_issues}" 2 2>&1 >/dev/null | grep -c 'skip #1: every location it names is in a path an agent may not touch (.github/workflows/a.yml, deploy/x.sh)')" 1
+expect "pick: with agent:allow-protected on it, the same issue is taken" \
+  "$(pick_auto "$(jq '.[0].labels += [{name: "agent:allow-protected"}]' <<<"${closed_issues}")" 2 2>/dev/null)" 1
+expect "explicit: a dispatch by name still takes it" "$(explicit_ok "$(jq -c '.[0]' <<<"${closed_issues}")")" ""
+AGENT_PROTECTED_FILE="${saved_protected}"
 # snapshot: writers' comments only, from one fetch, re-checked after it
 stub_gh_reset_rules
 AGENT_TRUST_CACHE=()
@@ -589,7 +655,7 @@ rerun_json="$(jq -cn --arg bot "${AGENT_BOT_SLUG}" '{state: "OPEN", body: "## Do
   {author: {login: $bot}, body: "<!-- agent:lock role=coder run=333 attempt=1 expires=x run_attempt=2 -->"},
   {author: {login: $bot}, body: "Attempt 1 of 1 by the coder agent ended without a PR: **failed**"}]}')"
 expect "attempts: a re-run's lock is not voided by its first attempt's marker" "$(jq -r "${JQ_ISSUE_DEFS} locks" <<<"${rerun_json}")" 1
-expect "attempts: so with one attempt allowed the issue is not picked again" "$(jq -r "${JQ_ISSUE_DEFS} skip_reason(1)" <<<"${rerun_json}")" "already attempted 1 times"
+expect "attempts: so with one attempt allowed the issue is not picked again" "$(jq -r --argjson res "$(closed_path_res)" "${JQ_ISSUE_DEFS} skip_reason(1; \$res)" <<<"${rerun_json}")" "already attempted 1 times"
 expect "attempts: a marker voids its own run attempt's lock" \
   "$(jq -c '.comments += [{author: {login: "'"${AGENT_BOT_SLUG}"'"}, body: "<!-- agent:no-attempt run=333 run_attempt=2 -->"}]' <<<"${rerun_json}" | jq -r "${JQ_ISSUE_DEFS} locks")" 0
 old_json="$(jq -cn --arg bot "${AGENT_BOT_SLUG}" '{comments: [

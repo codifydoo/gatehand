@@ -7,6 +7,10 @@
 #      High/Critical -> agent:candidate. A read-only or bot author, an agent label already, or the
 #      bot's earlier marker: nothing. A merged PR naming it: one fixed-on-main comment, no label.
 #   3. Failures fail: an unreadable timeline or a comment that did not post reddens the run.
+#   4. An import whose every `## Locations` path the coder may not touch (never, or protected: triage
+#      skips any issue with an agent:* label, so agent:allow-protected is never on it): one
+#      closed-paths comment at any severity, naming the paths and the dispatch-by-name command, and no
+#      label. One open or unreadable location: triaged as before.
 # AGENT_TRUST_CACHE is read by the sourced scripts.
 # shellcheck disable=SC2034
 set -uo pipefail
@@ -148,6 +152,36 @@ expect_call "and the labels come off again, so the next run retries (the coder n
   "issue edit 5 --remove-label agent:ready --remove-label size: S"
 COMMENT_FAILS=1 VIEW_LABELS=$'security\nagent:candidate' tri_case "$(ijson 5 High)"
 expect_call "a candidate whose marker did not post loses the label again too" "issue edit 5 --remove-label agent:candidate"
+
+# --- 4. every location closed to the coder -----------------------------------------------------------
+# withloc <issue-json> <bullet>...: the import with a `## Locations` list, as Claude Security writes it.
+withloc() {
+  local j="$1" l locs=$'\n## Locations\n\n'
+  shift
+  for l in "$@"; do locs+="- [\`${l}:1-9\`](https://github.com/o/r/blob/abc/${l}#L1-L9)"$'\n'; done
+  jq -c --arg l "${locs}" '.body += $l' <<<"${j}"
+}
+tri_case "$(withloc "$(ijson 5 Medium)" .github/workflows/a.yml .github/scripts/b.sh)"
+label="Medium, every location under .github/: one closed-paths comment"; check marker closed-paths
+expect_no_call "and no label" "issue edit 5"
+if stub_gh_any_body '`.github/scripts/b.sh`, `.github/workflows/a.yml`'; then t_pass "naming the paths"; else t_fail "the comment does not name the paths"; fi
+if stub_gh_any_body 'gh workflow run agent-coder.yml --repo o/r --ref agent-runner -f issue=5'; then
+  t_pass "and the dispatch-by-name command"
+else
+  t_fail "the closed-paths comment does not give the dispatch-by-name command"
+fi
+expect "and the run is fine" "$(cat "${TMP}/rc")" 0
+tri_case "$(withloc "$(ijson 5 High)" .github/workflows/a.yml deploy/x.sh)"
+label="High, .github/ plus a protected path: closed-paths too"; check marker closed-paths
+label="not agent:candidate, which would ask a person to queue it"; check_not labelled '--add-label agent:candidate'
+tri_case "$(withloc "$(ijson 5 Low)" .github/workflows/a.yml src/app.ts)"
+label="Low with one location the coder may change: fast-tracked as before"; check labelled '--add-label agent:ready --add-label size: S'
+label="without a closed-paths comment"; check_not marker closed-paths
+tri_case "$(jq -c '.body += "\n## Locations\n\n- the review workflow\n"' <<<"$(withloc "$(ijson 5 Low)" .github/workflows/a.yml)")"
+label="Low with a location it cannot read: fast-tracked (an unread location is not a closed one)"; check marker fast-track
+COMMENT_FAILS=1 tri_case "$(withloc "$(ijson 5 Low)" .github/workflows/a.yml)"
+expect "a closed-paths comment that did not post fails the run" "$(cat "${TMP}/rc")" 1
+expect_no_call "and labels nothing" "issue edit 5"
 
 # --- cmd_run ---------------------------------------------------------------------------------------
 stub_gh_reset_calls

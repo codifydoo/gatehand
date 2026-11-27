@@ -354,6 +354,17 @@ protected_hits() {
   done
 }
 
+# closed_path_res: {"never": [...], "protected": [...]}, the same globs as is_never and is_protected,
+# as the anchored regexes glob_to_ere makes, for a jq check that has no bash to call
+# (agent-state.sh JQ_ISSUE_DEFS `locations_closed`). Read from the file on every call, like the rest.
+closed_path_res() {
+  local g never="" prot=""
+  while IFS= read -r g; do never+="$(glob_to_ere "${g}")"$'\n'; done < <(never_patterns)
+  while IFS= read -r g; do prot+="$(glob_to_ere "${g}")"$'\n'; done < <(protected_patterns)
+  jq -cn --arg n "${never}" --arg p "${prot}" \
+    '{never: ($n | split("\n") | map(select(. != ""))), protected: ($p | split("\n") | map(select(. != "")))}'
+}
+
 # --- who is trusted ----------------------------------------------------------------------------------
 
 # The agent bot, as the different APIs spell it.
