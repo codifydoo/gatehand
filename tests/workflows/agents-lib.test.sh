@@ -333,6 +333,8 @@ check test "$(printf '`@acme/db`' | GH_REPO='' agent_sanitize)" == '`@-acme/db`'
 utf8="$(locale -a 2>/dev/null | grep -ixE 'c\.utf-?8|en_us\.utf-?8' | head -1)"
 label="without python, sed rewrites everything, in the C locale (é@x is a live mention; locale ${utf8:-C})"
 check test "$(printf 'é@x `@y` <!-- z -->' | LC_ALL="${utf8:-C}" AGENT_PYTHON=/nonexistent agent_sanitize 2>/dev/null)" == 'é@-x `@-y` &lt;!-- z -->'
+label="without python, sed also rewrites a mention right after one that ends in a hyphen"
+check test "$(printf 'x @a-@octocat y' | AGENT_PYTHON=/nonexistent agent_defang 2>/dev/null)" == 'x @-a-@-octocat y'
 # Cut BEFORE sanitising. A cut through a span the sanitiser kept would leave `` `pnpm @x `` with no
 # closing backtick, which GitHub renders as a live mention.
 stub_gh_reset_rules

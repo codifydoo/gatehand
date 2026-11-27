@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Inbox: a request comment that is too long to move whole when the inbox rotates is no longer cut
+  as it was sanitised. The cut could leave a code span open, and a mention the sanitiser had kept
+  inside the span then went live in the bot's copy. A cut copy now has every mention rewritten,
+  keeping its marker line and the lines naming the inboxes it came from. The sed fallback used when
+  python cannot run now also rewrites a mention right after one that ends in a hyphen (`@a-@b`). The coder's and fixer's `blocked.md` note is also capped at
+  19,000 bytes (or `maxCommentBytes` when that is lower) before it is sanitised. The inbox quotes it
+  line by line, which can triple its size, so a request built from it stays short enough to move
+  whole. Installed repositories need an update to get it.
+
 ## 0.12.3 (2026-11-27)
 
 - Coder and triage: a Claude Security import whose every location is in a path the coder may not
