@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.12.4 (2026-11-27)
 
 - Inbox: a request comment that is too long to move whole when the inbox rotates is no longer cut
   as it was sanitised. The cut could leave a code span open, and a mention the sanitiser had kept
