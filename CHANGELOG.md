@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.12.3 (2026-11-27)
 
 - Coder and triage: a Claude Security import whose every location is in a path the coder may not
   touch is no longer worked. The coder could only end such a run `blocked`, and three in a row
