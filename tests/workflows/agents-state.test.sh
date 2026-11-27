@@ -372,8 +372,9 @@ GITHUB_OUTPUT="${TMP}/out" cmd_pick 2 2>/dev/null
 expect "pick: a dispatch that names the issue still takes it" "$(grep '^issue=' "${TMP}/out")" "issue=2"
 # --- 2c. an import whose every location is closed to the coder --------------------------------------
 # A Claude Security import names its files in `## Locations`. When the coder may touch none of them,
-# a run can only end blocked: three in a row once did, and tripped the breaker. The pick (and the
-# kick, and the re-check after a claim) skips such an issue; a dispatch by name still takes it. The
+# a run can only end blocked: three in a row once did, and tripped the breaker. The pick (and its
+# re-check after a claim; the kick with parallelism above 1) skips such an issue; a dispatch by name
+# still takes it. The
 # fixture list has a non-floor `!` glob and a plain glob, so the file is read, not just the floor.
 printf '%s\n' 'CLAUDE.md' '!ops/**' 'deploy/**' '!db/*.sql' '!db/v?/x' >"${TMP}/closed-paths"
 saved_protected="${AGENT_PROTECTED_FILE}"
@@ -402,7 +403,8 @@ expect "closed: a bullet it cannot read as a path counts as open" "$(closed_of '
 # Paths every glob would close, so only the path filter makes them open.
 expect "closed: a path with a space counts as open" "$(closed_of '' '.github/my file.yml')" open
 expect "closed: an absolute path counts as open" "$(closed_of '' .github/a.yml /x/CLAUDE.md)" open
-for odd in '  - [`src/app.ts:5`](u)' '1. [`src/app.ts:5`](u)' '+ [`src/app.ts:5`](u)' 'Also src/app.ts' '```' '- [`src/app.ts:5`] (u)'; do
+# Each odd line names a closed path, so only reading it as unread can make the issue open.
+for odd in '  - [`.github/b.yml:5`](u)' '1. [`.github/b.yml:5`](u)' '+ [`.github/b.yml:5`](u)' 'Also .github/b.yml' '```' '- [`.github/b.yml:5`] (u)'; do
   expect "closed: a line it cannot read as one bullet (${odd}) counts as open" "$(closed_of '' .github/a.yml "=${odd}")" open
 done
 expect "closed: a body that is not a Claude Security import is never skipped this way" \
