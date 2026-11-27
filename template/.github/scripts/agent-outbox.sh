@@ -248,7 +248,7 @@ cmd_publish() {
   # Capped BEFORE sanitising: a cut inside a code span the sanitiser kept would leave a live mention.
   if [[ -s "${outbox}/summary.md" ]]; then agent_cap "${max_body}" <"${outbox}/summary.md" | agent_sanitize >"${final}/summary.md"; fi
   if [[ -s "${outbox}/blocked.md" ]]; then
-    agent_cap "${max_body}" <"${outbox}/blocked.md" | agent_sanitize >"${final}/blocked.md"
+    agent_cap "$(agent_note_cap)" <"${outbox}/blocked.md" | agent_sanitize >"${final}/blocked.md"
     finish blocked "the agent asked for a decision"
     return 0
   fi
@@ -407,7 +407,7 @@ cmd_publish_fix() {
   # Capped BEFORE sanitising (agent_sanitize says why).
   if [[ -s "${outbox}/summary.md" ]]; then agent_cap "${max_body}" <"${outbox}/summary.md" | agent_sanitize >"${final}/summary.md"; fi
   if [[ -s "${outbox}/blocked.md" ]]; then
-    agent_cap "${max_body}" <"${outbox}/blocked.md" | agent_sanitize >"${final}/blocked.md"
+    agent_cap "$(agent_note_cap)" <"${outbox}/blocked.md" | agent_sanitize >"${final}/blocked.md"
     finish blocked "the fixer asked for a decision"
     return 0
   fi

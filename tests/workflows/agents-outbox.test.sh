@@ -10,7 +10,9 @@
 #      without `agent:allow-protected`. A refused run pushes NOTHING.
 #   3. With `agent:allow-protected` on the issue a protected path is let through, and the PR is
 #      labelled so the guard and a person can see it.
-#   4. The non-PR outcomes: a failed code job, a `blocked.md` question, and no commits.
+#   4. The non-PR outcomes: a failed code job, a `blocked.md` question, and no commits. A blocked note
+#      is capped (agent_note_cap) before sanitising, small enough that the inbox request quoting it
+#      is never cut when the inbox rotates.
 #   4b. Commits and pr.json but no pr-body.md: summary.md becomes the body (sanitised, with a note
 #      and `Refs #N`, through the same checks), so the work is not dropped; with neither file, or no
 #      pr.json, it is still a no-op.
@@ -312,14 +314,27 @@ new_case blocked
 printf 'I need to edit scripts/x.sh. @claude\n' >"${OUT}/blocked.md"
 publish
 expect "blocked.md: outcome" "$(outv outcome)" "blocked"
-# The 20000-byte cap is applied BEFORE sanitising: here it falls inside a code span the renderer
-# would confirm, after `@owner-login`. Cut after sanitising, the span would be open and the mention live.
-pad="$(head -c 19970 /dev/zero | tr '\0' a)"
+# The note cap (agent_note_cap, 19000 bytes) is applied BEFORE sanitising: here it falls inside a code
+# span the renderer would confirm, after `@owner-login`. Cut after sanitising, the span would be open
+# and the mention live.
+pad="$(head -c 18970 /dev/zero | tr '\0' a)"
 # shellcheck disable=SC2016 # the backticks are literal markdown
 printf '%s `pnpm --filter @owner-login/db typecheck and more`\n' "${pad}" >"${OUT}/blocked.md"
 MD_ANSWER='<p><a class="user-mention" href="https://github.com/octocat">@octocat</a></p><p><code>x</code></p>' publish
 expect "blocked.md cut inside a code span: the mention is defanged" "$(grep -c '@-owner-login' "${LAST_FINAL}/blocked.md")" 1
-expect "and the cap still applies" "$(grep -c 'truncated at 20000 bytes' "${LAST_FINAL}/blocked.md")" 1
+expect "and the cap still applies" "$(grep -c 'truncated at 19000 bytes' "${LAST_FINAL}/blocked.md")" 1
+# #1381 (sproobo-v6): the inbox quotes the note line by line, so 20000 empty lines would become a
+# 60000-byte request that an inbox move has to cut. Capped below policy.maxCommentBytes (20000 here),
+# the request the coder files stays one a move copies whole.
+head -c 20000 /dev/zero | tr '\0' '\n' >"${OUT}/blocked.md"
+publish
+expect "a blocked note of empty lines is capped below maxCommentBytes" "$(grep -c 'truncated at 19000 bytes' "${LAST_FINAL}/blocked.md")" 1
+req_bytes="$({ printf '<!-- agent-req:REQ-20261127-abcd role=coder issue=7 kind=blocked -->\n### REQ-20261127-abcd · coder · #7\n\n'
+  AGENT_STATE_NO_MAIN=1 bash -c 'source "$1/.github/scripts/agent-state.sh"; request_body blocked 7 r "$2"' _ "${REPO_ROOT}" "${LAST_FINAL}/blocked.md" \
+    | sed 's/REQ-ID/REQ-20261127-abcd/g'; } | wc -c | tr -d ' ')"
+if [[ "${req_bytes}" -gt 40000 && "${req_bytes}" -le 60000 ]]; then t_pass "... so its inbox request (${req_bytes} bytes) is one an inbox move copies whole"; else t_fail "the inbox request is ${req_bytes} bytes"; fi
+jq '.maxCommentBytes = 5000' "${AGENT_POLICY}" >"${TMP}/policy-small.json"
+expect "a smaller maxCommentBytes still caps the note" "$(AGENT_POLICY="${TMP}/policy-small.json" agent_note_cap)" 5000
 # shellcheck disable=SC2016 # the backticks are literal markdown
 printf 'Needs `pnpm --filter @acme/db x`.\n' >"${OUT}/blocked.md"
 MD_ANSWER='<p><a class="user-mention" href="https://github.com/octocat">@octocat</a></p><p><code>x</code></p>' publish
@@ -656,6 +671,10 @@ printf 'The failure is a flaky test on main.\n' >"${OUT}/blocked.md"
 publish_fix
 expect "fix: blocked.md: blocked" "$(outv outcome)" "blocked"
 expect "fix: the note is kept for finalize" "$(cat "${LAST_FINAL}/blocked.md")" "The failure is a flaky test on main."
+fix_case fixbig
+head -c 20000 /dev/zero | tr '\0' '\n' >"${OUT}/blocked.md"
+publish_fix
+expect "fix: a long blocked note gets the same cap (#1381)" "$(grep -c 'truncated at 19000 bytes' "${LAST_FINAL}/blocked.md")" 1
 fix_case fixnone
 publish_fix
 expect "fix: no commits: no-op" "$(outv outcome)" "no-op"

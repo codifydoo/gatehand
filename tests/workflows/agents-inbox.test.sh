@@ -28,8 +28,10 @@
 #      every inbox it came from, and a command on the copy is refused when the request was answered on
 #      any of them (whenever that was; the refusal records the answer on the new inbox), and when one
 #      cannot be read, though a deleted one has no answer; one answered on its copy before the notice
-#      is marked answered by it. So no request can be applied twice. AGENT_INBOX_ISSUE pins
-#      the inbox and only warns; AGENT_INBOX_RESOLVED (a caller's own earlier lookup) is used as is.
+#      is marked answered by it. So no request can be applied twice. A request over 60000 bytes is cut
+#      when it moves, with every mention in the copy rewritten (a cut can open a code span).
+#      AGENT_INBOX_ISSUE pins the inbox and only warns; AGENT_INBOX_RESOLVED (a caller's own earlier
+#      lookup) is used as is.
 # ANSWERED is reset here and read by the sourced cmd_apply.
 # shellcheck disable=SC2034
 set -uo pipefail
@@ -296,6 +298,34 @@ if grep -Fxq '<!-- agent-inbox-moved to=120 -->' <<<"${notice}" && grep -Fq 'Pin
 else t_fail "rotation: the notice on the old inbox is '${notice}'"; fi
 expect_call "rotation: the old inbox is closed" "issue close 99"
 if grep -Fq "${RD} is listed on #99, but no request comment" "${TMP}/rotate.log"; then t_pass "rotation: a listed request with no bot comment is logged, not moved"; else t_fail "rotation: $(cat "${TMP}/rotate.log")"; fi
+
+# #1381 (sproobo-v6): a request over 60000 bytes is cut when it moves. Byte 60000 (of the whole
+# comment and of the text after its marker line) falls inside a code span whose mention the
+# sanitiser kept; cut as it was, the copy would end in an open span and a live `@acme/team`.
+BIG_A="$(python3 - "${RA}" <<'PY'
+import sys
+r = sys.argv[1]
+head = "<!-- agent-req:%s role=coder issue=7 kind=blocked -->\n### %s · coder · #7\n\n" % (r, r)
+pad = "> line\n" * ((59800 - len(head.encode())) // 7)
+span = "> `pnpm --filter @acme/team " + "x" * 400 + "`\n"
+sys.stdout.write(head + pad + span + "> end\n\n_Moved from #98, the previous inbox._\n<!-- agent-req-moved from=98 -->")
+PY
+)"
+OLD_C="$(jq -c --arg b "${BIG_A}" '.[0].body = $b' <<<"${OLD_COMMENTS}")"
+# GitHub confirms the span, as it would for the uncut text, so a sanitiser that keeps mentions in code
+# would keep this one; only rewriting every mention in the cut copy passes.
+expect "rotation, long request: the new inbox" "$(OLD_C="${OLD_C}" rotate_case stub_gh_on 'api -X POST markdown --input -' \
+  '<p><a class="user-mention" href="https://github.com/octocat">@octocat</a></p><p><code>x</code></p>')" 120
+moved="$(stub_gh_last_body 'issue comment 120 *')"
+expect "rotation, long request: the copy keeps the request marker line" "$(head -1 <<<"${moved}")" "$(head -1 <<<"${BIG_A}")"
+expect "rotation, long request: the copy still ends with the moved line" "$(tail -1 <<<"${moved}")" '<!-- agent-req-moved from=99 -->'
+expect "rotation, long request: the copy still names the inbox before that" "$(grep -cFx '<!-- agent-req-moved from=98 -->' <<<"${moved}")" 1
+expect "rotation, long request: the mention cut out of its code span is rewritten" "$(grep -c '@-acme/team' <<<"${moved}")" 1
+expect "rotation, long request: no live mention is left" "$(grep -cE '(^|[^[:alnum:]])@[[:alnum:]]' <<<"${moved}")" 0
+if [[ "$(printf '%s' "${moved}" | wc -c)" -le 60500 ]] && grep -q 'truncated at 60000 bytes' <<<"${moved}"; then
+  t_pass "rotation, long request: the copy is cut to fit"
+else t_fail "rotation, long request: copy of $(printf '%s' "${moved}" | wc -c) bytes"; fi
+OLD_C=''
 
 # A command on the closed old inbox for a moved request: the notice's marker makes it a no-op.
 approve_case "$(jq -s . <(cj 'gatehand[bot]' "${REQ_A}") <(cj 'gatehand[bot]' "${notice}"))" 0 "/approve ${RA}"

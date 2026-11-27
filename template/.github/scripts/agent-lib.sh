@@ -245,21 +245,42 @@ renders_without_mentions() {
   [[ "$(grep -c . <<<"${links}")" -eq 1 ]] && grep -Fq "href=\"https://github.com/${AGENT_MENTION_CONTROL}\"" <<<"${links}"
 }
 
+# agent_defang <in >out: every mention rewritten, in code or not, and `<!--` escaped. Cutting its output
+# cannot bring a mention back, which is what inbox_rotate relies on.
+agent_defang() {
+  local in out
+  in="$(mktemp)" out="$(mktemp)"
+  cat >"${in}"
+  if ! _agent_sanitize_py plain <"${in}" >"${out}"; then
+    agent_log "agent_sanitize: ${AGENT_PYTHON:-python3} did not run; rewriting every mention with sed"
+    LC_ALL=C sed -E \
+      -e 's/<!--/\&lt;!--/g' \
+      -e 's/(^|[^[:alnum:]])@([[:alnum:]])/\1@-\2/g' <"${in}" >"${out}"
+  fi
+  cat "${out}"
+  rm -f "${in}" "${out}"
+}
+
 agent_sanitize() {
   local in all code
   in="$(mktemp)" all="$(mktemp)" code="$(mktemp)"
   cat >"${in}"
-  if ! _agent_sanitize_py plain <"${in}" >"${all}"; then
-    agent_log "agent_sanitize: ${AGENT_PYTHON:-python3} did not run; rewriting every mention with sed"
-    LC_ALL=C sed -E \
-      -e 's/<!--/\&lt;!--/g' \
-      -e 's/(^|[^[:alnum:]])@([[:alnum:]][[:alnum:]-]*)/\1@-\2/g' <"${in}" >"${all}"
-  elif _agent_sanitize_py <"${in}" >"${code}" && ! cmp -s "${code}" "${all}" \
+  agent_defang <"${in}" >"${all}"
+  if _agent_sanitize_py <"${in}" >"${code}" && ! cmp -s "${code}" "${all}" \
     && renders_without_mentions "${code}"; then
     cp "${code}" "${all}"
   fi
   cat "${all}"
   rm -f "${in}" "${all}" "${code}"
+}
+
+# agent_note_cap: the byte cap for a model's blocked note. The inbox request quotes the sanitised note
+# line by line, which can triple it (an empty line becomes `> `), and inbox_rotate has to cut a request
+# comment over 60000 bytes. 19000 keeps three times the note, the framing and the marker under that.
+agent_note_cap() {
+  local max
+  max="$(policy '.maxCommentBytes')"
+  if [[ "${max}" =~ ^[0-9]+$ ]] && ((max < 19000)); then printf '%s\n' "${max}"; else printf '19000\n'; fi
 }
 
 # agent_cap <bytes>: stdin -> stdout, truncated to at most <bytes>, with a note when it was.
@@ -640,7 +661,7 @@ inbox_bot_bodies() {
 # the notice and not listed; the notice's own markers are not answers. The App cannot pin issues: the
 # notice asks the owner to pin the new one.
 inbox_rotate() {
-  local old="$1" count="$2" bot list target n who old_body old_c new_c new_body line req c note
+  local old="$1" count="$2" bot list target n who old_body old_c new_c new_body line req c note prior
   local lines="" incomplete=0 moved_mark answers='<!-- agent-answer:'
   local carried=()
   bot="$(policy '.botLogin')"
@@ -686,8 +707,22 @@ inbox_rotate() {
         continue
       fi
       note="$(mktemp)"
-      # Capped, so a request near GitHub's 65,536-character limit still fits with the note.
-      { printf '%s' "${c}" | agent_cap 60000; printf '\n\n_Moved from #%s, the previous inbox._\n<!-- agent-req-moved from=%s -->\n' "${old}" "${old}"; } >"${note}"
+      # Copied whole when it fits. A longer one is cut, so a request near GitHub's 65,536-character
+      # limit still fits with the note; but cutting sanitised text can cut a code span open and make a
+      # mention in it live, so the cut copy has every mention rewritten first (its marker line kept).
+      {
+        if [[ "$(printf '%s' "${c}" | wc -c)" -le 60000 ]]; then
+          printf '%s' "${c}"
+        else
+          printf '%s\n' "${c%%$'\n'*}"
+          printf '%s' "${c#*$'\n'}" | agent_defang | agent_cap 60000
+          # The cut may drop, and agent_defang escapes, the lines naming earlier inboxes; moved_from
+          # (agent-inbox.sh) needs every one of them, so they are carried over as they were.
+          prior="$(grep -E '^<!-- agent-req-moved from=[0-9]+ -->$' <<<"${c}" || true)"
+          [[ -z "${prior}" ]] || printf '\n\n%s' "${prior}"
+        fi
+        printf '\n\n_Moved from #%s, the previous inbox._\n<!-- agent-req-moved from=%s -->\n' "${old}" "${old}"
+      } >"${note}"
       if ! gh issue comment "${target}" --body-file "${note}" >/dev/null; then
         agent_log "inbox: could not move ${req} to #${target}"
         incomplete=1
