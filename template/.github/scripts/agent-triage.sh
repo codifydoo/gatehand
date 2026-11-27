@@ -100,7 +100,8 @@ triage_one() {
     rm -f "${body}"
     return "${rc}"
   fi
-  # Backticked, and a path holds no backtick or space (location_paths), so none can mention or link.
+  # Backticked, and a path holds no backtick or space (location_paths), so none renders a mention or
+  # link; agent_sanitize below still rewrites the bot names that act on raw text (`@claude`, …).
   closed="$(jq -r --argjson res "$(closed_path_res)" "${JQ_ISSUE_DEFS}"'
     locations_closed($res) // [] | (.[:10] | map("`\(.)`") | join(", ")) + (if length > 10 then ", …" else "" end)
   ' <<<"${json}")" \
@@ -108,8 +109,8 @@ triage_one() {
   if [[ -n "${closed}" ]]; then
     # No label: agent:ready would sit in the queue for the pick to skip, and agent:candidate would ask
     # a person to queue what the coder cannot change.
-    printf '<!-- agent-triage:closed-paths -->\nA %s-severity Claude Security finding whose every location is in a path an agent may not touch (`.github/agents/protected-paths.txt`): %s. Triage did not queue it, because a coder run could only end blocked. A person fixes it. If the fix belongs somewhere else, or a writer'"'"'s `agent:allow-protected` opens these paths, start the coder on it by name (the scheduled pick skips an issue whose every location is closed to it):\n\n```bash\ngh workflow run agent-coder.yml --repo %s --ref %s -f issue=%s\n```\n' \
-      "${sev}" "${closed}" \
+    printf '<!-- agent-triage:closed-paths -->\nA %s-severity Claude Security finding whose every location is in a path an agent may not touch (`.github/agents/protected-paths.txt`): %s. Triage did not queue it, because a coder run could only end blocked. A person fixes it. If the fix belongs somewhere else, start the coder on it by name (the scheduled pick skips an issue whose every location is closed to it):\n\n```bash\ngh workflow run agent-coder.yml --repo %s --ref %s -f issue=%s\n```\n' \
+      "${sev}" "$(printf '%s' "${closed}" | agent_sanitize)" \
       "${GH_REPO}" "$(policy '.runnerRef')" "${n}" >"${body}"
     if triage_comment "${n}" "${body}"; then echo "#${n}: every location closed (${closed})"; else echo "#${n}: comment failed"; rc=1; fi
     rm -f "${body}"

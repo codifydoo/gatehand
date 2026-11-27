@@ -7,9 +7,10 @@
   tripped one repository's breaker. The signal is the import's own `## Locations` list: when every
   path in it matches a `!` glob in `protected-paths.txt` (or the floor), or a protected glob while
   the issue has no `agent:allow-protected`, triage leaves one `closed-paths` comment and no label
-  (at any severity), and the pick, the kick and the re-check after a claim skip it, with the paths in
-  the log line. A location it cannot read as a path, or no list at all, counts as open, so such an
-  issue is queued as before. A dispatch by name still takes it. Issues without a Locations list, and
+  (at any severity), and the pick and its re-check after a claim skip it, with the paths in the log
+  line (with `parallelism` above 1 the kick does not count it as queued). Any line of the list it
+  cannot read as one path bullet, or no list at all, counts as open, so such an issue is queued as
+  before. Issues that are not Claude Security imports are never skipped this way. A dispatch by name still takes it. Issues without a Locations list, and
   fixes that need closed files the list does not name, are not caught. Installed repositories need
   an update to get it.
 

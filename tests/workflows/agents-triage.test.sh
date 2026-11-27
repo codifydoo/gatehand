@@ -179,6 +179,8 @@ label="Low with one location the coder may change: fast-tracked as before"; chec
 label="without a closed-paths comment"; check_not marker closed-paths
 tri_case "$(jq -c '.body += "\n## Locations\n\n- the review workflow\n"' <<<"$(withloc "$(ijson 5 Low)" .github/workflows/a.yml)")"
 label="Low with a location it cannot read: fast-tracked (an unread location is not a closed one)"; check marker fast-track
+tri_case "$(withloc "$(ijson 5 Low)" .github/@claude deploy/@cursor.sh)"
+if stub_gh_any_body '@claude' || stub_gh_any_body '@cursor'; then t_fail "a bot name in a path reaches the comment raw"; else t_pass "a bot name in a path is rewritten (those bots read raw text)"; fi
 COMMENT_FAILS=1 tri_case "$(withloc "$(ijson 5 Low)" .github/workflows/a.yml)"
 expect "a closed-paths comment that did not post fails the run" "$(cat "${TMP}/rc")" 1
 expect_no_call "and labels nothing" "issue edit 5"

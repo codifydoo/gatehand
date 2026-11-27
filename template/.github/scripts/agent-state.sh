@@ -145,8 +145,10 @@ cmd_gate() {
 # - [`path/to/file.yml:12-30`](https://…)) and gives the paths when there is at least one and the
 # coder could touch none of them: each matches a never glob, or a protected glob while the issue has
 # no `agent:allow-protected` (the outbox checks who put that label; a skip need not). $res is
-# agent-lib.sh closed_path_res. A bullet it cannot read as a path, or no list at all, gives null: an
-# unread location is not a closed one. agent-triage.sh asks the same question before it queues.
+# agent-lib.sh closed_path_res. Every non-blank line of the section must read as one such bullet: any
+# other line (a sub-bullet, a numbered item, prose, a fence), a path with a space, an absolute or a
+# `..` path, no list at all, or a body that is not an import, gives null: an unread location is not a
+# closed one. agent-triage.sh asks the same question before it queues.
 JQ_ISSUE_DEFS='
   def names: [.labels[]?.name];
   def has($l): (names | index($l)) != null;
@@ -170,22 +172,23 @@ JQ_ISSUE_DEFS='
     (.body // "") | split("\n") | map(sub("\r$"; ""))
     | foreach .[] as $l ({in: false, out: null};
         if ($l | test("^#{1,2} ")) then {in: ($l | test("^## +Locations[ \t]*$")), out: null}
-        elif .in and ($l | test("^[-*] ")) then {in: true, out: $l}
+        elif .in and ($l | test("\\S")) then {in: true, out: $l}
         else .out = null end;
         .out)
     | select(. != null)
-    | ((capture("^[-*] +\\[`(?<p>[^`]+)`\\]") | .p | sub(":[0-9]+(-[0-9]+)?$"; "")) // null)
+    | ((capture("^[-*] +\\[`(?<p>[^`]+)`\\]\\(") | .p | sub(":[0-9]+(-[0-9]+)?$"; "")) // null)
     | if . != null and test("^[^/\\s][^\\s]*$") and (test("(^|/)\\.\\.(/|$)") | not) then . else null end;
   def closed_path($res; $allow):
     . as $p
     | ($res.never | any(. as $r | $p | test($r)))
       or (($allow | not) and ($res.protected | any(. as $r | $p | test($r))));
   def locations_closed($res):
+    if ((.body // "") | test("^> Imported from Claude Security") | not) then null else
     has("agent:allow-protected") as $allow
     | [location_paths] as $ps
     | if ($ps | length) == 0 or ($ps | any(. == null)) then null
       elif ($ps | all(closed_path($res; $allow))) then ($ps | unique)
-      else null end;
+      else null end end;
   def skip_reason($max; $res):
     if (.state // "OPEN") != "OPEN" then "not open"
     elif busy then "held, locked or already has a PR"

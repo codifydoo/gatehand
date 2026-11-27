@@ -313,7 +313,7 @@ cmd_kick >/dev/null 2>&1
 expect "kick: issues the pick would skip start no runs (1 of 3 takeable)" "$(grep -c . "${FAKE}/dispatches")" 1
 # Nor issues whose every location is closed to the coder (agent-state.sh locations_closed).
 reset_fake 0 0 1 2 3
-jq '(.[] | select(.number != 1) | .body) = "## Locations\n\n- [`.github/workflows/a.yml:1-2`](u)\n\n## Recommendation\n\nx"' \
+jq '(.[] | select(.number != 1) | .body) = "> Imported from Claude Security.\n\n## Locations\n\n- [`.github/workflows/a.yml:1-2`](u)\n\n## Recommendation\n\nx"' \
   "${FAKE}/issues.json" >"${FAKE}/i" && mv "${FAKE}/i" "${FAKE}/issues.json"
 cmd_kick >/dev/null 2>&1
 expect "kick: issues whose every location is closed start no runs (1 of 3 takeable)" "$(grep -c . "${FAKE}/dispatches")" 1

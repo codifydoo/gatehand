@@ -13,9 +13,10 @@
 #      be read): a writer's hold or close stands until a writer lifts it; agent:pr on an issue is no
 #      stop; stop_blockers refuses a kind it does not know. A named dispatch skips the rest.
 #   (1b) The gate refuses a run on the default branch, and one whose runner-ref workflow is stale.
-#   (2c) An import whose every  path the coder may not touch (a never glob, or a
+#   (2c) An import whose every location is in a path the coder may not touch (a never glob, or a
 #      protected one without agent:allow-protected) is skipped by the pick; a location it cannot
-#      read, or none, counts as open; a dispatch by name still takes it. jq's copy of the globs
+#      read, or none, counts as open, and so does any line of the list that is not one readable bullet;
+#      a body that is not an import is never skipped this way; a dispatch by name still takes it. jq's copy of the globs
 #      agrees with is_never/is_protected.
 #   3. Finalize leaves exactly one state: a PR → agent:pr-open; a question or a protected path →
 #      agent:blocked + agent:needs-human with an inbox request; a failure with attempts left →
@@ -374,7 +375,7 @@ expect "pick: a dispatch that names the issue still takes it" "$(grep '^issue=' 
 # a run can only end blocked: three in a row once did, and tripped the breaker. The pick (and the
 # kick, and the re-check after a claim) skips such an issue; a dispatch by name still takes it. The
 # fixture list has a non-floor `!` glob and a plain glob, so the file is read, not just the floor.
-printf '%s\n' 'CLAUDE.md' '!ops/**' 'deploy/**' >"${TMP}/closed-paths"
+printf '%s\n' 'CLAUDE.md' '!ops/**' 'deploy/**' '!db/*.sql' '!db/v?/x' >"${TMP}/closed-paths"
 saved_protected="${AGENT_PROTECTED_FILE}"
 AGENT_PROTECTED_FILE="${TMP}/closed-paths"
 locbody() { # locbody <bullet>...: an import-shaped body; a bullet starting `=` is used as written
@@ -398,15 +399,22 @@ expect "closed: with agent:allow-protected the protected one is open" "$(closed_
 expect "closed: but agent:allow-protected opens no never path" "$(closed_of 'agent:allow-protected' .github/a.yml ops/x.sh)" ".github/a.yml ops/x.sh"
 expect "closed: one location the coder may change makes it open" "$(closed_of '' .github/a.yml src/app.ts)" open
 expect "closed: a bullet it cannot read as a path counts as open" "$(closed_of '' .github/a.yml '=- somewhere in the workflows')" open
-expect "closed: a path with a space counts as open" "$(closed_of '' .github/a.yml 'src/my file.ts')" open
-expect "closed: an absolute path counts as open" "$(closed_of '' .github/a.yml /etc/passwd)" open
+# Paths every glob would close, so only the path filter makes them open.
+expect "closed: a path with a space counts as open" "$(closed_of '' '.github/my file.yml')" open
+expect "closed: an absolute path counts as open" "$(closed_of '' .github/a.yml /x/CLAUDE.md)" open
+for odd in '  - [`src/app.ts:5`](u)' '1. [`src/app.ts:5`](u)' '+ [`src/app.ts:5`](u)' 'Also src/app.ts' '```' '- [`src/app.ts:5`] (u)'; do
+  expect "closed: a line it cannot read as one bullet (${odd}) counts as open" "$(closed_of '' .github/a.yml "=${odd}")" open
+done
+expect "closed: a body that is not a Claude Security import is never skipped this way" \
+  "$(jq -r --argjson res "$(closed_path_res)" "${JQ_ISSUE_DEFS}"'locations_closed($res) // "open"' \
+    <<<"$(issue 9 x '' "$(locbody .github/a.yml | tail -n +2)")")" open
 expect "closed: a .. path counts as open" "$(closed_of '' .github/a.yml .github/../src/a.ts)" open
 expect "closed: no Locations section is open" \
   "$(jq -r --argjson res "$(closed_path_res)" "${JQ_ISSUE_DEFS}"'locations_closed($res) // "open"' <<<"$(issue 9 x '' "${DONE}")")" open
 expect "closed: an empty Locations section is open" "$(closed_of '')" open
 expect "closed: bullets after the next ## heading are not locations" \
   "$(closed_of '' .github/a.yml '=' '=## Notes' '=' '=- [`src/x.ts:1-2`](u)')" ".github/a.yml"
-expect "closed: a ### heading inside the section does not end it" \
+expect "closed: a ### heading inside the section does not end it (and, unread, counts as open)" \
   "$(closed_of '' .github/a.yml '=### More' '=- [`src/b.ts:1`](u)')" open
 expect "closed: CRLF line ends are read" \
   "$(jq -r --argjson res "$(closed_path_res)" "${JQ_ISSUE_DEFS}"'locations_closed($res) // ["open"] | join(" ")' \
@@ -414,7 +422,8 @@ expect "closed: CRLF line ends are read" \
 # One matcher, two engines: jq reads glob_to_ere's regexes the way bash's =~ does.
 agree=ok
 for p in .github/a.yml .github .githubx/a ops/a ops opsx/a deploy/a/b.sh deploy CLAUDE.md docs/CLAUDE.md a/.claude/x \
-  .mcp.json src/a.ts README.md .agents-main .agents-main/x 'src/a+b(c).ts' 'x.github/a'; do
+  .mcp.json src/a.ts README.md .agents-main .agents-main/x 'src/a+b(c).ts' 'x.github/a' \
+  db/a.sql db/x/a.sql db/.sql db/a.sqlx db/v1/x db/v12/x db/v/x; do
   want=open
   if is_never "${p}" || is_protected "${p}"; then want=closed; fi
   got="$(jq -rn --arg p "${p}" --argjson res "$(closed_path_res)" "${JQ_ISSUE_DEFS}"'if ($p | closed_path($res; false)) then "closed" else "open" end')"
